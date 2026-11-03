@@ -1,8 +1,8 @@
 [Unit]
-Description=AI DJ data backup every minute
+Description=AI DJ data backup every hour
 
 [Timer]
-OnCalendar=*-*-* *:*:00
+OnCalendar=*-*-* *:00:00
 AccuracySec=10s
 Persistent=true
 Unit=aidj-state-backup.service

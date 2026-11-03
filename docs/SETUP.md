@@ -96,7 +96,7 @@ sudo python3 deploy/install_services.py \
 - `aidj-music-web.service` — API и интерфейс, только `127.0.0.1:18782`.
 - `aidj-music-tunnel.service` — временный HTTPS-адрес Cloudflare.
 - `aidj-youtube-health.timer` — проверка загрузки ежедневно в 10:00 Europe/Moscow.
-- `aidj-state-backup.timer` — копирование данных на Диск каждую минуту при изменениях.
+- `aidj-state-backup.timer` — копирование данных на Диск раз в час при изменениях.
 
 ```bash
 systemctl is-active aidj-codex-music.service aidj-music-web.service aidj-music-tunnel.service
