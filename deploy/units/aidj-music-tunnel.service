@@ -1,0 +1,26 @@
+[Unit]
+Description=AI DJ HTTPS transport
+After=network-online.target aidj-music-web.service
+Wants=network-online.target aidj-music-web.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+Environment=GOMAXPROCS=2
+ExecStart=@PROJECT@/.venv/bin/python -u -m aidj.web_tunnel
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+MemoryMax=256M
+MemoryLimit=256M
+TasksMax=32
+Nice=10
+BlockIOWeight=10
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

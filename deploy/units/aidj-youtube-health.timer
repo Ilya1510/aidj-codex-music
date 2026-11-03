@@ -1,0 +1,10 @@
+[Unit]
+Description=AI DJ check YouTube every morning
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 Europe/Moscow
+Persistent=true
+Unit=aidj-youtube-health.service
+
+[Install]
+WantedBy=timers.target

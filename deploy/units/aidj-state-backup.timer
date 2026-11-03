@@ -1,0 +1,11 @@
+[Unit]
+Description=AI DJ data backup every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=10s
+Persistent=true
+Unit=aidj-state-backup.service
+
+[Install]
+WantedBy=timers.target

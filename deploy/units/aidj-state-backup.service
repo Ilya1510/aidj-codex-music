@@ -1,0 +1,23 @@
+[Unit]
+Description=AI DJ data backup to Yandex Disk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+ExecStart=@PROJECT@/.venv/bin/python -u -m aidj.backup upload
+TimeoutStartSec=180
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+MemoryHigh=256M
+MemoryMax=512M
+MemoryLimit=512M
+TasksMax=16
+Nice=10
+IOWeight=10
+BlockIOWeight=10

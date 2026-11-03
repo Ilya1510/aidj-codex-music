@@ -1,0 +1,25 @@
+[Unit]
+Description=AI DJ personal music Mini App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+ExecStart=@PROJECT@/.venv/bin/python -u -m aidj.webapp
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+MemoryMax=512M
+MemoryLimit=512M
+TasksMax=32
+Nice=10
+BlockIOWeight=10
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+[Unit]
+Description=AI DJ Codex Music personal Telegram bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+# This VM uses cgroup v1. Set its soft limit alongside the v2 settings below.
+ExecStartPre=+/bin/sh -c 'if [ -e /sys/fs/cgroup/memory/system.slice/aidj-codex-music.service/memory.soft_limit_in_bytes ]; then echo 1073741824 > /sys/fs/cgroup/memory/system.slice/aidj-codex-music.service/memory.soft_limit_in_bytes; fi'
+ExecStart=@PROJECT@/.venv/bin/python -u -m aidj.bot
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+MemoryHigh=1G
+MemoryMax=2G
+MemoryLimit=2G
+TasksMax=64
+Nice=10
+IOWeight=10
+BlockIOWeight=10
+OOMPolicy=stop
+
+[Install]
+WantedBy=multi-user.target

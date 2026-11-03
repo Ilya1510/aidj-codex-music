@@ -1,0 +1,29 @@
+[Unit]
+Description=AI DJ daily YouTube download check
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+ExecStartPre=+/bin/sh -c 'if [ -e /sys/fs/cgroup/memory/system.slice/aidj-youtube-health.service/memory.soft_limit_in_bytes ]; then echo 536870912 > /sys/fs/cgroup/memory/system.slice/aidj-youtube-health.service/memory.soft_limit_in_bytes; fi'
+ExecStart=@PROJECT@/.venv/bin/python -u -m aidj.youtube_health
+Restart=on-failure
+RestartSec=15min
+TimeoutStartSec=300
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+MemoryHigh=512M
+MemoryMax=768M
+MemoryLimit=768M
+TasksMax=32
+Nice=10
+IOWeight=10
+BlockIOWeight=10
+OOMPolicy=stop
