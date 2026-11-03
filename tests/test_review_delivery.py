@@ -2,10 +2,10 @@ import hashlib
 import json
 
 from aidj import reviews as R
-from aidj.review_delivery import schedule_saves,process_save,accepted,deliver_notices,suggestions_playlist
+from aidj.review_delivery import schedule_saves,process_save,accepted,removed,deliver_notices,suggestions_playlist
 from aidj.store import claim_job,job_update
 from aidj.telegram import TelegramError
-from aidj.web_catalog import catalog,mutate,revision
+from aidj.web_catalog import catalog,mutate,revision,sync_assets
 from tests.test_playlists import env
 from tests.test_reviews import setup
 
@@ -177,3 +177,89 @@ def test_guest_cannot_forge_background_save_to_mutate_owner_library(setup):
     assert not db.execute('SELECT 1 FROM app_deliveries').fetchone()
     assert db.execute('SELECT state FROM review_saves').fetchone()[0]=='queued'
     assert manager.list()[0]['tracks']==1
+
+
+def removal_setup(setup):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    sync_assets(db);item=R.remember(db,result)
+    for uid,value in [(101,-1),(202,1),(303,0),(404,-1)]:
+        R.ensure_user(db,uid,uid)
+        db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],item,uid,value,1))
+    alias=R.remember(db,{**result,'track':{**result['track'],'id':'alias'}})
+    # The latest vote replaces an earlier dislike for the same audio.
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],alias,404,1,2))
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],alias,101,-1,2));db.commit()
+    disk.move=lambda source,target:disk.files.__setitem__(target,disk.files.pop(source))
+    body={'opId':'owner-remove-test','action':'remove','playlistId':p['id'],'trackId':item,'revision':revision(db,p['id'])}
+    return body
+
+
+def test_verified_removal_notifies_latest_dislikers_once_without_losing_votes(setup,tmp_path):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    body=removal_setup(setup)
+    mutate(settings,db,disk,body,tmp_path);mutate(settings,db,disk,body,tmp_path)
+    assert db.execute('SELECT COUNT(*) FROM review_removal_notices').fetchone()[0]==1
+    assert deliver_notices(db,bot)==1 and deliver_notices(db,bot)==0
+    assert [r[0] for r in bot.sent]==[101]
+    assert 'убрана из общего плейлиста «Volleyball»' in bot.sent[0][1]
+    assert not manager.contains(p['id'],result)
+    assert db.execute('SELECT COUNT(*) FROM review_votes').fetchone()[0]==6
+    assert any('/_aidj_removed/' in path for path in disk.files)
+
+
+def test_failed_removal_does_not_notify_and_index_retry_does_not_duplicate(setup,tmp_path):
+    import pytest
+    settings,db,disk,bot,manager,result,p,*_=setup
+    body=removal_setup(setup);move=disk.move
+    def fail(*a,**kw):raise RuntimeError('Disk unavailable')
+    disk.move=fail
+    with pytest.raises(RuntimeError):mutate(settings,db,disk,body,tmp_path)
+    assert not db.execute('SELECT 1 FROM review_removal_notices').fetchone()
+    disk.move=move;upload=disk.upload;disk.upload=fail
+    with pytest.raises(RuntimeError):mutate(settings,db,disk,body,tmp_path)
+    assert not db.execute('SELECT 1 FROM review_removal_notices').fetchone()
+    disk.upload=upload
+    mutate(settings,db,disk,body,tmp_path)
+    assert deliver_notices(db,bot)==1
+
+
+def test_other_playlist_removal_never_sends_shared_playlist_notice(setup,tmp_path):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    removal_setup(setup);other=manager.create('Other');manager.add(other['id'],result,tmp_path)
+    removed(db,other['id'],result['md5'],'Song','other-operation')
+    assert not db.execute('SELECT 1 FROM review_removal_notices').fetchone()
+
+
+def test_removal_notification_retry_blocked_recovery_and_readded_song_cancellation(setup,tmp_path):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    body=removal_setup(setup);mutate(settings,db,disk,body,tmp_path)
+    class Offline:
+        def message(self,*a):raise TelegramError('Не удалось соединиться с Telegram.')
+    assert deliver_notices(db,Offline())==0
+    assert db.execute('SELECT attempts FROM review_removal_notices').fetchone()[0]==1
+    db.execute('UPDATE review_removal_notices SET retry_at=0');db.commit()
+    class Blocked:
+        def message(self,*a):raise TelegramError('Telegram не принял sendMessage (код 403).')
+    deliver_notices(db,Blocked())
+    assert db.execute('SELECT state FROM review_removal_notices').fetchone()[0]=='blocked'
+    R.remember_profile(db,{'id':101,'first_name':'Friend'})
+    assert deliver_notices(db,bot)==1
+    # A new removal event can notify again, but cancelled actions cannot.
+    manager.add(p['id'],R.item_result(db,body['trackId']),tmp_path)
+    body.update(opId='owner-remove-again',revision=revision(db,p['id']))
+    mutate(settings,db,disk,body,tmp_path)
+    manager.add(p['id'],R.item_result(db,body['trackId']),tmp_path)
+    assert deliver_notices(db,bot)==0
+    assert db.execute("SELECT state FROM review_removal_notices WHERE operation_id='owner-remove-again'").fetchone()[0]=='cancelled'
+
+
+def test_owner_app_vote_can_notify_without_starting_bot_review_mode(setup,tmp_path):
+    from aidj.review_web import request
+    settings,db,disk,bot,manager,result,p,*_=setup
+    sync_assets(db);item=R.remember(db,result)
+    request(db,{'action':'vote','opId':'owner-app-negative','trackId':item,'value':-1})
+    assert not db.execute('SELECT 1 FROM review_users').fetchone()
+    disk.move=lambda source,target:disk.files.__setitem__(target,disk.files.pop(source))
+    mutate(settings,db,disk,{'action':'remove','opId':'owner-app-remove','playlistId':p['id'],
+        'trackId':item,'revision':revision(db,p['id'])},tmp_path)
+    assert deliver_notices(db,bot)==1 and bot.sent[-1][0]==22

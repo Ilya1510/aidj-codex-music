@@ -41,7 +41,7 @@ def main():
             payload=request.post_data_json;edits.append(payload);p=next(p for p in data['playlists'] if p['id']==payload['playlistId'])
             assert payload['action']=='add';p['trackIds'].append(payload['trackId']);p['revision']='changed';body=data
         elif path=='library-version':body={'revision':'qa-'+str(len(votes))}
-        elif path=='android-version':body={'versionCode':10,'versionName':'0.8.0','url':'https://example.invalid/AI-DJ.apk'}
+        elif path=='android-version':body={'versionCode':11,'versionName':'0.8.1','url':'https://example.invalid/AI-DJ.apk'}
         else:body={'ok':True}
         route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
     script=r'''(()=>{
@@ -67,17 +67,32 @@ def main():
                 context.add_init_script(script);page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
                 page.route('**/api/**',route_api);page.goto(f'http://127.0.0.1:{server.server_port}/',wait_until='networkidle')
                 page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 3 из 3'
                 stage='sort';page.get_by_role('button',name='По порядку плейлиста',exact=True).click();page.get_by_label('Сортировка песен').select_option('likes')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row strong').all_text_contents()==['Второй трек','Первый трек','Без оценок']
+                stage='net-score';page.get_by_role('button',name='Больше лайков',exact=True).click()
+                minimum=page.get_by_label('Минимум: лайки минус дизлайки');minimum.fill('2');minimum.press('Tab')
+                assert page.locator('#sheet .filter-count').inner_text()=='После фильтров: 1 из 3'
+                assert page.locator('main .song-row strong').all_text_contents()==['Второй трек']
+                minimum.fill('4');minimum.press('Tab')
+                assert page.locator('#sheet .filter-count').inner_text()=='После фильтров: 0 из 3'
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 0 из 3'
+                minimum.fill('-1');minimum.press('Tab')
+                assert page.locator('#sheet .filter-count').inner_text()=='После фильтров: 3 из 3'
+                minimum.fill('');minimum.press('Tab')
+                page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 stage='filters';page.get_by_role('button',name='Больше лайков',exact=True).click();page.get_by_label('Без дизлайков').check();page.get_by_label('Фильтр по оценкам').select_option('rated')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row strong').all_text_contents()==['Первый трек']
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 1 из 3'
                 page.get_by_role('button',name='Больше лайков · фильтры включены',exact=True).click();page.get_by_label('Фильтр по оценкам').select_option('all');page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 stage='filtered-play';page.get_by_role('button',name='Слушать',exact=True).click();page.locator('#mini-play[aria-label="Пауза"]').wait_for()
                 assert page.evaluate('window.__state.player.queue.entries.map(e=>e.trackId)')==[songs[0]['id'],songs[2]['id']]
                 assert data['playlists'][0]['trackIds']==[s['id'] for s in songs[:3]] and not edits
-                page.locator('#now-playing').click();page.locator('#full-content').get_by_role('button',name='Кто оценил',exact=True).click()
+                page.locator('#now-playing').click()
+                assert not any(x in page.locator('#full-content').inner_text().split() for x in ['null','undefined','true','false'])
+                page.locator('#full-content').get_by_role('button',name='Кто оценил',exact=True).click()
                 page.get_by_role('button',name='@friend_like',exact=True).wait_for()
                 stage='offline-vote';context.set_offline(True);page.wait_for_function('()=>!navigator.onLine')
                 page.locator('#sheet').get_by_role('button',name='Не нравится',exact=True).click();page.locator('#sheet .rating-vote[aria-label="Не нравится"][aria-pressed=true]').wait_for()
@@ -97,10 +112,25 @@ def main():
                 assert songs[3]['id'] in data['playlists'][0]['trackIds'] and len(edits)==1
                 page.get_by_role('button',name='Снять с разметки',exact=True).click();page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row').count()==0
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 0 из 0'
                 assert not page.evaluate('window.__calls.some(x=>x.type==="download")')
+                stage='review-player';page.get_by_role('button',name='Размечать',exact=True).click()
+                page.locator('#full-content').get_by_role('button',name='Закончить разметку',exact=True).wait_for()
+                assert not any(x in page.locator('#full-content').inner_text().split() for x in ['null','undefined','true','false'])
+                page.locator('#full-content').get_by_role('button',name='Закончить разметку',exact=True).click()
+                assert not any(x in page.locator('#full-content').inner_text().split() for x in ['null','undefined','true','false'])
+                stage='pagination-count'
+                for n in range(80):
+                    extra={**songs[2],'id':f'{n+1000:024x}','md5':f'{n+1000:032x}','title':'Проверка '+str(n)}
+                    songs.append(extra);data['playlists'][0]['trackIds'].append(extra['id'])
+                page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                assert page.locator('main .song-row').count()==70
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 81 из 84'
+                page.get_by_label('Поиск музыки').fill('Проверка')
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 80 из 84'
                 assert not errors,errors
                 browser.close()
-            print('REVIEW_UI_PASSED sort filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
+            print('REVIEW_UI_PASSED sort net_score live_counts pagination_counts full_player_no_null filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
         except Exception as exc:
             print('REVIEW_UI_FAILED',stage,type(exc).__name__,str(exc)[:1600],flush=True);raise SystemExit(1)
         finally:server.shutdown();server.server_close();thread.join()

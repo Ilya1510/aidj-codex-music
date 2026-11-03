@@ -4,7 +4,7 @@ import {native,command,nativeFetch,NativeAudio,NativeDownloads} from './native.m
 import {LocalTransfer} from './transfer.mjs';
 import {segment,moveSegment,changeBoundary,parseTime,formatTime} from './segments.mjs';
 import {playbackSettings as normalisePlayback,fadeGain} from './playback.mjs';
-import {rating as reviewRating,selectRated,listSettings} from './ratings.mjs';
+import {rating as reviewRating,selectRated,listSettings,reviewOrder} from './ratings.mjs';
 
 const $ = id => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
@@ -182,7 +182,7 @@ function home() {
     grid.append(el('button',{class:'playlist-add',onclick:()=>newPlaylist()},icon('plus'),el('span',{},'Новый плейлист')));fragment.append(grid);
     fragment.append(el('div',{class:'section-heading'},el('h2',{},'Все треки'),el('span',{},count(data.tracks.length))));
   }
-  fragment.append(listTools(),trackList(filtered(data.tracks.map(x=>x.id))));return fragment;
+  fragment.append(listTools(data.tracks.map(x=>x.id)),trackList(filtered(data.tracks.map(x=>x.id))));return fragment;
 }
 function playlistPage() {
   const p=data.playlists.find(x=>x.id===selectedPlaylist);
@@ -196,14 +196,14 @@ function playlistPage() {
       const draft=editing; await edit('reorder',{playlistId:p.id,trackIds:draft.ids,revision:draft.revision});editing=null;render();toast('Порядок сохранён');
     },'button primary')));
     fragment.append(el('p',{class:'edit-hint'},'Перемещай песни стрелками, затем сохрани порядок.'));
-  } else fragment.append(searchBox(),listTools());
+  } else fragment.append(searchBox(),listTools(ids));
   fragment.append(trackList(filtered(ids),{playlist:p,number:true}));return fragment;
 }
 function savedPage() {
   const list=filtered(data.tracks.filter(isSaved).map(t=>t.id));
   const total=[...saved.values()].reduce((sum,x)=>sum+x.bytes,0);
   const fragment=document.createDocumentFragment();fragment.append(heading('На устройстве',`${count(saved.size)} · ${bytes(total)}`));
-  if(saved.size){fragment.append(el('div',{class:'toolbar'},button('Слушать','play',()=>startPlaylist(list.map(t=>t.id)),'button primary'),button('Шафл','shuffle',()=>startPlaylist(list.map(t=>t.id),0,true),'button')),searchBox(),listTools(),trackList(list));}
+  if(saved.size){fragment.append(el('div',{class:'toolbar'},button('Слушать','play',()=>startPlaylist(list.map(t=>t.id)),'button primary'),button('Шафл','shuffle',()=>startPlaylist(list.map(t=>t.id),0,true),'button')),searchBox(),listTools(data.tracks.filter(isSaved).map(t=>t.id)),trackList(list));}
   else fragment.append(empty('Музыка без сети','Нажми на значок загрузки рядом с песней или скачай плейлист целиком.',button('К плейлистам','folder',()=>navigate('home'),'button primary')));
   return fragment;
 }
@@ -392,7 +392,7 @@ function renderFull(){
   const part=segment(track),range=button('Выбрать фрагмент','edit',()=>rangeEditor(track),'button full');range.id='range-label';range.textContent='Фрагмент · '+formatTime(part.start)+'–'+formatTime(part.end);
   content.replaceChildren(top,artNode,el('div',{class:'player-title-row'},el('span',{class:'song-text'},el('strong',{},track.title),el('span',{},track.artist)),button(isSaved(track)?'Скачано':'Скачать',isSaved(track)?'check':'download',()=>download([track]),'icon-button'+(isSaved(track)?' saved-icon':''))),seek,
     el('div',{class:'times'},el('span',{id:'elapsed'},time(audio.currentTime)),el('span',{id:'total'},time(track.duration))),
-    ratingControls(track),reviewing?button('Закончить разметку',null,()=>{reviewing=false;renderFull();},'text-button'):null,range,
+    ratingControls(track),...(reviewing?[button('Закончить разметку',null,()=>{reviewing=false;renderFull();},'text-button')]:[]),range,
     el('div',{class:'transport'},shuffle,button('Предыдущая песня','previous',previous),play,button('Следующая песня','next',()=>next()),repeat),
     el('div',{class:'player-footer'},el('span',{},isSaved(track)?'На устройстве':'Яндекс Диск'),button('Очередь','queue',()=>{$('full-player').close();navigate('queue');},'button')));
   syncControls();progress();
@@ -429,24 +429,26 @@ function rangeEditor(track){
 }
 function optionsKey(){return view==='playlist'?'playlist:'+selectedPlaylist:view==='reviews'?'reviews:'+reviewTab:view;}
 function optionsForView(){return listSettings(listOptions[optionsKey()]||(view==='reviews'&&reviewTab==='all'?{sort:'dislikes'}:{}));}
-function listTools(){
+function filterCount(ids){return `После фильтров: ${filtered(ids).length} из ${ids.length}`;}
+function listTools(ids){
   const value=optionsForView(),names={default:'По порядку плейлиста',likes:'Больше лайков',dislikes:'Больше дизлайков',score:'По балансу оценок',votes:'Больше оценок'};
-  const filters=value.noDislikes||value.state!=='all'||value.minLikes>0;
-  return el('div',{class:'list-tools'},button(names[value.sort]+(filters?' · фильтры включены':''),'settings',listOptionsSheet,'button list-options-button'));
+  const filters=value.noDislikes||value.state!=='all'||value.minScore!==null;
+  return el('div',{class:'list-tools'},button(names[value.sort]+(filters?' · фильтры включены':''),'settings',()=>listOptionsSheet(ids),'button list-options-button'),el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids)));
 }
-function listOptionsSheet(){
+function listOptionsSheet(ids){
   const key=optionsKey(),value=optionsForView();
-  const save=async()=>{listOptions[key]=listSettings(value);await storage.putMeta('review-list-options',listOptions);shown=70;render();};
+  const counter=el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids));
+  const save=async()=>{listOptions[key]=listSettings(value);counter.textContent=filterCount(ids);shown=70;render();await storage.putMeta('review-list-options',listOptions);};
   const sorting=el('select',{'aria-label':'Сортировка песен'},...Object.entries({default:'Порядок плейлиста / добавления',likes:'Сначала больше лайков',dislikes:'Сначала больше дизлайков',score:'Баланс: лайки минус дизлайки',votes:'Сначала больше оценок'}).map(([id,label])=>el('option',{value:id,selected:value.sort===id},label)));
   sorting.addEventListener('change',()=>{value.sort=sorting.value;save().catch(showError);});
   const state=el('select',{'aria-label':'Фильтр по оценкам'},...Object.entries({all:'Все песни',rated:'Уже есть оценки',unrated:'Никто ещё не оценил','mine-missing':'Я ещё не оценил'}).map(([id,label])=>el('option',{value:id,selected:value.state===id},label)));
   state.addEventListener('change',()=>{value.state=state.value;save().catch(showError);});
   const no=el('input',{type:'checkbox',checked:value.noDislikes,'aria-label':'Без дизлайков',onchange:e=>{value.noDislikes=e.target.checked;save().catch(showError);}});
-  const minimum=el('input',{type:'number',min:0,max:10000,value:value.minLikes,'aria-label':'Минимум лайков',onchange:e=>{value.minLikes=Number(e.target.value);save().catch(showError);}});
+  const minimum=el('input',{type:'number',min:-10000,max:10000,step:1,value:value.minScore??'',placeholder:'Без ограничения','aria-label':'Минимум: лайки минус дизлайки',onchange:e=>{value.minScore=e.target.value===''?null:Number(e.target.value);save().catch(showError);}});
   showSheet('Сортировка и фильтры',el('label',{class:'review-field'},'Сортировать',sorting),el('label',{class:'review-field'},'Оценки',state),
-    el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум лайков',minimum),
+    el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум: лайки − дизлайки',minimum),counter,
     el('p',{class:'subtitle'},'Фильтры сохраняются сразу. «Слушать» и «Шафл» играют только подходящие песни.'),
-    button('Сбросить фильтры и сортировку',null,async()=>{listOptions[key]=listSettings(null);await storage.putMeta('review-list-options',listOptions);render();listOptionsSheet();},'button full'));
+    button('Сбросить фильтры и сортировку',null,async()=>{listOptions[key]=listSettings(null);await storage.putMeta('review-list-options',listOptions);render();listOptionsSheet(ids);},'button full'));
 }
 function ratingBadges(track){
   const r=ratingOf(track);
@@ -534,13 +536,13 @@ function reviewsPage(){
   const pool=new Set(info.poolTrackIds||[]);
   const list=data.tracks.filter(t=>reviewTab==='proposals'?ratingOf(t).proposals>0:pool.has(t.id)||ratingOf(t).total>0);
   const unique=[...new Map(list.map(t=>[t.md5,t])).values()];
-  fragment.append(searchBox(),listTools(),trackList(filtered(unique.map(t=>t.id))));return fragment;
+  fragment.append(searchBox(),listTools(unique.map(t=>t.id)),trackList(filtered(unique.map(t=>t.id))));return fragment;
 }
 async function startReview(){
   const pool=new Set(data.review?.poolTrackIds||[]),list=data.tracks.filter(t=>pool.has(t.id)&&ratingOf(t).mine===null);
-  const ids=[...new Map(list.map(t=>[t.md5,t.id])).values()];
+  const ids=reviewOrder([...new Map(list.map(t=>[t.md5,t])).values()],voteOverrides).map(t=>t.id);
   if(!ids.length){toast('Ты уже оценил все доступные песни');return;}
-  await startPlaylist(ids,0,true);reviewing=true;openFull();
+  await startPlaylist(ids);reviewing=true;openFull();
 }
 
 function showSheet(title,...children){activeReviewTrack=null;$('sheet-content').replaceChildren(el('div',{class:'sheet-head'},el('h2',{},title),button('Закрыть','close',()=>$('sheet').close())),...visibleChildren(children));if(!$('sheet').open)$('sheet').showModal();}

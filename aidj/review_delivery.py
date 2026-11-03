@@ -90,22 +90,44 @@ def accepted(db,playlist_id,result):
     db.commit()
 
 
+def removed(db,playlist_id,digest,label,operation_id):
+    """Queue only latest negative voters after a verified shared-playlist removal."""
+    from .review_web import context,vote_rows
+    shared=context(db)
+    if not shared or str(playlist_id)!=str(shared['id']):return
+    for row in vote_rows(db,playlist_id,digest):
+        if row['value']!=-1:continue
+        user=db.execute('SELECT chat_id FROM review_users WHERE user_id=?',(row['user_id'],)).fetchone()
+        chat=user[0] if user else (meta_get(db,'owner_chat_id') if str(row['user_id'])==meta_get(db,'owner_id') else None)
+        if chat is None:continue
+        db.execute("""INSERT OR IGNORE INTO review_removal_notices
+            (operation_id,playlist_id,user_id,md5,chat_id,label,created) VALUES (?,?,?,?,?,?,?)""",
+            (operation_id,playlist_id,row['user_id'],digest,chat,label,time.time()))
+    db.commit()
+
+
 def deliver_notices(db,bot,limit=3):
-    rows=db.execute("SELECT * FROM review_notices WHERE state='pending' AND retry_at<=? ORDER BY created LIMIT ?",(time.time(),limit)).fetchall()
     sent=0
-    for row in rows:
-        playlist=db.execute('SELECT name FROM playlists WHERE id=?',(row['playlist_id'],)).fetchone()
-        name=playlist[0] if playlist else 'Volleyball'
-        text='Поздравляю! 🎉 Твоя песня «'+row['label'][:250]+'» была добавлена в общий плейлист «'+name+'».'
-        where=(row['playlist_id'],row['user_id'],row['md5'])
-        try:bot.message(row['chat_id'],text)
-        except TelegramError as exc:
-            state='blocked' if '(код 403)' in str(exc) else 'pending'
-            retry=time.time()+min(3600,60*2**min(6,row['attempts']))
-            db.execute('UPDATE review_notices SET state=?,attempts=attempts+1,retry_at=? WHERE playlist_id=? AND user_id=? AND md5=?',(state,retry,*where))
-        else:
-            db.execute("UPDATE review_notices SET state='sent',sent=? WHERE playlist_id=? AND user_id=? AND md5=?",(time.time(),*where));sent+=1
-        db.commit()
+    for table,keys in [('review_notices',('playlist_id','user_id','md5')),
+                       ('review_removal_notices',('operation_id','user_id'))]:
+        rows=db.execute("SELECT * FROM "+table+" WHERE state='pending' AND retry_at<=? ORDER BY created LIMIT ?",(time.time(),limit)).fetchall()
+        condition=' AND '.join(key+'=?' for key in keys)
+        for row in rows:
+            where=tuple(row[key] for key in keys)
+            if table=='review_removal_notices' and db.execute("SELECT 1 FROM playlist_tracks WHERE playlist_id=? AND md5=? AND state='complete'",(row['playlist_id'],row['md5'])).fetchone():
+                db.execute("UPDATE "+table+" SET state='cancelled' WHERE "+condition,where);db.commit();continue
+            playlist=db.execute('SELECT name FROM playlists WHERE id=?',(row['playlist_id'],)).fetchone()
+            name=playlist[0] if playlist else 'Volleyball'
+            text=('Поздравляю! 🎉 Твоя песня «'+row['label'][:250]+'» была добавлена в общий плейлист «'+name+'».') if table=='review_notices' else (
+                'Поздравляю! 🎉 Песня «'+row['label'][:250]+'», которой ты поставил(а) дизлайк, убрана из общего плейлиста «'+name+'».')
+            try:bot.message(row['chat_id'],text)
+            except TelegramError as exc:
+                state='blocked' if '(код 403)' in str(exc) else 'pending'
+                retry=time.time()+min(3600,60*2**min(6,row['attempts']))
+                db.execute('UPDATE '+table+' SET state=?,attempts=attempts+1,retry_at=? WHERE '+condition,(state,retry,*where))
+            else:
+                db.execute("UPDATE "+table+" SET state='sent',sent=? WHERE "+condition,(time.time(),*where));sent+=1
+            db.commit()
     return sent
 
 

@@ -1,5 +1,6 @@
 """Shared listening pool; guests can vote and propose, never edit the library."""
 import json
+import random
 import re
 import secrets
 import time
@@ -22,6 +23,7 @@ def remember_profile(db,user):
     db.execute('''INSERT INTO review_profiles VALUES (?,?,?,?) ON CONFLICT(user_id)
         DO UPDATE SET username=excluded.username,display_name=excluded.display_name,updated=excluded.updated''',
         (user['id'],username,name,time.time()))
+    db.execute("UPDATE review_removal_notices SET state='pending',retry_at=0 WHERE user_id=? AND state='blocked'",(user['id'],))
     db.execute("UPDATE review_notices SET state='pending',retry_at=0 WHERE user_id=? AND state='blocked'",(user['id'],));db.commit()
 
 
@@ -117,6 +119,10 @@ def add_job(db,event,user_id,chat_id,query,payload,message_id=0):
     return enqueue(db,identity,chat_id,user_id,message_id,query,{'client':'review',**payload})
 
 
+def review_weight(total,dislikes):
+    return 1.25 if dislikes else 1/(1+total)
+
+
 def next_card(db,event,user_id,chat_id):
     user=ensure_user(db,user_id,chat_id);pid=user['playlist_id']
     current=db.execute("SELECT * FROM review_cards WHERE user_id=? AND state IN ('queued','open')",(user_id,)).fetchone()
@@ -124,13 +130,21 @@ def next_card(db,event,user_id,chat_id):
     capacity(db,user_id)
     pool=playlist_items(db,pid)
     if not pool:return None,False
-    # Prefer least-rated songs; random ties distribute first assignments across friends.
-    rows=db.execute('''SELECT i.id,COUNT(v.user_id) AS ratings FROM review_items i
-        LEFT JOIN review_votes v ON v.item_id=i.id AND v.playlist_id=?
-        WHERE NOT EXISTS (SELECT 1 FROM review_votes mine WHERE mine.item_id=i.id AND mine.playlist_id=? AND mine.user_id=?)
-        AND NOT EXISTS (SELECT 1 FROM review_cards c WHERE c.item_id=i.id AND c.playlist_id=? AND c.user_id=? AND c.state='skipped')
-        GROUP BY i.id ORDER BY ratings,RANDOM()''',(pid,pid,user_id,pid,user_id)).fetchall()
-    eligible=set(pool);item=next((r['id'] for r in rows if r['id'] in eligible),None)
+    # Content aliases share votes and exclusions. A dislike gives a modest fixed
+    # bonus over an unrated song, without multiplying the bonus for pile-ons.
+    from .review_web import vote_rows
+    votes={}
+    for row in vote_rows(db,pid):votes.setdefault(row['md5'],[]).append(row)
+    skipped={r[0] for r in db.execute("""SELECT json_extract(i.result,'$.md5') FROM review_cards c
+        JOIN review_items i ON i.id=c.item_id WHERE c.playlist_id=? AND c.user_id=? AND c.state='skipped'""",(pid,user_id))}
+    candidates={}
+    digests={r['id']:r['md5'] for r in db.execute("SELECT id,json_extract(result,'$.md5') AS md5 FROM review_items")}
+    for identity in pool:
+        digest=digests[identity];ratings=votes.get(digest,[])
+        if digest in skipped or any(v['user_id']==user_id for v in ratings):continue
+        candidates.setdefault(digest,(identity,review_weight(len(ratings),sum(v['value']==-1 for v in ratings))))
+    values=list(candidates.values())
+    item=random.choices([v[0] for v in values],weights=[v[1] for v in values],k=1)[0] if values else None
     if not item:return None,False
     card=secrets.token_hex(8)
     db.execute("INSERT INTO review_cards(id,user_id,chat_id,playlist_id,item_id,created) VALUES (?,?,?,?,?,?)",(card,user_id,chat_id,pid,item,time.time()));db.commit()

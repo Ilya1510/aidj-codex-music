@@ -126,7 +126,7 @@ def mutate(settings,db,disk,body,work):
                 parent=f'/Музыка/_aidj_removed/{playlist["id"]}'
                 disk.mkdir('/Музыка/_aidj_removed');disk.mkdir(parent)
                 plan={'source':row['remote_path'],'target':parent+'/'+op_id+'-'+PurePosixPath(row['remote_path']).name,
-                      'md5':row['md5'],'bytes':row['bytes'],'key':row['track_key'],'asset':asset['id']}
+                      'md5':row['md5'],'bytes':row['bytes'],'key':row['track_key'],'asset':asset['id'],'label':row['label']}
             else:
                 name=playlist_name(body.get('name',''))
                 other=db.execute('SELECT id FROM playlists WHERE name_key=? AND id!=?',(name.casefold(),playlist['id'])).fetchone()
@@ -164,6 +164,9 @@ def mutate(settings,db,disk,body,work):
                 new=plan['target']+'/'+plan['name']+'.m3u8'
                 if old!=new and disk.metadata(old) and not disk.metadata(new):disk.move(old,new)
             manager.write_index(playlist['id'],work)
+            if action=='remove':
+                from .review_delivery import removed
+                removed(db,playlist['id'],plan['md5'],plan.get('label','Песня'),op_id)
         else:raise PlaylistError('Неизвестное действие.')
     db.execute("INSERT INTO web_operations(id,kind,payload,state,created) VALUES (?,?,?,'complete',?) ON CONFLICT(id) DO UPDATE SET state='complete'",
                (op_id,action,'{}',time.time()));db.commit()

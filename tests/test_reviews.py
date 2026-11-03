@@ -81,7 +81,7 @@ def test_other_listener_reuses_telegram_audio_and_has_independent_vote(setup):
     stats=R.summary(db,p['id']);assert stats[0]['dislikes']==1 and stats[0]['neutral']==1
 
 
-def test_auto_next_prioritizes_least_rated_and_never_resends_rated_song(setup,tmp_path):
+def test_auto_next_never_resends_rated_song(setup,tmp_path,monkeypatch):
     settings,db,disk,bot,manager,result,p,uploads,downloads=setup
     more={**result,'track':{**result['track'],'id':'456','title':'Other'},'md5':'other'}
     disk.files['/Музыка/aidj_codex_music/other.mp3']=b'other-audio'
@@ -89,6 +89,7 @@ def test_auto_next_prioritizes_least_rated_and_never_resends_rated_song(setup,tm
     manager.add(p['id'],more,tmp_path);pool=R.playlist_items(db,p['id'])
     for uid in (303,404):
         db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],pool[0],uid,1,0))
+    monkeypatch.setattr(R.random,'choices',lambda population,weights,k:[population[weights.index(max(weights))]])
     db.commit();start(setup);process(setup)
     card=db.execute("SELECT * FROM review_cards WHERE state='open'").fetchone();assert card['item_id']==pool[1]
     handle_update(db,{},bot,update(data=f'rv:vote:{card["id"]}:0',n=3),settings)
@@ -356,3 +357,42 @@ def test_owner_sees_nickname_per_vote_and_proposal_but_guests_do_not(setup):
     # Current Telegram metadata can update without losing past votes.
     R.remember_profile(db,{'id':101,'username':'new_name','first_name':'Friend'})
     assert any(R.person_label(row)=='@new_name' and row['value']==-1 for row in R.people(db,p['id'],card['item_id']))
+
+def test_review_dislike_bonus_is_fixed_and_above_unrated():
+    assert R.review_weight(0,0)==1
+    assert R.review_weight(1,1)==1.25
+    assert R.review_weight(100,100)==1.25
+    assert R.review_weight(1,0)<1
+
+
+def test_review_selection_shares_alias_votes_and_uses_weights(setup,tmp_path,monkeypatch):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    more={**result,'track':{**result['track'],'id':'456','title':'Unrated'},
+          'md5':hashlib.md5(b'other-audio').hexdigest(),'bytes':11,'remote_path':'/Музыка/aidj_codex_music/other.mp3'}
+    disk.files[more['remote_path']]=b'other-audio';manager.add(p['id'],more,tmp_path)
+    original=R.remember(db,result)
+    alias=R.remember(db,{**result,'track':{**result['track'],'id':'alias'}})
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],original,303,1,1))
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],alias,303,-1,2));db.commit()
+    seen=[]
+    def choose(population,weights,k):
+        seen.append(dict(zip(population,weights)))
+        return [population[weights.index(max(weights))]]
+    monkeypatch.setattr(R.random,'choices',choose)
+    card,_=R.next_card(db,'weighted',101,101)
+    assert json.loads(db.execute('SELECT result FROM review_items WHERE id=?',(card['item_id'],)).fetchone()[0])['md5']==result['md5']
+    assert sorted(seen[0].values())==[1,1.25]
+    # A vote for a different content alias excludes all copies for this listener.
+    db.execute("UPDATE jobs SET status='completed'")
+    db.execute("UPDATE review_cards SET state='voted'")
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],alias,101,0,3));db.commit()
+    next_card,_=R.next_card(db,'after-alias',101,101)
+    assert next_card['item_id']==R.remember(db,more)
+
+
+def test_review_skipped_alias_is_not_offered_again(setup):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    alias=R.remember(db,{**result,'track':{**result['track'],'id':'alias'}})
+    R.ensure_user(db,101,101)
+    db.execute("INSERT INTO review_cards(id,user_id,chat_id,playlist_id,item_id,state,created) VALUES ('skip',101,101,?,?,'skipped',0)",(p['id'],alias));db.commit()
+    assert R.next_card(db,'after-skip',101,101)==(None,False)

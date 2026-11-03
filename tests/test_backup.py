@@ -76,3 +76,18 @@ def test_bad_snapshot_checksum_cannot_replace_database(setup,tmp_path):
     destination=replace(settings,state=tmp_path/'restore-bad')
     with pytest.raises((BackupError,AssertionError)):restore(destination,disk)
     assert not (destination.state/'bot.sqlite').exists()
+
+
+def test_backup_includes_removal_outbox_and_reads_older_schema(setup,tmp_path):
+    settings,db,*_=setup
+    db.execute("INSERT INTO review_removal_notices(operation_id,playlist_id,user_id,md5,chat_id,label,created) VALUES ('remove',1,101,'digest',101,'Song',0)");db.commit()
+    work=tmp_path/'new-schema';work.mkdir();file,counts=snapshot(settings,work)
+    copy=sqlite3.connect(file)
+    assert copy.execute('SELECT operation_id FROM review_removal_notices').fetchone()[0]=='remove'
+    copy.close()
+    db.execute('DROP TABLE review_removal_notices');db.commit()
+    work=tmp_path/'old-schema';work.mkdir();file,counts=snapshot(settings,work)
+    assert counts['review_removal_notices']==0
+    copy=sqlite3.connect(file)
+    assert copy.execute('SELECT COUNT(*) FROM playlist_tracks').fetchone()[0]==1
+    copy.close()

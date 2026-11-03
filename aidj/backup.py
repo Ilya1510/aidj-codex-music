@@ -21,7 +21,7 @@ MAX_BYTES=128*1024**2
 TABLES=('playlists','playlist_tracks','playlist_aliases','playlist_selections','playlist_clicks',
         'cache','web_assets','web_operations','app_deliveries','app_delivery_acks','app_keyboard_updates',
         'library_added','audio_clips','playback_ranges','review_users','review_profiles','review_items',
-        'review_cards','review_votes','review_proposals','review_saves','review_notices','review_web_ops')
+        'review_cards','review_votes','review_proposals','review_saves','review_notices','review_removal_notices','review_web_ops')
 META=('owner_id','owner_chat_id','review_shared_playlist','review_suggestions_playlist','update_offset')
 
 
@@ -42,7 +42,10 @@ def snapshot(settings,work):
     counts={}
     try:
         src.execute('BEGIN')
+        available={r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in TABLES:
+            if table=='review_removal_notices' and table not in available:
+                counts[table]=0;continue
             cursor=src.execute('SELECT * FROM '+table)
             columns=[col[0] for col in cursor.description]
             statement='INSERT INTO '+table+' ('+','.join(columns)+') VALUES ('+','.join('?' for _ in columns)+')'

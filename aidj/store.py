@@ -77,6 +77,11 @@ def connect(settings):
         state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
         retry_at REAL NOT NULL DEFAULT 0,created REAL NOT NULL,sent REAL,
         PRIMARY KEY(playlist_id,user_id,md5));
+    CREATE TABLE IF NOT EXISTS review_removal_notices(operation_id TEXT NOT NULL,playlist_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,md5 TEXT NOT NULL,chat_id INTEGER NOT NULL,label TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
+        retry_at REAL NOT NULL DEFAULT 0,created REAL NOT NULL,sent REAL,
+        PRIMARY KEY(operation_id,user_id));
     CREATE TABLE IF NOT EXISTS review_web_ops(id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL);
     ''')
     return db
