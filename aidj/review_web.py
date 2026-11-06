@@ -1,5 +1,6 @@
 """Owner-only app views of the same votes and suggestions as Telegram."""
 import json
+import hashlib
 import re
 import time
 
@@ -26,26 +27,42 @@ def vote_rows(db,pid,md5=None):
     return answer
 
 
+def reviewer_id(user_id):
+    return hashlib.sha256(('aidj-reviewer:'+str(user_id)).encode()).hexdigest()[:20]
+
+
 def empty_rating():return {'likes':0,'dislikes':0,'neutral':0,'total':0,'mine':None,'proposals':0}
 
 
 def snapshot(db):
     playlist=context(db);pid=playlist['id'] if playlist else None
-    owner=int(meta_get(db,'owner_id','0'));ratings={};participants=set();total=0
+    owner=int(meta_get(db,'owner_id','0'));ratings={};participants=set();total=0;votes={};voters=set()
     if pid is not None:
         for row in vote_rows(db,pid):
             value=ratings.setdefault(row['md5'],empty_rating());value[{1:'likes',-1:'dislikes',0:'neutral'}[row['value']]]+=1
-            value['total']+=1;total+=1;participants.add(row['user_id'])
+            value['total']+=1;total+=1;participants.add(row['user_id']);voters.add(row['user_id'])
+            votes.setdefault(row['md5'],{})[reviewer_id(row['user_id'])]=row['value']
             if row['user_id']==owner:value['mine']=row['value']
         for row in db.execute("""SELECT json_extract(i.result,'$.md5') AS md5,COUNT(DISTINCT p.user_id) AS n
             FROM review_proposals p JOIN review_items i ON i.id=p.item_id
             WHERE p.playlist_id=? AND p.status='confirmed' GROUP BY md5""",(pid,)):
             ratings.setdefault(row['md5'],empty_rating())['proposals']=row['n']
+    if pid is not None:
+        voters.update(r[0] for r in db.execute('SELECT user_id FROM review_users WHERE playlist_id=?',(pid,)))
+        voters.update(r[0] for r in db.execute("SELECT DISTINCT user_id FROM review_proposals WHERE playlist_id=? AND status='confirmed'",(pid,)))
+    if owner:voters.add(owner)
+    profiles={r['user_id']:r for r in db.execute('SELECT * FROM review_profiles')}
+    roster=[]
+    for uid in voters:
+        profile=profiles.get(uid)
+        label='Ты' if uid==owner else ((profile['display_name'] or R.person_label(profile)) if profile else 'Участник '+str(uid))
+        roster.append({'id':reviewer_id(uid),'label':label,'username':(profile['username'] or None) if profile else None,'isMine':uid==owner})
+    roster.sort(key=lambda p:(not p['isMine'],p['label'].casefold(),p['id']))
     pool=set(r[0] for r in db.execute("SELECT md5 FROM playlist_tracks WHERE playlist_id=? AND state='complete'",(pid,)))
     pool.update(digest for digest,value in ratings.items() if value['proposals'])
     return ratings,{'playlistId':pid,'playlistName':playlist['name'] if playlist else '',
         'suggestionsPlaylistId':int(meta_get(db,'review_suggestions_playlist','0')) or None,
-        'total':total,'participants':len(participants)},pool
+        'total':total,'participants':len(participants),'voters':roster,'votes':votes},pool
 
 
 def details(db,asset):

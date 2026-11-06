@@ -19,6 +19,10 @@ def main():
     data={'tracks':songs,'playlists':[{'id':1,'name':'Volleyball QA','trackIds':[s['id'] for s in songs[:3]],'revision':'qa-1'},
         {'id':2,'name':'Предложка','trackIds':[songs[3]['id']],'revision':'qa-2'}],
         'review':{'playlistId':1,'playlistName':'Volleyball QA','suggestionsPlaylistId':2,'total':12,'participants':3,'poolTrackIds':[s['id'] for s in songs]}}
+    data['review']['voters']=[{'id':'owner','label':'Ты','isMine':True},
+        {'id':'masha','label':'Маша','username':'masha_qa','isMine':False},
+        {'id':'sasha','label':'Саша','username':'sasha_qa','isMine':False}]
+    data['review']['votes']={songs[0]['md5']:{'masha':1},songs[1]['md5']:{'masha':1,'sasha':-1},songs[3]['md5']:{'sasha':0}}
     votes=[];edits=[]
     def detail(song):
         return {'trackId':song['id'],'rating':copy.deepcopy(song['rating']),'people':[
@@ -41,7 +45,7 @@ def main():
             payload=request.post_data_json;edits.append(payload);p=next(p for p in data['playlists'] if p['id']==payload['playlistId'])
             assert payload['action']=='add';p['trackIds'].append(payload['trackId']);p['revision']='changed';body=data
         elif path=='library-version':body={'revision':'qa-'+str(len(votes))}
-        elif path=='android-version':body={'versionCode':11,'versionName':'0.8.1','url':'https://example.invalid/AI-DJ.apk'}
+        elif path=='android-version':body={'versionCode':12,'versionName':'0.9.0','url':'https://example.invalid/AI-DJ.apk'}
         else:body={'ok':True}
         route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
     script=r'''(()=>{
@@ -68,10 +72,60 @@ def main():
                 page.route('**/api/**',route_api);page.goto(f'http://127.0.0.1:{server.server_port}/',wait_until='networkidle')
                 page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
                 assert page.locator('main .filter-count').inner_text()=='После фильтров: 3 из 3'
+                stage='people-filters';page.get_by_role('button',name='По порядку плейлиста',exact=True).click()
+                sheet=page.locator('#sheet')
+                page.get_by_role('button',name='Маша: Лайк',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 2 из 3'
+                page.get_by_role('button',name='Саша: Дизлайк',exact=True).click()
+                assert page.locator('main .song-row strong').all_text_contents()==['Второй трек']
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 1 из 3'
+                page.get_by_role('button',name='Саша: Нет оценки',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 2 из 3'
+                page.get_by_role('button',name='Любое условие',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 3 из 3'
+                search=page.get_by_label('Найти участника');search.fill('маша')
+                assert sheet.locator('.voter-filter-card').count()==1
+                page.get_by_role('button',name='Маша: Дизлайк',exact=True).click()
+                assert search.input_value()=='маша' and sheet.locator('.voter-filter-card').count()==1
+                page.get_by_role('button',name='Маша: Дизлайк',exact=True).click();search.fill('никогонет')
+                assert sheet.locator('.voter-filter-card').count()==0
+                search.fill('');page.get_by_role('button',name='Саша: Нет оценки',exact=True).click()
+                page.get_by_role('button',name='Все условия',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 1 из 3'
+                assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                assert sheet.evaluate('(e)=>e.scrollWidth<=e.clientWidth')
+                sheet.evaluate('(e)=>e.scrollTop=0');page.screenshot(path=str(output/'person-filters.png'))
+                sheet.locator('.voter-filter-card').filter(has_text='Маша').scroll_into_view_if_needed();page.screenshot(path=str(output/'person-filter-choices.png'))
+                page.get_by_role('button',name='К песням',exact=True).click()
+                page.get_by_role('button',name='Слушать',exact=True).click();page.locator('#mini-play[aria-label="Пауза"]').wait_for()
+                assert page.evaluate('window.__state.player.queue.entries.map(e=>e.trackId)')==[songs[1]['id']]
+                stage='people-persistence';page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                assert page.locator('main .song-row strong').all_text_contents()==['Второй трек']
+                assert page.get_by_role('button',name='Убрать условие: Маша',exact=True).count()==1
+                page.get_by_role('button',name='Плейлисты',exact=True).click();page.locator('.playlist-card').filter(has_text='Предложка').click()
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 1 из 1'
+                assert page.locator('main .person-filter-chip').count()==0
+                page.get_by_role('button',name='Плейлисты',exact=True).click();page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                assert page.locator('main .filter-count').inner_text()=='После фильтров: 1 из 3'
+                stage='people-offline';context.set_offline(True);page.wait_for_function('()=>!navigator.onLine')
+                page.get_by_role('button',name='По порядку плейлиста · фильтры включены',exact=True).click()
+                page.get_by_role('button',name='Любое условие',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 2 из 3'
+                page.get_by_role('button',name='Саша: Нет оценки',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 3 из 3'
+                page.get_by_role('button',name='К песням',exact=True).click()
+                page.get_by_role('button',name='Убрать условие: Маша',exact=True).click()
+                assert page.locator('main .person-filter-chip').count()==1
+                context.set_offline(False);page.wait_for_function('()=>navigator.onLine')
+                page.get_by_role('button',name='По порядку плейлиста · фильтры включены',exact=True).click()
+                page.get_by_role('button',name='Сбросить фильтры и сортировку',exact=True).click()
+                assert page.get_by_role('button',name='Саша: Дизлайк',exact=True).get_attribute('aria-pressed')=='false'
+                page.get_by_role('button',name='К песням',exact=True).click()
                 stage='sort';page.get_by_role('button',name='По порядку плейлиста',exact=True).click();page.get_by_label('Сортировка песен').select_option('likes')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row strong').all_text_contents()==['Второй трек','Первый трек','Без оценок']
                 stage='net-score';page.get_by_role('button',name='Больше лайков',exact=True).click()
+                page.get_by_text('Общие фильтры',exact=True).click()
                 minimum=page.get_by_label('Минимум: лайки минус дизлайки');minimum.fill('2');minimum.press('Tab')
                 assert page.locator('#sheet .filter-count').inner_text()=='После фильтров: 1 из 3'
                 assert page.locator('main .song-row strong').all_text_contents()==['Второй трек']
@@ -82,7 +136,7 @@ def main():
                 assert page.locator('#sheet .filter-count').inner_text()=='После фильтров: 3 из 3'
                 minimum.fill('');minimum.press('Tab')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
-                stage='filters';page.get_by_role('button',name='Больше лайков',exact=True).click();page.get_by_label('Без дизлайков').check();page.get_by_label('Фильтр по оценкам').select_option('rated')
+                stage='filters';page.get_by_role('button',name='Больше лайков',exact=True).click();page.get_by_text('Общие фильтры',exact=True).click();page.get_by_label('Без дизлайков').check();page.get_by_label('Фильтр по оценкам').select_option('rated')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row strong').all_text_contents()==['Первый трек']
                 assert page.locator('main .filter-count').inner_text()=='После фильтров: 1 из 3'
@@ -130,7 +184,7 @@ def main():
                 assert page.locator('main .filter-count').inner_text()=='После фильтров: 80 из 84'
                 assert not errors,errors
                 browser.close()
-            print('REVIEW_UI_PASSED sort net_score live_counts pagination_counts full_player_no_null filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
+            print('REVIEW_UI_PASSED people_and_or multi_vote people_search people_offline people_persistence playlist_isolation sort net_score live_counts pagination_counts full_player_no_null filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
         except Exception as exc:
             print('REVIEW_UI_FAILED',stage,type(exc).__name__,str(exc)[:1600],flush=True);raise SystemExit(1)
         finally:server.shutdown();server.server_close();thread.join()

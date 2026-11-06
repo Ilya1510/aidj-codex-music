@@ -1,9 +1,16 @@
 const sorts=new Set(['default','likes','dislikes','score','votes']);
 const states=new Set(['all','rated','unrated','mine-missing']);
+export const voteKinds=['like','dislike','neutral','unrated'];
 export function listSettings(value){
   const raw=value?.minScore??(value?.minLikes>0?value.minLikes:null);
   const minimum=raw===null||raw===undefined||raw===''?null:Number(raw);
-  return {sort:sorts.has(value?.sort)?value.sort:'default',state:states.has(value?.state)?value.state:'all',
+  const people=new Map();
+  for(const rule of Array.isArray(value?.people)?value.people:[]){
+    if(!rule||typeof rule.id!=='string'||!/^[a-zA-Z0-9_-]{1,40}$/.test(rule.id)||!Array.isArray(rule.votes))continue;
+    const votes=voteKinds.filter(kind=>rule.votes.includes(kind));
+    if(votes.length)people.set(rule.id,{id:rule.id,votes});
+  }
+  return {people:[...people.values()],peopleMode:value?.peopleMode==='any'?'any':'all',sort:sorts.has(value?.sort)?value.sort:'default',state:states.has(value?.state)?value.state:'all',
     noDislikes:value?.noDislikes===true,minScore:Number.isFinite(minimum)?Math.min(10000,Math.max(-10000,Math.floor(minimum))):null};
 }
 export function rating(track,pending=null){
@@ -17,10 +24,29 @@ export function rating(track,pending=null){
   }
   return value;
 }
-export function selectRated(list,settings={},pending={}){
+export function personVote(track,id,review={},pending={}){
+  const person=review.voters?.find(p=>p.id===id);
+  if(!person)return undefined;
+  if(person.isMine)return rating(track,pending[track.md5]).mine;
+  // A cached catalog from an older app has no complete per-person matrix.
+  // Missing data must never be mistaken for an actual absence of a vote.
+  if(!review.votes||typeof review.votes!=='object')return undefined;
+  return review.votes[track.md5]?.[id]??null;
+}
+export function matchesPeople(track,options,review={},pending={}){
+  if(!options.people.length)return true;
+  const matches=rule=>{
+    const value=personVote(track,rule.id,review,pending);
+    if(value===undefined)return false;
+    const kind=value===1?'like':value===-1?'dislike':value===0?'neutral':value===null?'unrated':null;
+    return rule.votes.includes(kind);
+  };
+  return options.peopleMode==='any'?options.people.some(matches):options.people.every(matches);
+}
+export function selectRated(list,settings={},pending={},review={}){
   const options=listSettings(settings);
-  return list.map((track,index)=>({track,index,r:rating(track,pending[track.md5])})).filter(({r})=>
-    (!options.noDislikes||r.dislikes===0)&&(options.minScore===null||r.likes-r.dislikes>=options.minScore)&&
+  return list.map((track,index)=>({track,index,r:rating(track,pending[track.md5])})).filter(({track,r})=>
+    matchesPeople(track,options,review,pending)&&(!options.noDislikes||r.dislikes===0)&&(options.minScore===null||r.likes-r.dislikes>=options.minScore)&&
     (options.state==='all'||options.state==='rated'&&r.total>0||options.state==='unrated'&&r.total===0||options.state==='mine-missing'&&r.mine===null)
   ).sort((a,b)=>{
     if(options.sort==='default')return a.index-b.index;

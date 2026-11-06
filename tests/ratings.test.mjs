@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {rating,selectRated,listSettings,reviewOrder} from '../miniapp/ratings.mjs';
+import {rating,selectRated,listSettings,reviewOrder,personVote} from '../miniapp/ratings.mjs';
 const songs=[
  {id:'a',md5:'a',rating:{likes:2,dislikes:0,neutral:1,total:3,mine:0}},
  {id:'b',md5:'b',rating:{likes:5,dislikes:3,neutral:0,total:8,mine:null}},
@@ -26,7 +26,7 @@ test('offline vote replacement and reset do not count one person twice',()=>{
  assert.equal(selectRated(songs,{state:'mine-missing'},{c:{value:1}}).some(t=>t.id==='c'),false);
 });
 test('saved list options tolerate older or malformed state',()=>{
- assert.deepEqual(listSettings({sort:'oops',state:'oops',minLikes:-3,noDislikes:'true'}),{sort:'default',state:'all',noDislikes:false,minScore:null});
+ assert.deepEqual(listSettings({sort:'oops',state:'oops',minLikes:-3,noDislikes:'true'}),{people:[],peopleMode:'all',sort:'default',state:'all',noDislikes:false,minScore:null});
 });
 
 test('net-score threshold supports zero, negatives, clearing and pending votes',()=>{
@@ -45,4 +45,39 @@ test('review order gives a modest fixed dislike bonus and never repeats tracks',
  assert.deepEqual(reviewOrder(list,{},()=>.5).map(t=>t.id),['b','c','a']);
  assert.equal(new Set(reviewOrder(songs).map(t=>t.id)).size,songs.length);
  assert.deepEqual(list.map(t=>t.id),['a','c','b']);
+});
+
+const review={voters:[{id:'self',isMine:true},{id:'masha',label:'Маша'},{id:'sasha',label:'Саша'}],
+ votes:{a:{masha:1,sasha:-1},b:{masha:1,sasha:0},c:{sasha:1},d:{masha:-1}}};
+const rule=(id,...votes)=>({id,votes});
+const ids=(people,extra={},pending={},info=review)=>selectRated(songs,{people,...extra},pending,info).map(t=>t.id);
+test('person filters combine people with AND or OR, and outcomes with OR',()=>{
+ const both=[rule('masha','like'),rule('sasha','dislike')];
+ assert.deepEqual(ids(both),['a']);
+ assert.deepEqual(ids(both,{peopleMode:'any'}),['a','b']);
+ assert.deepEqual(ids([rule('sasha','neutral','unrated')]),['b','d']);
+ assert.deepEqual(ids([rule('masha','unrated')]),['c']);
+ assert.deepEqual(ids([rule('masha','like','dislike','neutral')]),['a','b','d']);
+ assert.deepEqual(ids([rule('masha','like')],{minScore:2,noDislikes:true}),['a']);
+});
+test('own filter sees pending offline votes, corrections and resets immediately',()=>{
+ assert.deepEqual(ids([rule('self','neutral')]),['a']);
+ assert.deepEqual(ids([rule('self','unrated')]),['b','c']);
+ assert.deepEqual(ids([rule('self','like')],{},{c:{value:1}}),['c']);
+ assert.deepEqual(ids([rule('self','unrated')],{},{a:{value:null}}),['a','b','c']);
+ assert.equal(personVote(songs[0],'sasha',review),-1);
+});
+test('legacy or missing voter data never masquerades as an unrated person',()=>{
+ assert.deepEqual(ids([rule('masha','unrated')],{}, {},{voters:review.voters}),[]);
+ assert.deepEqual(ids([rule('unknown','unrated')]),[]);
+ assert.deepEqual(ids([rule('masha','like')],{}, {},{}),[]);
+ assert.deepEqual(ids([rule('masha','unrated')],{}, {},{...review,votes:{}}),['a','b','c','d']);
+});
+test('people rules survive serialization, reject malformed fields and do not change source order',()=>{
+ const value={people:[null,rule('masha','like','garbage','like'),rule('sasha','neutral'),rule('bad id','like'),rule('empty')],peopleMode:'any'};
+ const result=listSettings(value);
+ assert.deepEqual(result.people,[rule('masha','like'),rule('sasha','neutral')]);
+ assert.deepEqual(listSettings(JSON.parse(JSON.stringify(result))),result);
+ assert.deepEqual(ids(result.people,{peopleMode:result.peopleMode}),['a','b']);
+ assert.deepEqual(songs.map(t=>t.id),['a','b','c','d']);
 });

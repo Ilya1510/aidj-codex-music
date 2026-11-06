@@ -5,7 +5,7 @@ import requests
 import pytest
 
 from aidj import reviews as R
-from aidj.review_web import request,snapshot
+from aidj.review_web import request,snapshot,reviewer_id
 from aidj.store import meta_get
 from aidj.web_catalog import catalog,asset_id
 from aidj.webapp import Handler,Server
@@ -82,4 +82,57 @@ def test_review_http_requires_owner_session_and_csrf_header(setup):
         assert client.post(base+'/api/reviews',json=body).status_code==403
         response=client.post(base+'/api/reviews',json=body,headers={'X-AIDJ-App':'1'})
         assert response.status_code==200 and response.json()['rating']['mine']==1
+    finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_catalog_contains_latest_named_votes_and_nonvoters_for_person_filters(setup):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    item=R.remember(db,result)
+    alias=R.remember(db,{**result,'track':{**result['track'],'id':'alias'}})
+    for uid,name in [(101,'Маша'),(202,'Саша')]:
+        R.ensure_user(db,uid,uid);R.remember_profile(db,{'id':uid,'first_name':name,'username':'friend_'+str(uid)})
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],item,101,1,1))
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],alias,101,-1,2));db.commit()
+    value=catalog(db);review=value['review']
+    assert review['votes'][result['md5']]=={reviewer_id(101):-1}
+    people={r['id']:r for r in review['voters']}
+    assert people[reviewer_id(101)]=={'id':reviewer_id(101),'label':'Маша','username':'friend_101','isMine':False}
+    assert people[reviewer_id(202)]['label']=='Саша'
+    assert people[reviewer_id(11)]['isMine']
+    assert reviewer_id(202) not in review['votes'][result['md5']]
+    assert review['participants']==1 and review['total']==1
+    assert not any(secret in json.dumps(review) for secret in ['chat_id','remote_path','local_path','token'])
+    # Stable identity follows the person even after a Telegram name change.
+    R.remember_profile(db,{'id':101,'first_name':'Новое имя','username':'renamed_friend'})
+    renamed=next(v for v in catalog(db)['review']['voters'] if v['id']==reviewer_id(101))
+    assert renamed['label']=='Новое имя' and renamed['username']=='renamed_friend'
+
+
+def test_person_vote_changes_refresh_revision_even_when_rating_totals_stay_equal(setup):
+    from aidj.device_inbox import library_revision
+    settings,db,disk,bot,manager,result,p,*_=setup
+    item=R.remember(db,result)
+    for uid,value in [(101,1),(202,-1)]:
+        R.ensure_user(db,uid,uid)
+        db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],item,uid,value,1))
+    db.commit();first=catalog(db);before=library_revision(db)
+    db.execute('UPDATE review_votes SET value=-value,updated=2');db.commit()
+    after=catalog(db)
+    assert first['tracks'][0]['rating']==after['tracks'][0]['rating']
+    assert before!=library_revision(db)
+    assert after['review']['votes'][result['md5']][reviewer_id(101)]==-1
+
+
+def test_voter_catalog_is_owner_only_http(setup):
+    settings,db,*_=setup
+    R.ensure_user(db,101,101);R.remember_profile(db,{'id':101,'first_name':'Private friend'})
+    server=Server(('127.0.0.1',0),Handler,settings);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    base=f'http://127.0.0.1:{server.server_port}'
+    try:
+        response=requests.get(base+'/api/catalog')
+        assert response.status_code==401 and 'Private friend' not in response.text
+        token=create_session(db);client=requests.Session();client.cookies.set('aidj_session',token)
+        response=client.get(base+'/api/catalog')
+        assert response.status_code==200
+        assert any(v['label']=='Private friend' for v in response.json()['review']['voters'])
     finally:server.shutdown();server.server_close();thread.join()

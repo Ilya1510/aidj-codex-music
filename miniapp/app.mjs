@@ -4,7 +4,7 @@ import {native,command,nativeFetch,NativeAudio,NativeDownloads} from './native.m
 import {LocalTransfer} from './transfer.mjs';
 import {segment,moveSegment,changeBoundary,parseTime,formatTime} from './segments.mjs';
 import {playbackSettings as normalisePlayback,fadeGain} from './playback.mjs';
-import {rating as reviewRating,selectRated,listSettings,reviewOrder} from './ratings.mjs';
+import {rating as reviewRating,selectRated,listSettings,reviewOrder,voteKinds} from './ratings.mjs';
 
 const $ = id => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
@@ -35,8 +35,8 @@ function el(tag, attrs={}, ...children) {
   for (const child of visibleChildren(children)) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 }
-function button(label, name, fn, cls='icon-button') {
-  return el('button',{class:cls,'aria-label':label,title:label,onclick:()=>Promise.resolve().then(fn).catch(showError)},name&&icon(name),cls.includes('icon-button')?null:label);
+function button(label, name, fn, cls='icon-button',attrs={}) {
+  return el('button',{class:cls,'aria-label':label,title:label,...attrs,onclick:()=>Promise.resolve().then(fn).catch(showError)},name&&icon(name),cls.includes('icon-button')?null:label);
 }
 const counted=(n,forms)=>`${n} ${forms[n%10===1&&n%100!==11?0:n%10>=2&&n%10<=4&&!(n%100>=12&&n%100<=14)?1:2]}`;
 const votesCount=n=>counted(n,['оценка','оценки','оценок']);
@@ -129,7 +129,7 @@ function art(track) { const variant=1+(track.artist.codePointAt(0)||0)%4;return 
 function isSaved(track) {return saved.has(track.md5);}
 function filtered(ids) {
   const list=ids.map(id=>tracks.get(id)).filter(Boolean).filter(t=>!query||normalize(query).trim().split(/\s+/).every(word=>normalize(t.title+' '+t.artist).includes(word)));
-  return editing?list:selectRated(list,optionsForView(),voteOverrides);
+  return editing?list:selectRated(list,optionsForView(),voteOverrides,data.review||{});
 }
 function available(ids) {return online?ids:ids.filter(id=>tracks.has(id)&&isSaved(tracks.get(id)));}
 async function startPlaylist(ids,start=0,shuffle=false) {
@@ -430,26 +430,76 @@ function rangeEditor(track){
 function optionsKey(){return view==='playlist'?'playlist:'+selectedPlaylist:view==='reviews'?'reviews:'+reviewTab:view;}
 function optionsForView(){return listSettings(listOptions[optionsKey()]||(view==='reviews'&&reviewTab==='all'?{sort:'dislikes'}:{}));}
 function filterCount(ids){return `После фильтров: ${filtered(ids).length} из ${ids.length}`;}
+const voteFilterNames={like:'Лайк',dislike:'Дизлайк',neutral:'Всё равно',unrated:'Нет оценки'};
+const voteFilterSymbols={like:'👍',dislike:'👎',neutral:'😐',unrated:'○'};
+function voterLabel(id){return data.review?.voters?.find(p=>p.id===id)?.label||'Участник недоступен';}
 function listTools(ids){
   const value=optionsForView(),names={default:'По порядку плейлиста',likes:'Больше лайков',dislikes:'Больше дизлайков',score:'По балансу оценок',votes:'Больше оценок'};
-  const filters=value.noDislikes||value.state!=='all'||value.minScore!==null;
-  return el('div',{class:'list-tools'},button(names[value.sort]+(filters?' · фильтры включены':''),'settings',()=>listOptionsSheet(ids),'button list-options-button'),el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids)));
+  const filters=value.noDislikes||value.state!=='all'||value.minScore!==null||value.people.length>0;
+  const people=el('div',{class:'active-people-filters'});
+  for(const rule of value.people)people.append(button(voterLabel(rule.id)+' · '+rule.votes.map(v=>voteFilterSymbols[v]).join(' / '),'close',async()=>{
+    const next=optionsForView();next.people=next.people.filter(p=>p.id!==rule.id);listOptions[optionsKey()]=next;shown=70;render();await storage.putMeta('review-list-options',listOptions);
+  },'person-filter-chip',{'aria-label':'Убрать условие: '+voterLabel(rule.id)}));
+  return el('div',{class:'list-tools'},button(names[value.sort]+(filters?' · фильтры включены':''),'settings',()=>listOptionsSheet(ids),'button list-options-button'),
+    value.people.length>1?el('p',{class:'people-filter-caption'},value.peopleMode==='all'?'Совпадают все условия по людям':'Достаточно одного условия по людям'):null,
+    people,el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids)));
 }
 function listOptionsSheet(ids){
   const key=optionsKey(),value=optionsForView();
   const counter=el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids));
-  const save=async()=>{listOptions[key]=listSettings(value);counter.textContent=filterCount(ids);shown=70;render();await storage.putMeta('review-list-options',listOptions);};
+  const roster=[...(data.review?.voters||[])];
+  for(const rule of value.people)if(!roster.some(p=>p.id===rule.id))roster.push({id:rule.id,label:'Участник недоступен',missing:true});
+  const peopleList=el('div',{class:'voter-filter-list'}),modes=el('div',{class:'people-filter-modes',role:'group','aria-label':'Как сочетать условия по людям'});
+  const updateControls=()=>{
+    for(const node of modes.querySelectorAll('button'))node.setAttribute('aria-pressed',String(node.dataset.mode===value.peopleMode));
+    for(const card of peopleList.querySelectorAll('.voter-filter-card')){
+      const votes=value.people.find(p=>p.id===card.dataset.voterId)?.votes||[];
+      card.classList.toggle('has-condition',votes.length>0);
+      card.querySelector('.clear-voter').hidden=!votes.length;
+      for(const node of card.querySelectorAll('[data-vote-kind]'))node.setAttribute('aria-pressed',String(votes.includes(node.dataset.voteKind)));
+    }
+  };
+  const save=async()=>{listOptions[key]=listSettings(value);counter.textContent=filterCount(ids);updateControls();shown=70;render();await storage.putMeta('review-list-options',listOptions);};
+  for(const [id,label] of [['all','Все условия'],['any','Любое условие']])modes.append(el('button',{type:'button','data-mode':id,'aria-pressed':String(value.peopleMode===id),onclick:()=>{value.peopleMode=id;save().catch(showError);}},label));
+  const search=el('input',{type:'search',placeholder:'Имя или @ник',autocapitalize:'none',autocorrect:'off',autocomplete:'off',spellcheck:'false','aria-label':'Найти участника'});
+  const paintPeople=()=>{
+    const wanted=normalize(search.value).trim();peopleList.replaceChildren();
+    for(const person of roster.filter(p=>!wanted||normalize(p.label+' '+(p.username||'')).includes(wanted))){
+      const clear=button('Убрать условие: '+person.label,'close',()=>{value.people=value.people.filter(p=>p.id!==person.id);save().catch(showError);},'icon-button small clear-voter');
+      const header=el('div',{class:'voter-filter-heading'},el('span',{class:'voter-avatar','aria-hidden':'true'},person.label.slice(0,1).toUpperCase()),
+        el('span',{class:'voter-filter-name'},el('strong',{},person.label),person.username?el('small',{},'@'+person.username):null),clear);
+      const choices=el('div',{class:'voter-filter-choices',role:'group','aria-label':'Оценки: '+person.label});
+      for(const kind of voteKinds)choices.append(el('button',{type:'button',class:'voter-choice '+kind,'data-vote-kind':kind,'aria-label':person.label+': '+voteFilterNames[kind],disabled:!!person.missing,onclick:()=>{
+        const previous=value.people.find(p=>p.id===person.id)?.votes||[];
+        const votes=previous.includes(kind)?previous.filter(v=>v!==kind):[...previous,kind];
+        value.people=value.people.filter(p=>p.id!==person.id);if(votes.length)value.people.push({id:person.id,votes});
+        save().catch(showError);
+      }},el('span',{'aria-hidden':'true'},voteFilterSymbols[kind]),el('small',{},voteFilterNames[kind])));
+      peopleList.append(el('div',{class:'voter-filter-card','data-voter-id':person.id},header,choices));
+    }
+    if(!peopleList.childNodes.length)peopleList.append(el('p',{class:'subtitle'},roster.length?'Никого не нашлось. Попробуй другое имя.':'Участники появятся, когда начнут размечать песни.'));
+    updateControls();
+  };
+  search.addEventListener('input',paintPeople);
   const sorting=el('select',{'aria-label':'Сортировка песен'},...Object.entries({default:'Порядок плейлиста / добавления',likes:'Сначала больше лайков',dislikes:'Сначала больше дизлайков',score:'Баланс: лайки минус дизлайки',votes:'Сначала больше оценок'}).map(([id,label])=>el('option',{value:id,selected:value.sort===id},label)));
   sorting.addEventListener('change',()=>{value.sort=sorting.value;save().catch(showError);});
   const state=el('select',{'aria-label':'Фильтр по оценкам'},...Object.entries({all:'Все песни',rated:'Уже есть оценки',unrated:'Никто ещё не оценил','mine-missing':'Я ещё не оценил'}).map(([id,label])=>el('option',{value:id,selected:value.state===id},label)));
   state.addEventListener('change',()=>{value.state=state.value;save().catch(showError);});
   const no=el('input',{type:'checkbox',checked:value.noDislikes,'aria-label':'Без дизлайков',onchange:e=>{value.noDislikes=e.target.checked;save().catch(showError);}});
   const minimum=el('input',{type:'number',min:-10000,max:10000,step:1,value:value.minScore??'',placeholder:'Без ограничения','aria-label':'Минимум: лайки минус дизлайки',onchange:e=>{value.minScore=e.target.value===''?null:Number(e.target.value);save().catch(showError);}});
-  showSheet('Сортировка и фильтры',el('label',{class:'review-field'},'Сортировать',sorting),el('label',{class:'review-field'},'Оценки',state),
-    el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум: лайки − дизлайки',minimum),counter,
-    el('p',{class:'subtitle'},'Фильтры сохраняются сразу. «Слушать» и «Шафл» играют только подходящие песни.'),
-    button('Сбросить фильтры и сортировку',null,async()=>{listOptions[key]=listSettings(null);await storage.putMeta('review-list-options',listOptions);render();listOptionsSheet(ids);},'button full'));
+  showSheet('Фильтры песен',el('label',{class:'review-field'},'Сортировать',sorting),
+    el('section',{class:'people-filters'},el('div',{class:'people-filters-title'},el('h3',{},'Кто как оценил'),button('Сбросить людей',null,()=>{value.people=[];save().catch(showError);},'text-button')),modes,
+      el('p',{class:'subtitle'},'У одного человека можно выбрать несколько оценок.'),
+      !online?el('p',{class:'subtitle'},'Без сети — по последним сохранённым оценкам.'):null,
+      !data.review?.votes?el('p',{class:'subtitle'},'Подключись к сети, чтобы загрузить оценки участников.'):null,
+      el('label',{class:'voter-search'},icon('search'),search),peopleList),
+    el('details',{class:'general-filters',open:value.noDislikes||value.state!=='all'||value.minScore!==null},el('summary',{},'Общие фильтры'),
+      el('label',{class:'review-field'},'Оценки',state),el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум: лайки − дизлайки',minimum)),
+    button('Сбросить фильтры и сортировку',null,async()=>{listOptions[key]=listSettings(null);await storage.putMeta('review-list-options',listOptions);render();listOptionsSheet(ids);},'button full'),
+    el('div',{class:'filter-result'},counter,el('small',{},'Фильтры сохраняются сразу'),button('К песням',null,()=>$('sheet').close(),'button primary full')));
+  paintPeople();
 }
+
 function ratingBadges(track){
   const r=ratingOf(track);
   return r.total||r.proposals?el('span',{class:'rating-badges','aria-label':`Оценки: ${r.likes} лайков, ${r.dislikes} дизлайков, ${r.neutral} нейтральных`},`👍 ${r.likes}   👎 ${r.dislikes}   😐 ${r.neutral}`):null;
