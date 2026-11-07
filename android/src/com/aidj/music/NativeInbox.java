@@ -22,7 +22,7 @@ final class NativeInbox {
             JSONArray entries=q.optJSONArray("entries");if(entries==null)return;
             int at=-1;for(int i=0;i<entries.length();i++)if(q.optString("currentId").equals(entries.getJSONObject(i).optString("id"))){at=i;break;}
             if(at<0)return;JSONArray ids=new JSONArray();java.util.Set<String> seen=new java.util.LinkedHashSet<>();
-            for(int i=at;i<Math.min(entries.length(),at+6);i++){String id=entries.getJSONObject(i).optString("trackId");if(id.matches("[a-f0-9]{24}")&&seen.add(id))ids.put(id);}
+            for(int i=at;i<Math.min(entries.length(),at+10);i++){String id=entries.getJSONObject(i).optString("trackId");if(id.matches("[a-f0-9]{24}")&&seen.add(id))ids.put(id);}
             String key=ids.toString();long now=System.currentTimeMillis(),last=0;try{last=Long.parseLong(state.read("djPriorityAt","0"));}catch(Exception ignored){}
             if(ids.length()==0||key.equals(state.read("djServerPriority",""))&&now-last<900000)return;
             JSONObject body=new JSONObject().put("trackIds",ids).put("nextTrackIds",ids);

@@ -26,7 +26,7 @@ def main():
             page.get_by_role('button',name='Только DJ',exact=True).click();assert page.locator('main .song-row').count()==3
             page.get_by_role('button',name='Воспроизведение · Обычное',exact=True).click();page.get_by_role('button',name='DJ',exact=True).click()
             page.get_by_role('status').filter(has_text='Подготовлены DJ-фрагменты: 3 из 4').wait_for()
-            page.wait_for_function('()=>window.__fadeCalls.some(x=>x.path==="/api/dj")')
+            assert not page.evaluate('window.__fadeCalls.some(x=>x.path==="/api/dj")'), 'Settings must not enqueue the entire playlist'
             page.get_by_role('button',name='Покороче',exact=True).click();page.get_by_role('button',name='Закрыть',exact=True).click()
             page.get_by_role('button',name='Слушать',exact=True).click()
             page.wait_for_function('()=>window.__fadeCalls.some(x=>x.type==="play"&&x.queue.djEnabled&&x.queue.playlistId===1&&x.queue.entries[0].dj.end===100)')

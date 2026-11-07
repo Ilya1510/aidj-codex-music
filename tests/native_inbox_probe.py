@@ -51,7 +51,7 @@ public final class InboxProbe {
     state.downloads.remove(Api.checksum);check(NativeInbox.sync(c)&&Api.lastStatus.equals("cancelled"),"explicit local cancellation is respected");
     check(NativeInbox.sync(c)&&NativeDownloads.requests==2,"cancelled requests do not restart on polling");
     JSONObject q=new JSONObject().put("djEnabled",true).put("currentId","e2");JSONArray queueEntries=new JSONArray();for(int i=0;i<10;i++)queueEntries.put(new JSONObject().put("id","e"+i).put("trackId",String.join("",Collections.nCopies(24,String.valueOf(i)))));q.put("entries",queueEntries);state.write("nativeQueue",q.toString());
-    check(NativeInbox.sync(c)&&Api.priorities==1&&Api.lastPriority.length()==6&&Api.lastPriority.getString(0).startsWith("2"),"current and next five tracks receive preparation priority");
+    check(NativeInbox.sync(c)&&Api.priorities==1&&Api.lastPriority.length()==8&&Api.lastPriority.getString(0).startsWith("2"),"current and the available upcoming tracks receive preparation priority");
     check(NativeInbox.sync(c)&&Api.priorities==1,"unchanged background queue does not repeat preparation requests");
     q.put("currentId","e3");state.write("nativeQueue",q.toString());check(NativeInbox.sync(c)&&Api.priorities==2&&Api.lastPriority.getString(0).startsWith("3"),"background song advancement updates priority without a WebView");
     Api.failPriority=true;q.put("currentId","e4");state.write("nativeQueue",q.toString());check(NativeInbox.sync(c),"priority failure cannot break delivery sync");int attempts=Api.priorities;Api.failPriority=false;NativeInbox.sync(c);check(Api.priorities==attempts+1,"priority failure retries on the next sync");

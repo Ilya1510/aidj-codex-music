@@ -75,7 +75,8 @@ def test_cached_numeric_evidence_can_refill_cues_without_downloading_or_transcri
     monkeypatch.setattr('aidj.disk.Disk',forbidden)
     row=db.execute('SELECT * FROM dj_analysis WHERE md5=?',(digest,)).fetchone();process(settings,db,row,'unused')
     track=next(t for t in catalog(db)['tracks'] if t['id']==aid)
-    assert track['djV2']['cues'] and not track['dj']['cues']
+    assert track['djV3']['cues'] and track['djV3']['remix']
+    assert all(c['start']==0 for c in track['djV2']['cues'])
     assert track['djStatus']=='complete' and 'words' not in json.dumps(track)
 
 
@@ -107,14 +108,100 @@ def test_playback_queue_priorities_precede_bulk_preparation_and_worker_state_is_
     assert 'heartbeat' not in json.dumps(service_state(db))
 
 
-def test_upgrade_requeues_empty_legacy_results_once_and_preserves_listened_cues(env):
+def test_startup_does_not_requeue_the_library_and_preserves_finished_metadata(env):
     from aidj.dj import upgrade_queue
     settings,db,*_=env
-    for c in 'ab':db.execute('INSERT INTO web_assets VALUES (?,?,?,?,?,?,?,?)',(c*24,'youtube:'+c,'Song','Artist',180,c*32,123,'/Музыка/'+c+'.mp3'))
-    old={'version':1,'cues':[{'start':17.3,'end':136.5,'bpm':125,'fade':1.9}],'method':'listened'}
+    old={'version':1,'cues':[{'start':0,'end':136.5,'bpm':125,'fade':1.9}],'method':'listened'}
     db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',('a'*32,'a'*24,'complete',json.dumps(old),0))
-    db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',('b'*32,'b'*24,'complete',json.dumps({'version':1,'cues':[]}),0));db.commit()
-    assert upgrade_queue(db)==1 and upgrade_queue(db)==0
-    first=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',('a'*32,)).fetchone()
-    assert json.loads(first[0])['cues'][0]['start']==0 and json.loads(first[0])['method']=='listened'
-    assert db.execute('SELECT status FROM dj_analysis WHERE md5=?',('b'*32,)).fetchone()[0]=='pending'
+    for c in 'bc':db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',(c*32,c*24,'pending',None,0))
+    db.commit()
+    assert upgrade_queue(db)==2 and upgrade_queue(db)==0
+    assert db.execute('SELECT payload FROM dj_analysis WHERE md5=?',('a'*32,)).fetchone()[0]==json.dumps(old)
+    assert db.execute("SELECT COUNT(*) FROM dj_analysis WHERE status='pending'").fetchone()[0]==0
+
+
+def test_verified_middle_fragments_and_short_remix_are_not_exposed_to_old_apks(env):
+    from aidj.dj import compatible_v2
+    cue={'start':55,'end':155,'bpm':128,'fade':1,'mix':3,'entryVerified':True,'energy':.9}
+    short={**cue,'end':69}
+    value=validate({'cues':[cue],'remix':[short]},240)
+    assert value['version']==3 and value['cues'][0]['start']==55 and value['remix'][0]['end']==69
+    assert compatible_v2(value)['cues']==[] and legacy(value)['cues']==[]
+    assert validate({'cues':[{**cue,'entryVerified':False}]},240)['cues'][0]['start']==0
+    with pytest.raises(ValueError):validate({'remix':[{**short,'entryVerified':False}]},240)
+
+
+def test_partial_asr_coverage_cannot_invent_a_vocal_gap_between_windows():
+    from aidj.dj_worker import vocal_gaps,selection
+    words=[(s,s+.5,True) for s in range(0,100,2)]
+    evidence={'words':words,'beats':list(range(100)),'bpm':120,'duration':100,'coverage':[[0,20],[22,45]]}
+    gaps=vocal_gaps(evidence)
+    assert gaps and all(not (lo<22 and hi>20) for lo,hi in gaps)
+    assert all(hi<45 for lo,hi in gaps)
+    chosen=selection({**evidence,'energy':[.1]*20+[.95]*80})
+    assert chosen['remix']
+    for cue in chosen['remix']:
+        assert cue['entryVerified'] and 8<=cue['end']-cue['start']<=24
+        assert not any(lo<cue['start']<hi or lo<cue['end']-cue['fade']<hi for lo,hi,_ in words)
+
+
+def test_selection_prefers_an_energetic_middle_over_a_quiet_prefix():
+    from aidj.dj_worker import selection
+    evidence={'words':[(s,s+2,True) for s in range(0,240,4)],'beats':[i*.5 for i in range(480)],'bpm':120,'duration':240,'coverage':[[0,240]],'energy':[.1]*55+[1]*130+[.4]*55}
+    value=selection(evidence)
+    assert value['cues'] and any(cue['start']>40 for cue in value['cues'])
+    assert len(value['remix'])>=2
+    assert all(c['entryVerified'] for c in value['cues']+value['remix'])
+
+
+def test_active_queue_is_capped_at_ten_even_for_old_whole_playlist_requests(env):
+    from aidj.dj import next_job
+    settings,db,*_=env
+    ids=[format(n,'024x') for n in range(1,31)]
+    for n,aid in enumerate(ids):db.execute('INSERT INTO web_assets VALUES (?,?,?,?,?,?,?,?)',(aid,'youtube:'+str(n),'Song','Artist',180,format(n,'032x'),123,'/Музыка/'+str(n)+'.mp3'))
+    db.commit();enqueue(db,{'trackIds':ids})
+    assert db.execute("SELECT COUNT(*) FROM dj_analysis WHERE status='pending'").fetchone()[0]==10
+    running=next_job(db)
+    db.execute("UPDATE dj_analysis SET status='working' WHERE md5=?",(running['md5'],));db.commit()
+    enqueue(db,{'trackIds':ids[15:25],'nextTrackIds':ids[15:25]})
+    assert db.execute("SELECT COUNT(*) FROM dj_analysis WHERE status IN ('pending','working')").fetchone()[0]==10
+    assert db.execute('SELECT status FROM dj_analysis WHERE md5=?',(running['md5'],)).fetchone()[0]=='working'
+    assert db.execute('SELECT COUNT(*) FROM dj_analysis WHERE asset_id=?',(ids[1],)).fetchone()[0]==0
+
+
+def test_refinement_preserves_a_ready_cue_when_no_new_safe_exit_is_found(env):
+    settings,db,*_=env
+    cue={'start':0,'end':110,'bpm':120,'fade':1.2}
+    db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',('a'*32,'b'*24,'pending',json.dumps({'version':2,'cues':[cue]}),0));db.commit()
+    complete(db,'a'*32,{'cues':[],'remix':[],'reason':'no-safe-gap'},240)
+    value=json.loads(db.execute('SELECT payload FROM dj_analysis WHERE md5=?',('a'*32,)).fetchone()[0])
+    assert value['cues'][0]['end']==110 and value['reason']=='kept-previous'
+
+
+def test_targeted_probes_are_bounded_and_completed_observations_are_not_repeated():
+    from aidj.dj_worker import probe_windows
+    evidence={'version':2,'words':[(s,s+2,True) for s in range(45,180,4)],'beats':[],'bpm':0,'duration':235,'energy':[.4]*50+[1]*100+[.2]*85}
+    first=probe_windows(evidence)
+    assert 1<=len(first)<=3 and all(12<=hi-lo<=28 for lo,hi in first)
+    assert sum(hi-lo for lo,hi in first)<=84
+    assert any(lo>180 for lo,hi in first)
+    assert probe_windows({**evidence,'probes':first})==[]
+
+
+def test_refinement_keeps_previous_remix_independently_of_new_regular_cues(env):
+    settings,db,*_=env
+    short={'start':55,'end':69,'bpm':128,'fade':1,'entryVerified':True}
+    db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',('a'*32,'b'*24,'pending',json.dumps({'version':3,'cues':[],'remix':[short]}),0));db.commit()
+    complete(db,'a'*32,{'cues':[{'start':0,'end':110,'bpm':128,'fade':1}],'remix':[]},240)
+    value=json.loads(db.execute('SELECT payload FROM dj_analysis WHERE md5=?',('a'*32,)).fetchone()[0])
+    assert value['cues'][0]['end']==110 and value['remix'][0]['start']==55
+
+
+def test_previously_validated_exit_can_pair_with_a_new_whole_word_entry():
+    from aidj.dj_worker import selection
+    # The old known-safe 71.8s exit remains usable even when the new local ASR
+    # window ends before it. The entry has separately observed confident words.
+    words=[(s,s+1.4,True) for s in range(40,67,2)]
+    evidence={'words':words,'beats':[],'bpm':120,'duration':190,'coverage':[[40,68]],'safeExits':[[69.8,71.8]]}
+    remix=selection(evidence)['remix']
+    assert any(c['start']>50 and c['end']==71.8 for c in remix)

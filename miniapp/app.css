@@ -38,3 +38,7 @@ body.has-downloads{padding-bottom:calc(245px + var(--safe))}
 .song-text>span.dj-ready{display:table;color:var(--accent);background:#d4ff6112;border:1px solid #d4ff6138;border-radius:7px;padding:2px 6px;margin-top:5px;font-size:10px;line-height:1.3}.dj-library-tools{display:flex;align-items:center;gap:12px;margin:10px 0}.dj-library-tools .dj-only{font-size:12px;padding:9px 14px;min-height:40px;flex-shrink:0}.dj-library-progress{font-size:11px;color:var(--muted);line-height:1.5}
 
 .song-text>span.dj-working{display:table;color:#dfc67a;font-size:10px;margin-top:5px}.dj-work-status{font-size:11px;color:var(--muted);line-height:1.5;margin:7px 0 14px;overflow-wrap:anywhere}
+
+.header-tools{display:flex;flex-direction:column;align-items:center;flex-shrink:0;position:relative}.update-notice{color:var(--accent);font-size:10px;line-height:1.2;padding:0 3px 3px;white-space:nowrap}.header-tools .update-notice[hidden]{display:none}.full-player .transport{margin:16px 0}.full-player .seek{margin-top:20px}.full-player .player-title-row{margin-top:12px}.full-player .player-top{margin-bottom:10px}
+
+.playback-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.playback-modes .button{margin:0;min-height:46px;padding:10px 8px;white-space:normal}

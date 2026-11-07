@@ -8,13 +8,14 @@ final class DjPlan {
         if(!enabled||t==null||entry==null||entry.optBoolean("djFull")||manual(t))return null;
         JSONObject c=entry.optJSONObject("dj");if(c==null)return null;
         double start=c.optDouble("start",-1),end=c.optDouble("end",-1),bpm=c.optDouble("bpm",0),fade=c.optDouble("fade",0);
-        if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end-start<30||end>t.optDouble("duration")+.1||!Double.isFinite(bpm)||(bpm!=0&&bpm<60)||bpm>210||!Double.isFinite(fade)||fade<.5||fade>8)return null;
+        if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end-start<(entry.optBoolean("remix")&&c.optBoolean("entryVerified")?8:30)||end>t.optDouble("duration")+.1||!Double.isFinite(bpm)||(bpm!=0&&bpm<60)||bpm>210||!Double.isFinite(fade)||fade<.5||fade>8)return null;
         return c;
     }
     static JSONObject track(JSONObject t,JSONObject entry,boolean enabled){
         JSONObject c=cue(t,entry,enabled);if(c==null)return t;
-        try{return new JSONObject(t.toString()).put("rangeStart",0).put("rangeEnd",c.getDouble("end"));}catch(Exception e){return t;}
+        try{return new JSONObject(t.toString()).put("rangeStart",c.optBoolean("entryVerified")?c.optDouble("start"):0).put("rangeEnd",c.getDouble("end"));}catch(Exception e){return t;}
     }
+    static long previewTail(JSONObject track,long duration,float rate){return Math.max(PlaybackRange.start(track,duration),PlaybackRange.end(track,duration)-(long)(10000*rate));}
     static float rate(JSONObject t,JSONObject entry,boolean enabled){
         JSONObject c=cue(t,entry,enabled);if(c!=null&&c.optDouble("bpm")==0)return 1f;double rate=c==null?1:c.optDouble("rate",1);
         return Double.isFinite(rate)&&rate>=.9699&&rate<=1.0301?(float)rate:1f;
@@ -34,7 +35,7 @@ final class DjPlan {
         double bpm=left.optDouble("bpm")*rate,other=right.optDouble("bpm")*nextRate;
         if(bpm<=0||other<=0||Math.abs(bpm-other)>.1)return window;
         double a=(left.optDouble("end")-left.optDouble("grid"))*left.optDouble("bpm")/60;
-        double b=(-right.optDouble("grid"))*right.optDouble("bpm")/60;
+        double b=((right.optBoolean("entryVerified")?right.optDouble("start"):0)-right.optDouble("grid"))*right.optDouble("bpm")/60;
         double phase=(a-Math.floor(a))-(b-Math.floor(b)),beat=60/bpm;
         double count=Math.floor(window/1000.0/beat-phase)+phase;
         return count>=.5?(long)(count*beat*1000):window;
