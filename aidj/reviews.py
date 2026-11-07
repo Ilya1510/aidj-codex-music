@@ -222,7 +222,7 @@ def confirm(db,proposal_id,user_id,chat_id):
 def submit_suggestion(db,event,user_id,chat_id,query,message_id):
     user=ensure_user(db,user_id,chat_id);parse_input(query)
     recent=db.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND json_extract(payload,'$.client')='review' AND json_extract(payload,'$.action')='suggest' AND created>?",(user_id,time.time()-3600)).fetchone()[0]
-    if recent>=10:raise ReviewError('За час можно предложить до 10 записей. Продолжи чуть позже.')
+    if recent>=50:raise ReviewError('За час можно предложить до 50 записей. Продолжи чуть позже.')
     job=add_job(db,event,user_id,chat_id,query,{'action':'suggest','playlist_id':user['playlist_id']},message_id)
     db.execute("UPDATE review_users SET mode='menu' WHERE user_id=?",(user_id,));db.commit();return job
 
