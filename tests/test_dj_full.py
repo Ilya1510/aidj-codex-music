@@ -1,5 +1,6 @@
 """Full-song scan scheduling and resumable numeric evidence, with a fake ASR."""
 import json
+import math
 from types import SimpleNamespace as N
 
 import pytest
@@ -12,13 +13,13 @@ def evidence(duration=100):
             'energy':[.7]*int(duration),'acousticFeatures':{'hop':.02,'regions':[]},'timings':{},'analysisScope':'full','fullComplete':False}
 
 
-@pytest.mark.parametrize('duration',[12,28,30,50,100,240,599.2,600])
+@pytest.mark.parametrize('duration',[.5,8,12,28,30,50,100,240,599.2,600,1799.2,1800])
 def test_full_schedule_covers_every_second_in_bounded_overlapping_observations(duration):
     windows=full_windows(evidence(duration))
     assert windows[0][0]==0 and windows[-1][1]==duration
     assert all(0<=lo<hi<=duration and hi-lo<=28 for lo,hi in windows)
     assert merged_coverage(windows)==[[0.,duration]]
-    assert len(windows)<=26
+    assert len(windows)<=math.ceil(duration/24)+1 and len(windows)<=76
 
 
 def test_full_resume_unions_coverage_without_treating_unobserved_holes_as_done():
@@ -97,7 +98,7 @@ def test_full_selection_can_choose_an_active_section_later_than_old_prefix_limit
             assert abs(cue['start']-other['start'])>=2 or abs(cue['end']-other['end'])>=2
 
 
-@pytest.mark.parametrize('duration',[0,-1,601,float('nan'),float('inf')])
+@pytest.mark.parametrize('duration',[0,-1,1801,float('nan'),float('inf')])
 def test_full_scan_rejects_unbounded_input(duration):
     with pytest.raises(ValueError):full_windows(evidence(duration) if 0<=duration<1000 else {'duration':duration})
 
@@ -115,7 +116,7 @@ def test_analyse_full_finalizes_only_after_pass_and_passes_worker_thread_budget(
         def close(self):self.closed=True
     def command(args,**kwargs):
         calls.append(args)
-        assert '-t' in args and args[args.index('-t')+1]=='600.1'
+        assert '-t' in args and args[args.index('-t')+1]=='1800.1'
         with open(args[-1],'wb') as target:target.truncate(16000*duration*4)
         return N(returncode=0)
     def whisper(*args,**kwargs):constructors.append(kwargs);return Model()
@@ -208,15 +209,15 @@ def test_rhythm_child_uses_only_ninety_seconds_while_energy_covers_original(tmp_
     import sys
     from aidj.dj_worker import main
     raw=tmp_path/'original.f32';output=tmp_path/'rhythm.json'
-    with raw.open('wb') as stream:stream.truncate(16000*600*4)
+    with raw.open('wb') as stream:stream.truncate(16000*1800*4)
     observed=[];maps=[]
     class Samples:
         def __init__(self,path,**kwargs):self._mmap=self;self.closed=False;maps.append(self)
-        def __len__(self):return 16000*600
+        def __len__(self):return 16000*1800
         def __getitem__(self,slice):return (slice.start,slice.stop)
         def close(self):self.closed=True
     def beats(sample,sr):observed.append(('beats',sample,sr));return [],0
-    def energy(sample,sr):observed.append(('energy',len(sample),sr));return [.5]*600
+    def energy(sample,sr):observed.append(('energy',len(sample),sr));return [.5]*1800
     monkeypatch.setitem(sys.modules,'numpy',N(float32=object(),memmap=Samples,array=lambda value,**kwargs:value))
     monkeypatch.setattr('aidj.dj_worker.Settings',lambda:N(prepare=lambda:None))
     monkeypatch.setattr('aidj.dj_worker.rhythm',beats)
@@ -224,8 +225,8 @@ def test_rhythm_child_uses_only_ninety_seconds_while_energy_covers_original(tmp_
     monkeypatch.setattr('aidj.dj_worker.acoustic_features',lambda sample,sr:{'hop':.02,'regions':[]})
     monkeypatch.setattr(sys,'argv',['dj_worker','rhythm','--file',str(raw),'--output',str(output),'--ffmpeg','ffmpeg'])
     main()
-    assert observed==[('beats',(None,16000*90),16000),('energy',16000*600,16000)]
-    assert len(json.loads(output.read_text())['energy'])==600 and maps[0].closed
+    assert observed==[('beats',(None,16000*90),16000),('energy',16000*1800,16000)]
+    assert len(json.loads(output.read_text())['energy'])==1800 and maps[0].closed
 
 
 def test_memory_failure_during_rhythm_keeps_stage_without_loading_parent_numpy(tmp_path,monkeypatch):
@@ -249,3 +250,41 @@ def test_memory_failure_during_rhythm_keeps_stage_without_loading_parent_numpy(t
     saved=json.loads(checkpoint.read_text())
     assert saved['analysisStage']=='rhythm' and saved['fullComplete'] is False
     assert saved['duration']==120 and not imports and not source.with_suffix('.f32').exists()
+
+
+def test_long_original_resume_has_no_large_samples_and_keeps_end_of_thirty_minutes():
+    duration=1800;e=evidence(duration);all_windows=full_windows(e)
+    done=all_windows[:37];e['probes']=[list(pair) for pair in done]
+    remaining=full_windows(e)
+    assert remaining and remaining[-1][1]==duration
+    assert len(remaining)+len(done)==len(all_windows)
+    assert all(window not in done for window in remaining)
+    assert all(0<hi-lo<=28 for lo,hi in remaining)
+    e['coverage']=[[0,900]]
+    assert all(lo>=876 for lo,hi in full_windows(e))
+
+
+def test_eight_second_original_is_fully_analyzed_and_retained_as_honest_whole_track_fallback(tmp_path,monkeypatch):
+    import sys
+    from aidj.dj_worker import analyse
+    from aidj.dj import validate
+    duration=8;source=tmp_path/'short.mp3';source.write_bytes(b'original')
+    class Samples:
+        def __init__(self,path,**kwargs):self.length=path.stat().st_size//4;self._mmap=self
+        def __len__(self):return self.length
+        def __getitem__(self,slice):return (slice.start,slice.stop)
+        def close(self):pass
+    def command(args,**kwargs):
+        assert args[args.index('-t')+1]=='1800.1'
+        with open(args[-1],'wb') as out:out.truncate(duration*16000*4)
+        return N(returncode=0)
+    model=Model(empty=True)
+    monkeypatch.setitem(sys.modules,'numpy',N(float32=object(),memmap=Samples,array=lambda value,**kwargs:value))
+    monkeypatch.setitem(sys.modules,'faster_whisper',N(WhisperModel=lambda *args,**kwargs:model))
+    monkeypatch.setattr('aidj.dj_worker.subprocess.run',command)
+    result=analyse(source,'ffmpeg',tmp_path/'models',cached=evidence(duration),full=True)
+    assert len(model.calls)==1 and model.calls[0][0]==(0,8*16000)
+    assert result['evidence']['fullComplete'] and result['evidence']['fullDuration']==8
+    assert result['evidence']['boundaryPass']==1 and result['needsReview']
+    assert result['fullFallback'] and validate(result,duration)['fullFallback']
+    assert not result['cues'] and not result['remix']

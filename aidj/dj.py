@@ -6,6 +6,7 @@ import time
 
 VERSION=3
 ACTIVE_LIMIT=10
+MAX_FULL_DURATION=1800
 
 
 def validate_anchors(graph,duration):
@@ -43,7 +44,7 @@ def validate(value,duration):
     if not isinstance(value,dict):raise ValueError('Invalid DJ metadata')
     schema=value.get('cueSchema',3)
     if type(schema) is not int or schema not in (3,4):raise ValueError('Invalid cue schema')
-    def clean_cues(items,minimum,maximum=600):
+    def clean_cues(items,minimum,maximum=MAX_FULL_DURATION):
         if not isinstance(items,list):raise ValueError('Invalid cues')
         result=[]
         limit=32 if schema==4 and minimum==8 else 12

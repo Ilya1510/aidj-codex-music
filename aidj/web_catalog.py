@@ -12,21 +12,27 @@ def asset_id(key):
     return hashlib.sha256(key.encode()).hexdigest()[:24]
 
 
+def register_asset(db,result,created=None,*,key=None,remote_path=None,overwrite=True):
+    """Index one already saved visible result in its caller's transaction."""
+    track=result['track'];key=key or track_key(result)
+    title=track['title']+(' ('+track['version']+')' if track.get('version') else '')
+    values=(asset_id(key),key,title,track['artist'],result['duration'],result['md5'],result['bytes'],remote_path or result['remote_path'])
+    update=" ON CONFLICT(id) DO UPDATE SET title=excluded.title,artist=excluded.artist,duration=excluded.duration,md5=excluded.md5,bytes=excluded.bytes,remote_path=excluded.remote_path" if overwrite else ''
+    db.execute(('INSERT' if overwrite else 'INSERT OR IGNORE')+' INTO web_assets VALUES (?,?,?,?,?,?,?,?)'+update,values)
+    db.execute('INSERT OR IGNORE INTO library_added VALUES (?,?)',(key,time.time() if created is None else created))
+
+
 def sync_assets(db):
     db.execute('BEGIN IMMEDIATE')
-    for row in db.execute("SELECT * FROM playlist_tracks WHERE state='complete' ORDER BY playlist_id,position").fetchall():
+    for row in db.execute("SELECT * FROM playlist_tracks WHERE state='complete' ORDER BY playlist_id,position"):
         artist,sep,title=row['label'].partition(' — ')
         if not sep:title,artist=artist,''
         db.execute('''INSERT INTO web_assets VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
             title=excluded.title,artist=excluded.artist,duration=excluded.duration,md5=excluded.md5,
             bytes=excluded.bytes,remote_path=excluded.remote_path''',
             (asset_id(row['track_key']),row['track_key'],title,artist,row['duration'],row['md5'],row['bytes'],row['remote_path']))
-    for cache in db.execute("SELECT result,created FROM cache WHERE key NOT LIKE 'review:%' UNION ALL SELECT result,created FROM audio_clips").fetchall():
-        result=json.loads(cache[0]);track=result['track'];key=track_key(result)
-        title=track['title']+(' ('+track['version']+')' if track.get('version') else '')
-        db.execute('INSERT OR IGNORE INTO web_assets VALUES (?,?,?,?,?,?,?,?)',
-            (asset_id(key),key,title,track['artist'],result['duration'],result['md5'],result['bytes'],result['remote_path']))
-        db.execute('INSERT OR IGNORE INTO library_added VALUES (?,?)',(key,cache['created']))
+    for cache in db.execute("SELECT result,created FROM cache WHERE key NOT LIKE 'review:%' UNION ALL SELECT result,created FROM audio_clips"):
+        register_asset(db,json.loads(cache[0]),cache['created'],overwrite=False)
     db.commit()
 
 

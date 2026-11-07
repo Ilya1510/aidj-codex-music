@@ -37,7 +37,7 @@ def snapshot(settings,work):
     if not source.is_file():raise BackupError('База ещё не создана.')
     if source.stat().st_size>MAX_BYTES:raise BackupError('База больше лимита резервного копирования.')
     if shutil.disk_usage(settings.state).free<max(256*1024**2,source.stat().st_size*3):raise BackupError('Недостаточно места для снимка.')
-    destination=replace(settings,state=Path(work)/'snapshot');out=connect(destination)
+    destination=replace(settings,state=Path(work)/'snapshot');out=connect(destination,dj_enrol=False)
     src=sqlite3.connect(source.resolve().as_uri()+'?mode=ro',uri=True,timeout=15)
     counts={}
     try:

@@ -17,7 +17,7 @@ import time
 
 from .config import Settings
 from .store import connect
-from .dj import complete,next_job,heartbeat,upgrade_queue
+from .dj import complete,next_job,heartbeat,upgrade_queue,MAX_FULL_DURATION
 
 
 def vocal_cues(words,beats,bpm,duration):
@@ -396,7 +396,7 @@ def full_windows(evidence):
     observations with enough words. Neither is an instruction to invent a cue.
     """
     duration=float(evidence['duration'])
-    if not math.isfinite(duration) or not 0<duration<=600.1:raise ValueError('Invalid full duration')
+    if not math.isfinite(duration) or not 0<duration<=MAX_FULL_DURATION+.1:raise ValueError('Invalid full duration')
     all_windows=[];lo=0.
     while lo+28<duration:
         all_windows.append((lo,lo+28));lo+=24
@@ -434,7 +434,7 @@ def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None,full=Fa
     # Keep the parent small until the separate rhythm process has exited: an
     # eager NumPy import here otherwise duplicates its libraries and workspace
     # in the Mac watchdog's process-tree RSS budget during the heavy beat pass.
-    decode_limit=600 if full else 300
+    decode_limit=MAX_FULL_DURATION if full else 300
     if not 0<file.stat().st_size<=40*1024**2:raise RuntimeError('SOURCE_TOO_LARGE_OR_EMPTY')
     raw=file.with_suffix('.f32');began=time.monotonic();y=None
     evidence=dict(cached or {})
@@ -562,7 +562,7 @@ def main():
     if args.action=='rhythm':
         import numpy as np
         from .config import atomic_json
-        if not 0<args.file.stat().st_size<=16000*600*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
+        if not 0<args.file.stat().st_size<=16000*MAX_FULL_DURATION*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
         y=np.memmap(args.file,dtype=np.float32,mode='r')
         try:
             beats,bpm=rhythm(np.array(y[:16000*90],copy=True),16000)

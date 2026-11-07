@@ -47,7 +47,11 @@ def create(settings,db,original,start,end,work,disk):
         result=json.loads(previous[0]);asset=db.execute('SELECT remote_path FROM web_assets WHERE track_key=?',(key,)).fetchone()
         if asset:result.update(remote_path=asset['remote_path'],disk_url=web_url(asset['remote_path']))
         if disk.verify(result['remote_path'],result['md5'],result['bytes']):
-            target=work/'fragment.m4a';disk.download(result['remote_path'],target,result['md5']);result['local_path']=str(target);return result
+            target=work/'fragment.m4a';disk.download(result['remote_path'],target,result['md5']);result['local_path']=str(target)
+            if asset is None:
+                from .web_catalog import register_asset
+                register_asset(db,result);db.commit()
+            return result
     if shutil.disk_usage(settings.state).free<2*1024**3:raise AudioError('На сервере недостаточно свободного места для подготовки фрагмента.')
     source=work/('source'+Path(original['remote_path']).suffix);disk.download(original['remote_path'],source,original['md5'])
     target=work/'fragment.m4a'
@@ -60,7 +64,10 @@ def create(settings,db,original,start,end,work,disk):
     remote=settings.disk_folder+'/'+safe_filename(track['artist']+' — '+track['title'])+' [clip-'+identity+'].m4a'
     disk.mkdir(settings.disk_folder);checksum=disk.upload(target,remote)
     answer={'track':track,'remote_path':remote,'disk_url':web_url(remote),'md5':checksum,'bytes':target.stat().st_size,'duration':duration(target),'clip':{'start':start,'end':end,'original_md5':original['md5']},'telegram_file_id':None}
-    db.execute('INSERT INTO audio_clips VALUES (?,?,?) ON CONFLICT(track_key) DO UPDATE SET result=excluded.result',(key,json.dumps(answer,ensure_ascii=False),time.time()));db.commit()
+    db.execute('INSERT INTO audio_clips VALUES (?,?,?) ON CONFLICT(track_key) DO UPDATE SET result=excluded.result',(key,json.dumps(answer,ensure_ascii=False),time.time()))
+    from .web_catalog import register_asset
+    register_asset(db,answer)
+    db.commit()
     answer['local_path']=str(target);return answer
 
 

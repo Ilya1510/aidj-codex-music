@@ -21,7 +21,7 @@ import time
 
 from .config import Settings
 from .store import connect
-from .dj import VERSION, complete, validate
+from .dj import VERSION,MAX_FULL_DURATION, complete, validate
 
 MAX_JSON=1024*1024
 LEASE_SECONDS=300
@@ -86,12 +86,18 @@ def start(db,playlist=None):
         query="SELECT a.* FROM web_assets a JOIN playlist_tracks t ON t.md5=a.md5 WHERE t.playlist_id=? AND t.state='complete' GROUP BY a.md5";params=(p[0],)
     db.execute('INSERT OR IGNORE INTO dj_batch_runs VALUES (?,?,?)',(run,scope,time.time()))
     for row in db.execute(query,params):
-        if not 30<=row['duration']<=600 or row['bytes']>40*1024**2:continue
+        if not 0<row['duration']<=MAX_FULL_DURATION or row['bytes']>40*1024**2:continue
         cached=db.execute('SELECT payload FROM dj_evidence WHERE md5=?',(row['md5'],)).fetchone()
         evidence=json.loads(cached[0]) if cached else {}
         done=evidence.get('fullComplete') is True and evidence.get('version',0)>=VERSION
         db.execute('INSERT OR IGNORE INTO dj_batch_jobs(run_id,md5,asset_id,state,lease,attempts,updated) VALUES (?,?,?,?,0,0,?)',
                    (run,row['md5'],row['id'],'done' if done else 'pending',time.time()))
+    # Asset triggers can enrol a source before its cached full result arrives
+    # during restore. Reconcile it without cancelling an explicit refinement.
+    db.execute("""UPDATE dj_batch_jobs SET state='done',error=NULL WHERE run_id=? AND state='pending'
+        AND COALESCE(error,'')!='REFINE_BOUNDARIES' AND EXISTS(SELECT 1 FROM dj_evidence e
+        WHERE e.md5=dj_batch_jobs.md5 AND json_extract(e.payload,'$.fullComplete')=1
+        AND json_extract(e.payload,'$.version')>=?)""",(run,VERSION))
     db.commit();return {'runId':run,'stats':stats(db,run)}
 
 
@@ -110,10 +116,12 @@ def claim(db,run,allow_refinement=True):
          AND json_extract(e.payload,'$.fullComplete')=1 AND json_extract(e.payload,'$.version')>=?
          AND (COALESCE(json_extract(e.payload,'$.boundaryPass'),0)>=1 OR COALESCE(dj_batch_jobs.error,'')!='REFINE_BOUNDARIES'))""",(run,VERSION))
     row=db.execute("""SELECT b.* FROM dj_batch_jobs b LEFT JOIN dj_analysis a ON a.md5=b.md5
+        LEFT JOIN dj_priority p ON p.md5=b.md5 AND p.requested>?
         WHERE b.run_id=? AND b.state='pending' AND (a.status IS NULL OR a.status!='working')
         AND NOT EXISTS (SELECT 1 FROM dj_batch_jobs other WHERE other.md5=b.md5 AND other.state='running' AND other.lease>?)
         AND (? OR COALESCE(b.error,'')!='REFINE_BOUNDARIES')
-        ORDER BY b.updated,b.md5 LIMIT 1""",(run,now,allow_refinement)).fetchone()
+        ORDER BY CASE WHEN p.rank=0 THEN 0 WHEN b.error='NEW_ASSET' THEN 1 WHEN p.md5 IS NOT NULL THEN 2 ELSE 3 END,
+        p.rank,b.updated,b.md5 LIMIT 1""",(now-3600,run,now,allow_refinement)).fetchone()
     if row is None:db.commit();return {'job':None,'stats':stats(db,run)}
     token=secrets.token_hex(16)
     db.execute("UPDATE dj_batch_jobs SET state='running',token=?,lease=?,attempts=attempts+1,updated=? WHERE run_id=? AND md5=?",(token,now+LEASE_SECONDS,now,run,row['md5']))
@@ -145,7 +153,7 @@ def numeric_evidence(value,duration):
     bpm=number(value.get('bpm'),0,210)
     if bpm and bpm<60:raise BatchError('INVALID_EVIDENCE')
     out['bpm']=bpm
-    for key,limit,maximum in [('beats',6000,duration+.5),('energy',601,1)]:
+    for key,limit,maximum in [('beats',6000,duration+.5),('energy',MAX_FULL_DURATION+1,1)]:
         rows=value.get(key,[])
         if not isinstance(rows,list) or len(rows)>limit:raise BatchError('INVALID_EVIDENCE')
         out[key]=[number(x,0,maximum) for x in rows]
@@ -408,7 +416,7 @@ def serve(settings,analysis_python,ffmpeg,run=None,once=False,stopped=None,pause
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['rpc','audio','serve','retry','refine']);parser.add_argument('--run');parser.add_argument('--md5');parser.add_argument('--token');parser.add_argument('--analysis-python',type=Path);parser.add_argument('--ffmpeg');parser.add_argument('--once',action='store_true');parser.add_argument('--threads',type=int,choices=(1,2),default=1);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['rpc','audio','serve','retry','refine']);parser.add_argument('--run');parser.add_argument('--md5');parser.add_argument('--token');parser.add_argument('--analysis-python',type=Path);parser.add_argument('--ffmpeg');parser.add_argument('--once',action='store_true');parser.add_argument('--threads',type=int,choices=(1,2,4),default=1);args=parser.parse_args()
     settings=Settings();settings.prepare()
     if args.action=='serve':
         stopped=threading.Event()

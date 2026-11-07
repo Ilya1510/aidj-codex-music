@@ -7,7 +7,7 @@ from .audio import ffmpeg
 
 def main():
     root=Path(__file__).resolve().parent.parent
-    os.execv(sys.executable,[sys.executable,'-m','aidj.dj_batch','serve','--analysis-python',str(root/'.dj-venv/bin/python'),'--ffmpeg',ffmpeg(),'--threads','2'])
+    os.execv(sys.executable,[sys.executable,'-m','aidj.dj_batch','serve','--analysis-python',str(root/'.dj-venv/bin/python'),'--ffmpeg',ffmpeg(),'--threads','4'])
 
 
 if __name__=='__main__':main()

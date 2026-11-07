@@ -1,9 +1,45 @@
+import hashlib
 import json
 import sqlite3
 import time
 
 
-def connect(settings):
+def install_dj_asset_triggers(db):
+    """Every committed eligible app asset joins the durable full-library run.
+
+    The application transaction owns this enqueue too. Repeated aliases,
+    metadata refreshes and failed records cannot reset an existing job/lease.
+    """
+    from .dj import VERSION,MAX_FULL_DURATION
+    run=hashlib.sha256(('full:'+str(VERSION)+':all').encode()).hexdigest()[:24]
+    eligible=f"NEW.duration>0 AND NEW.duration<={MAX_FULL_DURATION} AND NEW.bytes>0 AND NEW.bytes<=41943040"
+    version=hashlib.sha256(('2:'+run+eligible).encode()).hexdigest()
+    installed=db.execute("SELECT value FROM meta WHERE key='dj_asset_trigger_version'").fetchone()
+    if installed and installed[0]==version:return
+    cached="EXISTS(SELECT 1 FROM dj_evidence e WHERE e.md5=NEW.md5 AND json_extract(e.payload,'$.fullComplete')=1 AND COALESCE(json_extract(e.payload,'$.boundaryPass'),0)>=1 AND json_extract(e.payload,'$.version')>="+str(VERSION)+")"
+    body=f"""
+        INSERT INTO dj_batch_runs(id,scope,created)
+        SELECT '{run}','all',CAST(strftime('%s','now') AS REAL) WHERE NOT EXISTS(SELECT 1 FROM dj_batch_runs WHERE id='{run}');
+        INSERT INTO dj_batch_jobs(run_id,md5,asset_id,state,lease,attempts,error,updated)
+        SELECT '{run}',NEW.md5,NEW.id,CASE WHEN {cached} THEN 'done' ELSE 'pending' END,0,0,
+                CASE WHEN {cached} THEN NULL ELSE 'NEW_ASSET' END,CAST(strftime('%s','now') AS REAL)
+        WHERE NOT EXISTS(SELECT 1 FROM dj_batch_jobs WHERE run_id='{run}' AND md5=NEW.md5);
+    """
+    db.executescript(f"""
+        BEGIN IMMEDIATE;
+        DROP TRIGGER IF EXISTS dj_enrol_asset_insert;
+        DROP TRIGGER IF EXISTS dj_enrol_asset_content;
+        CREATE TRIGGER IF NOT EXISTS dj_enrol_asset_insert AFTER INSERT ON web_assets
+        WHEN {eligible} BEGIN {body} END;
+        CREATE TRIGGER IF NOT EXISTS dj_enrol_asset_content AFTER UPDATE OF md5,duration,bytes ON web_assets
+        WHEN {eligible} AND (OLD.md5!=NEW.md5 OR OLD.duration<=0 OR OLD.duration>{MAX_FULL_DURATION} OR OLD.bytes<=0 OR OLD.bytes>41943040)
+        BEGIN {body} END;
+        INSERT OR REPLACE INTO meta VALUES ('dj_asset_trigger_version','{version}');
+        COMMIT;
+    """)
+
+
+def connect(settings,*,dj_enrol=True):
     settings.prepare()
     db=sqlite3.connect(settings.state/'bot.sqlite',timeout=30)
     db.row_factory=sqlite3.Row
@@ -94,6 +130,7 @@ def connect(settings):
         PRIMARY KEY(operation_id,user_id));
     CREATE TABLE IF NOT EXISTS review_web_ops(id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL);
     ''')
+    if dj_enrol:install_dj_asset_triggers(db)
     return db
 
 

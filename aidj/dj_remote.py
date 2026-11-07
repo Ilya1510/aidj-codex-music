@@ -19,6 +19,8 @@ import tempfile
 import threading
 import time
 
+from .dj import MAX_FULL_DURATION
+
 MAX_JSON=1024*1024
 MAX_AUDIO=40*1024**2
 RSS_LIMIT=1024**2*1024
@@ -111,7 +113,7 @@ class Transport:
 
 def valid_asset(asset):
     return (isinstance(asset,dict) and type(asset.get('bytes')) is int and 0<asset['bytes']<=MAX_AUDIO
-            and isinstance(asset.get('duration'),(int,float)) and 30<=asset['duration']<=600
+            and isinstance(asset.get('duration'),(int,float)) and 0<asset['duration']<=MAX_FULL_DURATION
             and isinstance(asset.get('format'),str) and re.fullmatch('[a-z0-9]{1,8}',asset['format']) is not None)
 
 

@@ -90,6 +90,10 @@ class Pipeline:
             local=work/('cached'+Path(result['remote_path']).suffix)
             self.disk.download(result['remote_path'],local,result['md5'])
             result['local_path']=str(local)
+        if not self.namespace.startswith('review:'):
+            from .web_catalog import register_asset
+            register_asset(self.db,result,cache['created'])
+            self.db.commit()
         return result
 
     def run(self,text,payload,work,notify=lambda text:None,need_local=True):
@@ -137,6 +141,9 @@ class Pipeline:
                 'trim':edges.to_dict(),'cached':False,'cache_key':key,'telegram_file_id':None}
         self.db.execute('INSERT INTO cache(key,result,created) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET result=excluded.result,telegram_file_id=NULL,created=excluded.created',
                         (key,json.dumps(result,ensure_ascii=False),time.time()))
+        if not self.namespace.startswith('review:'):
+            from .web_catalog import register_asset
+            register_asset(self.db,result)
         self.db.commit()
         result['local_path']=str(named)
         return result

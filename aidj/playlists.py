@@ -131,6 +131,8 @@ class Playlists:
             if not disk.verify(row['remote_path'], row['md5'], row['bytes']):
                 raise DiskError('Диск не подтвердил добавление песни.')
         self.db.execute("UPDATE playlist_tracks SET state='complete' WHERE playlist_id=? AND track_key=?",(playlist_id,key))
+        from .web_catalog import register_asset
+        register_asset(self.db,result,key=key,remote_path=row['remote_path'])
         self.db.commit()
         # Also repair an index after an interrupted earlier attempt.
         self.write_index(playlist_id, work)
