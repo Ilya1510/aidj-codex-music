@@ -144,6 +144,8 @@ def process(settings,db,row,bot,disk=None):
         value={'card_id':card_id,'phase':phase}
         if context_message_id is not None:value['context_message_id']=context_message_id
         if exception is not None:value['exception_type']=type(exception).__name__[:100]
+        if type(getattr(exception,'code',None)) is int:value['api_code']=exception.code
+        if type(getattr(exception,'retry_after',None)) is int:value['retry_after']=exception.retry_after
         return json.dumps(value)
     try:
         R.ensure_owner(db,row['user_id'],row['chat_id'])

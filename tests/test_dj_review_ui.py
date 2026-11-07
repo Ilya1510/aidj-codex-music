@@ -311,12 +311,12 @@ def test_first_audio_failure_has_durable_safe_phase_without_a_receipt(setup,monk
     settings,db,disk,bot,manager,result,uploads,rendered=setup
     handle_update(db,{},bot,update(text='/djreview'),settings);job=claim_job(db)
     secret='https://private.invalid/download?token=must-not-persist'
-    def fail_upload(chat,value,keys=None):raise TelegramError(secret)
+    def fail_upload(chat,value,keys=None):raise TelegramError(secret,code=429,retry_after=3)
     monkeypatch.setattr(bot,'audio',fail_upload)
     assert process(settings,db,job,bot)==1 and not uploads
     saved=db.execute('SELECT status,result,error FROM jobs').fetchone()
     assert saved['status']=='failed'
-    assert json.loads(saved['result'])=={'card_id':json.loads(job['payload'])['card_id'],'phase':'send_context','exception_type':'TelegramError'}
+    assert json.loads(saved['result'])=={'card_id':json.loads(job['payload'])['card_id'],'phase':'send_context','exception_type':'TelegramError','api_code':429,'retry_after':3}
     assert secret not in saved['result']+saved['error']+str(bot.sent)
     assert 'Telegram' in saved['error'] and 'Повторить' in saved['error'] and 'Диске' not in saved['error']
     assert R.owned_card(db,json.loads(job['payload'])['card_id'],11,22)['state']=='failed'

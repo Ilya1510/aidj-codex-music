@@ -180,3 +180,12 @@ def test_restored_approved_pair_is_not_labelled_as_full_track_fallback(env):
     assert result['fullFallback'] is False
     assert result['acousticAnchors']['entries']==[[0,.5],[40,.7]]
     assert result['acousticAnchors']['exits']==[[52,1,.7]]
+
+
+def test_legacy_positive_label_is_archived_before_raw_source_is_overwritten(env):
+    db,digest=seed(env);complete(db,digest,payload(),180);label(db,digest,40,1)
+    fresh=payload();fresh['acousticAnchors']['entries']=[[100,.5]];fresh['acousticAnchors']['exits']=[[150,1,.7]]
+    complete(db,digest,fresh,180)
+    saved=json.loads(db.execute('SELECT payload FROM dj_boundary_observations').fetchone()[0])
+    assert saved['md5']==digest and saved['point_ms']==40000
+    assert saved['entries']==[[40,.7]] and saved['exits']==[[40,.7,.7]]

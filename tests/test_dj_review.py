@@ -101,7 +101,7 @@ def test_orphan_cards_recover_as_failed_but_live_queued_work_is_kept(env):
 def test_votes_comments_and_unfiltered_source_are_in_private_snapshot(env,tmp_path):
     settings,db,*_=env;seed(db);card=opened(db);R.vote(db,card['id'],11,22,-1);R.comment(db,card['id'],11,22,'Слишком ранний вход')
     folder=tmp_path/'backup';folder.mkdir();file,counts=snapshot(settings,folder);copy=sqlite3.connect(file)
-    assert counts['dj_boundary_sources']==counts['dj_boundary_points']==counts['dj_boundary_votes']==counts['dj_boundary_comments']==counts['dj_boundary_cards']==1
+    assert counts['dj_boundary_sources']==counts['dj_boundary_points']==counts['dj_boundary_observations']==counts['dj_boundary_votes']==counts['dj_boundary_comments']==counts['dj_boundary_cards']==1
     assert copy.execute('SELECT value FROM dj_boundary_votes').fetchone()[0]==-1
     assert copy.execute('SELECT text FROM dj_boundary_comments').fetchone()[0]=='Слишком ранний вход'
     assert copy.execute('SELECT count(*) FROM dj_batch_jobs').fetchone()[0]==0
@@ -184,3 +184,76 @@ def test_disputed_point_sampling_starts_interior_and_rotates_across_song_regions
         card=opened(db,'region-'+str(event));actual.append(card['position']);R.vote(db,card['id'],11,22,1)
     assert actual==[100,45,150,75]
     assert db.execute('SELECT count(*) FROM dj_boundary_votes').fetchone()[0]==4
+
+
+def test_selected_observation_survives_metadata_refresh_before_vote_and_private_restore(env,tmp_path):
+    import copy
+    from aidj.store import connect
+    from aidj.config import Settings
+    settings,db,*_=env;md5,original=seed(db);card=opened(db)
+    saved=json.loads(db.execute('SELECT payload FROM dj_boundary_observations WHERE point_id=?',(card['point_id'],)).fetchone()[0])
+    assert saved['md5']==md5 and saved['point_ms']==70000
+    assert saved['entries']==[[70,.7]] and saved['exits']==[[70,.5,.7]]
+    assert saved['quality']=='acoustic' and saved['wordGuarded'] is False
+    fresh=copy.deepcopy(original)
+    fresh['acousticAnchors']['entries']=[[110,.4]];fresh['acousticAnchors']['exits']=[[160,2,.4]]
+    complete(db,md5,fresh,180)
+    raw=json.loads(db.execute('SELECT payload FROM dj_boundary_sources WHERE md5=?',(md5,)).fetchone()[0])
+    assert all(row[0]!=70 for role in ('entries','exits') for row in raw['acousticAnchors'][role])
+    # Snapshot is taken after refresh but before the owner answers. The listening
+    # observation must survive even though neither metadata graph contains it.
+    folder=tmp_path/'inflight-backup';folder.mkdir();file,counts=snapshot(settings,folder)
+    restored=connect(Settings(state=file.parent))
+    assert counts['dj_boundary_observations']==1
+    for target in (db,restored):
+        R.vote(target,card['id'],11,22,1)
+        value=json.loads(target.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()[0])
+        assert saved['entries'][0] in value['acousticAnchors']['entries']
+        assert saved['exits'][0] in value['acousticAnchors']['exits']
+        assert value['anchors']==fresh['anchors'] and value['acousticAnchors']['wordGuarded'] is False
+        # Negative then positive stays reversible even after another refresh has
+        # discarded the raw boundary. Its original row is archived independently.
+        R.vote(target,card['id'],11,22,-1);complete(target,md5,fresh,180)
+        value=json.loads(target.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()[0])
+        assert all(row[0]!=70 for row in value['acousticAnchors']['entries'])
+        R.vote(target,card['id'],11,22,1)
+        value=json.loads(target.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()[0])
+        assert saved['entries'][0] in value['acousticAnchors']['entries']
+    restored.close()
+
+
+def test_observations_do_not_accept_a_different_source_or_fabricate_word_rows(env):
+    _,db,*_=env;md5,_=seed(db);card=opened(db)
+    row=db.execute('SELECT payload FROM dj_boundary_observations WHERE point_id=?',(card['point_id'],)).fetchone()
+    data=json.loads(row[0]);data['md5']='f'*32
+    db.execute('UPDATE dj_boundary_observations SET payload=?',(json.dumps(data),));db.commit()
+    assert list(R.approved_observations(db,md5,180))==[]
+    R.vote(db,card['id'],11,22,1)
+    assert list(R.approved_observations(db,md5,180))==[]
+    # Even an otherwise valid acoustic graph must belong to the reviewed instant.
+    data['md5']=md5;data['entries']=[[71,.7]]
+    db.execute('UPDATE dj_boundary_observations SET payload=?',(json.dumps(data),));db.commit()
+    assert list(R.approved_observations(db,md5,180))==[]
+    R.finish_session(db,11,22)
+    other,_=seed(db,'c',guarded=True);card,_=R.next_card(db,'word-card',11,22)
+    # Remove other acoustic candidates so only the explicit word graph remains.
+    if card['md5']!=other:
+        R.finish_session(db,11,22)
+        db.execute('DELETE FROM dj_analysis WHERE md5!=?',(other,));db.commit()
+        card,_=R.next_card(db,'only-word',11,22)
+    assert card['quality']=='word'
+    assert db.execute('SELECT 1 FROM dj_boundary_observations WHERE point_id=?',(card['point_id'],)).fetchone() is None
+
+
+def test_snapshot_and_connect_support_legacy_database_without_observations(env,tmp_path):
+    from aidj.config import Settings
+    from aidj.store import connect
+    settings,db,*_=env;seed(db);db.execute('DROP TABLE dj_boundary_observations');db.commit()
+    folder=tmp_path/'legacy-observation-backup';folder.mkdir();file,counts=snapshot(settings,folder)
+    assert counts['dj_boundary_observations']==0
+    restored=connect(Settings(state=file.parent))
+    assert restored.execute('SELECT COUNT(*) FROM dj_boundary_observations').fetchone()[0]==0
+    restored.close()
+    upgraded=connect(settings)
+    assert upgraded.execute('SELECT COUNT(*) FROM dj_boundary_observations').fetchone()[0]==0
+    upgraded.close()

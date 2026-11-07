@@ -88,6 +88,51 @@ def _candidate(db):
     return None
 
 
+def observe_point(db,identity,md5,point_ms):
+    """Archive the exact acoustic rows when the listening card is selected.
+
+    Metadata may be regenerated before the owner votes. A point label alone is
+    not enough to reconstruct its observed confidence or final-word fade.
+    This function stays inside the caller's transaction and never invents rows.
+    """
+    if not isinstance(md5,str) or not re.fullmatch('[a-f0-9]{32}',md5) or type(point_ms) is not int or point_ms<0 or identity!=point_id(md5,point_ms):return
+    if db.execute('SELECT 1 FROM dj_boundary_observations WHERE point_id=?',(identity,)).fetchone():return
+    source=db.execute('SELECT payload FROM dj_boundary_sources WHERE md5=?',(md5,)).fetchone()
+    if source is None:source=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()
+    asset=_asset(db,md5)
+    if not source or not source[0] or asset is None:return
+    try:
+        from .dj import validate_anchors
+        graph=validate_anchors(json.loads(source[0]).get('acousticAnchors'),asset['duration'])
+        if graph.get('quality')!='acoustic' or graph.get('wordGuarded') is not False:return
+    except (TypeError,ValueError,AttributeError):return
+    saved={**graph,'md5':md5,'point_ms':point_ms}
+    for role in ('entries','exits'):saved[role]=[row for row in graph[role] if round(row[0]*1000)==point_ms]
+    if not saved['entries'] and not saved['exits']:return
+    db.execute('INSERT OR IGNORE INTO dj_boundary_observations VALUES (?,?)',(identity,json.dumps(saved)))
+
+
+def approved_observations(db,md5,duration):
+    """Yield bounded original graphs for positively labelled owner points."""
+    from .dj import validate_anchors
+    query="""SELECT p.id,p.point_ms,o.payload FROM dj_boundary_points p
+        JOIN dj_boundary_votes v ON v.point_id=p.id JOIN dj_boundary_observations o ON o.point_id=p.id
+        WHERE p.md5=? AND v.value=1
+        AND v.user_id=CAST((SELECT value FROM meta WHERE key='owner_id') AS INTEGER)
+        AND v.chat_id=CAST((SELECT value FROM meta WHERE key='owner_chat_id') AS INTEGER)
+        ORDER BY p.point_ms"""
+    for row in db.execute(query,(md5,)):
+        try:
+            if len(row['payload'])>65536:continue
+            saved=json.loads(row['payload'])
+            if saved.get('md5')!=md5 or saved.get('point_ms')!=row['point_ms'] or row['id']!=point_id(md5,row['point_ms']):continue
+            graph=validate_anchors(saved,duration)
+            if graph.get('quality')!='acoustic' or graph.get('wordGuarded') is not False:continue
+            if any(round(point[0]*1000)!=row['point_ms'] for role in ('entries','exits') for point in graph[role]):continue
+            yield graph
+        except (TypeError,ValueError,AttributeError):continue
+
+
 def next_card(db,event,user_id,chat_id):
     ensure_owner(db,user_id,chat_id);event='dj-review:'+str(event if event is not None else secrets.token_hex(12))[:160]
     db.execute('BEGIN IMMEDIATE')
@@ -104,6 +149,7 @@ def next_card(db,event,user_id,chat_id):
         md5,ms,roles,quality=candidate;identity=point_id(md5,ms);now=time.time();card_id=secrets.token_hex(12)
         db.execute('''INSERT INTO dj_boundary_points VALUES (?,?,?,?,?,'unreviewed',?,?) ON CONFLICT(id)
             DO UPDATE SET roles=excluded.roles,quality=excluded.quality,updated=excluded.updated''',(identity,md5,ms,json.dumps(roles),quality,now,now))
+        observe_point(db,identity,md5,ms)
         db.execute("INSERT INTO dj_boundary_cards(id,point_id,user_id,chat_id,created,updated) VALUES (?,?,?,?,?,?)",(card_id,identity,user_id,chat_id,now,now))
         db.execute('INSERT INTO jobs(update_id,chat_id,user_id,message_id,query,payload,created,updated) VALUES (?,?,?,?,?,?,?,?)',
                    (event,chat_id,user_id,0,'Проверка точки DJ',json.dumps({'client':'dj-review','card_id':card_id}),now,now))
@@ -133,6 +179,7 @@ def vote(db,card_id,user_id,chat_id,value):
     db.execute('BEGIN IMMEDIATE')
     try:
         card=owned_card(db,card_id,user_id,chat_id,('open','voted'));now=time.time()
+        observe_point(db,card['point_id'],card['md5'],card['point_ms'])
         db.execute('''INSERT INTO dj_boundary_votes VALUES (?,?,?,?,?) ON CONFLICT(point_id)
             DO UPDATE SET user_id=excluded.user_id,chat_id=excluded.chat_id,value=excluded.value,updated=excluded.updated''',(card['point_id'],user_id,chat_id,value,now))
         db.execute('UPDATE dj_boundary_points SET status=?,updated=? WHERE id=?',('good' if value==1 else 'bad',now,card['point_id']))

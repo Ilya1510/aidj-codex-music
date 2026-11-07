@@ -98,6 +98,7 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS dj_boundary_points(id TEXT PRIMARY KEY,md5 TEXT NOT NULL,point_ms INTEGER NOT NULL,
         roles TEXT NOT NULL,quality TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'unreviewed',created REAL NOT NULL,updated REAL NOT NULL,
         UNIQUE(md5,point_ms));
+    CREATE TABLE IF NOT EXISTS dj_boundary_observations(point_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_boundary_votes(point_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
         value INTEGER NOT NULL CHECK(value IN (-1,1)),updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_boundary_comments(id INTEGER PRIMARY KEY,point_id TEXT NOT NULL,user_id INTEGER NOT NULL,
