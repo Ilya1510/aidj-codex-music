@@ -118,3 +118,65 @@ def test_trial_claim_budget_is_shared_across_workers_and_empty_claim_does_not_sp
     assert budget.claim(remote,'run')['job'] is None
     assert budget.claim(remote,'run')['job']['md5']=='a'*32
     assert budget.claim(remote,'run') is None and remote.calls==2
+
+
+def test_resource_diagnostics_record_measured_peak_and_checkpoint_stage(tmp_path,monkeypatch):
+    checkpoint=tmp_path/'checkpoint.json';checkpoint.write_text(json.dumps({'analysisStage':'rhythm'}))
+    child=N(pid=12345,poll=lambda:None)
+    monkeypatch.setattr('aidj.dj_remote.subprocess.Popen',lambda *a,**kw:child)
+    monkeypatch.setattr('aidj.dj_remote.process_rss',lambda pid:1500)
+    killed=[];monkeypatch.setattr('aidj.dj_remote.kill',lambda p:killed.append(p))
+    with pytest.raises(RemoteError) as failure:
+        run_analysis(['worker'],{},N(wait=lambda _:False),threading.Event(),memory_limit=1024,checkpoint=checkpoint)
+    info=failure.value.diagnostics
+    assert info['reason']=='rss_limit' and info['stage']=='rhythm'
+    assert info['peakRssBytes']==1500 and info['limitBytes']==1024 and info['elapsedSeconds']>=0
+    assert killed==[child]
+
+
+def test_signal_kill_does_not_claim_a_measured_rss_excess(tmp_path,monkeypatch):
+    from aidj.dj_remote import resource_message
+    checkpoint=tmp_path/'checkpoint.json';checkpoint.write_text(json.dumps({'analysisStage':'asr'}))
+    child=N(pid=12345,poll=lambda:-9,returncode=-9)
+    monkeypatch.setattr('aidj.dj_remote.subprocess.Popen',lambda *a,**kw:child)
+    monkeypatch.setattr('aidj.dj_remote.kill',lambda p:None)
+    with pytest.raises(RemoteError) as failure:
+        run_analysis(['worker'],{},threading.Event(),threading.Event(),checkpoint=checkpoint)
+    info=failure.value.diagnostics
+    assert info['reason']=='process_killed' and info['returnCode']==-9
+    assert info['peakRssBytes']==0 and info['stage']=='asr'
+    message=resource_message(failure.value)
+    assert 'превышение бюджета не подтверждено' in message and 'SSH' not in message
+    assert 'Обнови worker' in message
+
+
+def test_resource_failure_keeps_checkpoint_and_records_diagnostics_without_releasing_failed_job(tmp_path,monkeypatch):
+    from aidj.dj_remote import work_job,resource_message
+    for name in ('work','checkpoints'):(tmp_path/name).mkdir()
+    checkpoint=tmp_path/'checkpoints'/('a'*32+'.json')
+    partial={'version':3,'probes':[[0,28]],'analysisStage':'rhythm'};checkpoint.write_text(json.dumps(partial))
+    info={'peakRssBytes':1100*1024**2,'limitBytes':1024**3,'elapsedSeconds':4.5,'stage':'rhythm','reason':'rss_limit'}
+    def analysis(*args,**kwargs):raise RemoteError('RESOURCE_LIMIT',info)
+    monkeypatch.setattr('aidj.dj_remote.run_analysis',analysis)
+    class Remote:
+        def __init__(self):self.calls=[]
+        def audio(self,identity,asset,file,stopped):file.write_bytes(b'audio')
+        def rpc(self,body):self.calls.append(body);return {'ok':True}
+    remote=Remote();stopped=threading.Event()
+    job={'md5':'a'*32,'token':'b'*32,'asset':{'bytes':5,'duration':180,'format':'mp3','artist':'Artist','title':'Song'}}
+    with pytest.raises(RemoteError) as failure:work_job(remote,'c'*24,job,tmp_path,1,'unused',stopped)
+    assert stopped.is_set() and json.loads(checkpoint.read_text())==partial
+    assert json.loads((tmp_path/'diagnostics'/('a'*32+'.json')).read_text())==info
+    assert [call['op'] for call in remote.calls]==['fail']
+    assert remote.calls[0]['diagnostics']==info and remote.calls[0]['error']=='RESOURCE_LIMIT'
+    assert not list((tmp_path/'work').iterdir())
+    assert '1100 МиБ' in resource_message(failure.value) and 'SSH' not in resource_message(failure.value)
+
+
+def test_successful_analysis_returns_numeric_memory_observation_for_pilot(tmp_path,monkeypatch):
+    checkpoint=tmp_path/'checkpoint.json';checkpoint.write_text(json.dumps({'analysisStage':'complete'}))
+    child=N(pid=12345,poll=lambda:0,returncode=0)
+    monkeypatch.setattr('aidj.dj_remote.subprocess.Popen',lambda *a,**kw:child)
+    result=run_analysis(['worker'],{},threading.Event(),threading.Event(),checkpoint=checkpoint)
+    assert result['reason']=='completed' and result['returnCode']==0 and result['stage']=='complete'
+    assert result['limitBytes']==1024**3 and result['peakRssBytes']==0 and result['elapsedSeconds']>=0

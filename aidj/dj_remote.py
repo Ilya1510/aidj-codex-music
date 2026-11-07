@@ -23,10 +23,12 @@ MAX_JSON=1024*1024
 MAX_AUDIO=40*1024**2
 RSS_LIMIT=1024**2*1024
 PRINT_LOCK=threading.Lock()
+ANALYSIS_STAGES={'decode','rhythm','asr','selection','complete','unknown'}
 
 
 class RemoteError(RuntimeError):
-    def __init__(self,kind):
+    def __init__(self,kind,diagnostics=None):
+        self.diagnostics=diagnostics or {}
         self.kind=kind if isinstance(kind,str) and re.fullmatch('[A-Z_]{2,64}',kind) else 'REMOTE_FAILED'
         super().__init__(self.kind)
 
@@ -143,21 +145,56 @@ def analyse_command(file,output,checkpoint,cached,threads,ffmpeg):
     return command
 
 
-def run_analysis(command,env,stopped,lease_lost,timeout=900,memory_limit=RSS_LIMIT):
+def analysis_stage(checkpoint):
+    if checkpoint is None:return 'unknown'
+    try:
+        value=json_file(Path(checkpoint)).get('analysisStage')
+        return value if value in ANALYSIS_STAGES else 'unknown'
+    except (RemoteError,TypeError):return 'unknown'
+
+
+def resource_message(error):
+    info=error.diagnostics;stage={'decode':'декодирование','rhythm':'ритм','asr':'распознавание вокала',
+                               'selection':'выбор фрагментов','complete':'сохранение','unknown':'не определён'}.get(info.get('stage'),'не определён')
+    peak=info.get('peakRssBytes',0)/1024**2;limit=info.get('limitBytes',RSS_LIMIT)/1024**2
+    if info.get('reason')=='rss_limit':
+        detail=f'Пик памяти {peak:.0f} МиБ превысил бюджет {limit:.0f} МиБ одного задания.'
+    elif info.get('reason')=='process_killed':
+        measured=f'Измеренный пик {peak:.0f} МиБ' if peak else 'Пик памяти до остановки измерить не удалось'
+        detail=f'Процесс завершён сигналом остановки. {measured}, бюджет {limit:.0f} МиБ; превышение бюджета не подтверждено.'
+    else:detail='Не удалось продолжить контроль памяти задания.'
+    return 'Подготовка остановлена, этап: '+stage+'. '+detail+' Готовые песни сохранены. Обнови worker перед продолжением; автоматического повтора этого задания не будет.'
+
+
+def save_diagnostics(state,md5,diagnostics):
+    from .config import atomic_json
+    folder=state/'diagnostics';folder.mkdir(exist_ok=True,mode=0o700)
+    atomic_json(folder/(md5+'.json'),diagnostics)
+
+
+def run_analysis(command,env,stopped,lease_lost,timeout=900,memory_limit=RSS_LIMIT,checkpoint=None):
     try:process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env,start_new_session=True)
     except OSError:raise RemoteError('ANALYSIS_FAILED') from None
-    began=time.monotonic();monitored=0
+    began=time.monotonic();monitored=-float('inf');peak=0
+    def diagnostic(reason,code=None):
+        value={'peakRssBytes':int(peak),'limitBytes':int(memory_limit),'elapsedSeconds':round(time.monotonic()-began,3),
+               'stage':analysis_stage(checkpoint),'reason':reason}
+        if code is not None:value['returnCode']=int(code)
+        return value
     try:
         while process.poll() is None:
             if stopped.wait(.5):raise RemoteError('INTERRUPTED')
             if lease_lost.is_set():raise RemoteError('LEASE_LOST')
             if time.monotonic()-began>timeout:raise RemoteError('TIMEOUT')
             if time.monotonic()-monitored>=2:
-                if process_rss(process.pid)>memory_limit:raise RemoteError('RESOURCE_LIMIT')
+                peak=max(peak,process_rss(process.pid))
+                if peak>memory_limit:raise RemoteError('RESOURCE_LIMIT',diagnostic('rss_limit'))
                 monitored=time.monotonic()
-        if process.returncode in (-9,137):raise RemoteError('RESOURCE_LIMIT')
+        if process.returncode in (-9,137):raise RemoteError('RESOURCE_LIMIT',diagnostic('process_killed',process.returncode))
         if process.returncode:raise RemoteError('ANALYSIS_FAILED')
-    except BaseException:
+        return diagnostic('completed',0)
+    except BaseException as exc:
+        if isinstance(exc,RemoteError) and exc.kind=='RESOURCE_MONITOR_FAILED':exc.diagnostics=diagnostic('monitor_failed')
         kill(process);raise
 
 
@@ -208,7 +245,7 @@ def work_job(transport,run,job,state,threads,ffmpeg,stopped):
     if not valid_asset(asset):raise RemoteError('INVALID_JOB')
     checkpoint=state/'checkpoints'/(identity['md5']+'.json');done=threading.Event();lost=threading.Event()
     keeper=threading.Thread(target=heartbeat,args=(transport,identity,done,lost),daemon=True);keeper.start()
-    uploaded=False
+    uploaded=False;resource_failure=False
     try:
         with tempfile.TemporaryDirectory(prefix='song-',dir=state/'work') as scratch:
             folder=Path(scratch);file=folder/('source.'+asset['format']);output=folder/'result.json'
@@ -225,29 +262,38 @@ def work_job(transport,run,job,state,threads,ffmpeg,stopped):
             env.update(OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',OMP_NUM_THREADS=str(threads),NUMBA_NUM_THREADS=str(threads))
             command=analyse_command(file,output,checkpoint,seed,threads,ffmpeg)
             if re.search('[А-Яа-яЁё]',str(asset.get('artist',''))+' '+str(asset.get('title',''))):command+=['--language','ru']
-            run_analysis(command,env,stopped,lost)
+            run_analysis(command,env,stopped,lost,checkpoint=checkpoint)
             result=json_file(output)
             if result.get('evidence',{}).get('fullComplete') is not True:raise RemoteError('RESULT_INVALID')
             reply=complete_job(transport,identity,result,stopped);uploaded=True;checkpoint.unlink(missing_ok=True)
             emit(status_line(reply.get('stats',{}))+f" · DJ {reply.get('regular',0)}, ремикс {reply.get('remix',0)} фрагм.")
     except (OSError,ValueError,RemoteError) as original:
         exc=original if isinstance(original,RemoteError) else RemoteError('LOCAL_IO_FAILED')
+        resource_failure=exc.kind in ('RESOURCE_LIMIT','RESOURCE_MONITOR_FAILED')
+        if resource_failure:
+            stopped.set()
+            # Keep a small local record even if the network is unavailable. A
+            # signal kill and a measured RSS excess are distinct observations.
+            try:save_diagnostics(state,identity['md5'],exc.diagnostics)
+            except OSError:pass
         try:
-            if stopped.is_set() or exc.kind in ('INTERRUPTED','LEASE_LOST','SSH_FAILED','REMOTE_FAILED'):
+            if resource_failure:
+                transport.rpc({'op':'fail',**identity,'error':'RESOURCE_LIMIT','diagnostics':exc.diagnostics})
+            elif stopped.is_set() or exc.kind in ('INTERRUPTED','LEASE_LOST','SSH_FAILED','REMOTE_FAILED'):
                 transport.rpc({'op':'release',**identity})
             else:
-                error=exc.kind if exc.kind in ('RESOURCE_LIMIT','TIMEOUT','RESULT_INVALID') else 'DOWNLOAD_FAILED' if exc.kind.startswith('DOWNLOAD') else 'ANALYSIS_FAILED'
+                error=exc.kind if exc.kind in ('TIMEOUT','RESULT_INVALID') else 'DOWNLOAD_FAILED' if exc.kind.startswith('DOWNLOAD') else 'ANALYSIS_FAILED'
                 transport.rpc({'op':'fail',**identity,'error':error})
         except RemoteError:pass
-        if not stopped.is_set():emit('Не обработана одна песня: '+exc.kind+'. Результат предыдущих песен сохранён.')
-        if exc.kind in ('RESOURCE_LIMIT','RESOURCE_MONITOR_FAILED'):
-            # Never repeat an OOM/memory-budget failure with a bigger limit.
+        if resource_failure:
             stopped.set();raise exc
+        if not stopped.is_set():emit('Не обработана одна песня: '+exc.kind+'. Результат предыдущих песен сохранён.')
     finally:
         done.set();keeper.join(timeout=1)
-        if not uploaded and stopped.is_set():
+        if not uploaded and stopped.is_set() and not resource_failure:
             try:transport.rpc({'op':'release',**identity})
             except RemoteError:pass
+
 
 
 class ClaimBudget:
@@ -328,5 +374,7 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except RemoteError as exc:emit('Подготовка остановлена: '+exc.kind+'. Проверь SSH-доступ и повтори команду.');raise SystemExit(1)
+    except RemoteError as exc:
+        emit(resource_message(exc) if exc.kind in ('RESOURCE_LIMIT','RESOURCE_MONITOR_FAILED') else 'Подготовка остановлена: '+exc.kind+'. Проверь SSH-доступ и повтори команду.')
+        raise SystemExit(1)
     except Exception:emit('Подготовка остановлена: проверь Python, свободное место и доступ к серверу.');raise SystemExit(1)

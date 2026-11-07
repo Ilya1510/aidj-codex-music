@@ -149,3 +149,102 @@ def test_full_source_size_is_bounded_before_decoding(tmp_path,monkeypatch):
     monkeypatch.setitem(sys.modules,'numpy',N())
     with pytest.raises(RuntimeError,match='SOURCE_TOO_LARGE_OR_EMPTY'):
         analyse(source,'ffmpeg',tmp_path/'models',full=True)
+
+
+def test_uncached_rhythm_exits_before_parent_imports_numpy_and_stages_precede_work(tmp_path,monkeypatch):
+    import builtins
+    import sys
+    from aidj.config import atomic_json
+    from aidj.dj_worker import analyse
+    duration=120;source=tmp_path/'original.mp3';source.write_bytes(b'original');checkpoint=tmp_path/'checkpoint.json'
+    events=[];stages=[];arrays=[]
+    class Samples:
+        def __init__(self,path,**kwargs):
+            self.length=path.stat().st_size//4;self.closed=False;self._mmap=self;arrays.append(self);events.append('parent-map')
+        def __len__(self):return self.length
+        def __getitem__(self,slice):return (slice.start,slice.stop)
+        def close(self):self.closed=True
+    def save(path,value):
+        if path==checkpoint:stages.append(value['analysisStage'])
+        atomic_json(path,value)
+    def command(args,**kwargs):
+        if args[0]=='ffmpeg':
+            assert json.loads(checkpoint.read_text())['analysisStage']=='decode'
+            events.append('decode')
+            with open(args[-1],'wb') as target:target.truncate(16000*duration*4)
+        else:
+            assert json.loads(checkpoint.read_text())['analysisStage']=='rhythm'
+            assert 'parent-numpy-import' not in events and not arrays
+            events.append('rhythm-child-exited')
+            atomic_json(tmp_path/'original.rhythm.json',{'beats':[],'bpm':120,'energy':[.5]*duration})
+        return N(returncode=0)
+    real_import=builtins.__import__
+    numpy=N(float32=object(),memmap=Samples,array=lambda value,**kwargs:value)
+    def imports(name,*args,**kwargs):
+        if name=='numpy':events.append('parent-numpy-import');return numpy
+        return real_import(name,*args,**kwargs)
+    def whisper(*args,**kwargs):
+        assert json.loads(checkpoint.read_text())['analysisStage']=='asr'
+        events.append('asr-model');return Model()
+    real_selection=selection
+    def choose(value):
+        assert json.loads(checkpoint.read_text())['analysisStage']=='selection'
+        assert value['fullComplete'] is False
+        return real_selection(value)
+    monkeypatch.setattr(builtins,'__import__',imports)
+    monkeypatch.setattr('aidj.config.atomic_json',save)
+    monkeypatch.setitem(sys.modules,'faster_whisper',N(WhisperModel=whisper))
+    monkeypatch.setattr('aidj.dj_worker.subprocess.run',command)
+    monkeypatch.setattr('aidj.dj_worker.selection',choose)
+    result=analyse(source,'ffmpeg',tmp_path/'models',checkpoint=checkpoint,full=True)
+    assert events.index('rhythm-child-exited')<events.index('parent-numpy-import')<events.index('parent-map')<events.index('asr-model')
+    assert all(name in stages for name in ('decode','rhythm','asr','selection','complete'))
+    assert stages[0]=='decode' and stages[-1]=='complete'
+    assert result['evidence']['analysisStage']=='complete' and result['evidence']['fullComplete']
+    assert arrays[0].closed
+
+
+def test_rhythm_child_uses_only_ninety_seconds_while_energy_covers_original(tmp_path,monkeypatch):
+    import sys
+    from aidj.dj_worker import main
+    raw=tmp_path/'original.f32';output=tmp_path/'rhythm.json'
+    with raw.open('wb') as stream:stream.truncate(16000*600*4)
+    observed=[];maps=[]
+    class Samples:
+        def __init__(self,path,**kwargs):self._mmap=self;self.closed=False;maps.append(self)
+        def __len__(self):return 16000*600
+        def __getitem__(self,slice):return (slice.start,slice.stop)
+        def close(self):self.closed=True
+    def beats(sample,sr):observed.append(('beats',sample,sr));return [],0
+    def energy(sample,sr):observed.append(('energy',len(sample),sr));return [.5]*600
+    monkeypatch.setitem(sys.modules,'numpy',N(float32=object(),memmap=Samples,array=lambda value,**kwargs:value))
+    monkeypatch.setattr('aidj.dj_worker.Settings',lambda:N(prepare=lambda:None))
+    monkeypatch.setattr('aidj.dj_worker.rhythm',beats)
+    monkeypatch.setattr('aidj.dj_worker.energy_envelope',energy)
+    monkeypatch.setattr(sys,'argv',['dj_worker','rhythm','--file',str(raw),'--output',str(output),'--ffmpeg','ffmpeg'])
+    main()
+    assert observed==[('beats',(None,16000*90),16000),('energy',16000*600,16000)]
+    assert len(json.loads(output.read_text())['energy'])==600 and maps[0].closed
+
+
+def test_memory_failure_during_rhythm_keeps_stage_without_loading_parent_numpy(tmp_path,monkeypatch):
+    import builtins
+    import subprocess
+    from aidj.dj_worker import analyse
+    source=tmp_path/'original.mp3';source.write_bytes(b'original');checkpoint=tmp_path/'checkpoint.json'
+    imports=[];real_import=builtins.__import__
+    def imported(name,*args,**kwargs):
+        if name=='numpy':imports.append(name);raise AssertionError('parent must remain small until child exits')
+        return real_import(name,*args,**kwargs)
+    def command(args,**kwargs):
+        if args[0]=='ffmpeg':
+            with open(args[-1],'wb') as target:target.truncate(16000*120*4)
+            return N(returncode=0)
+        raise subprocess.CalledProcessError(-9,args)
+    monkeypatch.setattr(builtins,'__import__',imported)
+    monkeypatch.setattr('aidj.dj_worker.subprocess.run',command)
+    with pytest.raises(MemoryError,match='RHYTHM_RESOURCE_LIMIT'):
+        analyse(source,'ffmpeg',tmp_path/'models',checkpoint=checkpoint,full=True)
+    saved=json.loads(checkpoint.read_text())
+    assert saved['analysisStage']=='rhythm' and saved['fullComplete'] is False
+    assert saved['duration']==120 and not imports and not source.with_suffix('.f32').exists()

@@ -25,6 +25,19 @@ LEASE_SECONDS=300
 class BatchError(RuntimeError):pass
 
 
+def failure_diagnostics(value):
+    import math
+    if not isinstance(value,dict):return {}
+    out={}
+    for key,maximum in [('peakRssBytes',16*1024**3),('limitBytes',16*1024**3),('elapsedSeconds',3600)]:
+        number=value.get(key)
+        if type(number) in (int,float) and math.isfinite(number) and 0<=number<=maximum:out[key]=number
+    if value.get('stage') in ('decode','rhythm','asr','selection','complete','unknown'):out['stage']=value['stage']
+    if value.get('reason') in ('rss_limit','process_killed','monitor_failed'):out['reason']=value['reason']
+    if value.get('returnCode') in (-9,137):out['returnCode']=value['returnCode']
+    return out
+
+
 def ident(value,length):
     if not isinstance(value,str) or not re.fullmatch('[a-f0-9]{'+str(length)+'}',value):raise BatchError('INVALID_ID')
     return value
@@ -145,6 +158,8 @@ def dispatch(db,body):
         error=body.get('error')
         if error not in ('DOWNLOAD_FAILED','ANALYSIS_FAILED','RESOURCE_LIMIT','TIMEOUT','RESULT_INVALID'):error='ANALYSIS_FAILED'
         db.execute("UPDATE dj_batch_jobs SET state='failed',token=NULL,lease=0,error=?,updated=? WHERE run_id=? AND md5=?",(error,time.time(),run,md5))
+        detail=failure_diagnostics(body.get('diagnostics'))
+        if detail:db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('dj_failure_diagnostics:'+md5,json.dumps(detail)))
     elif op=='finish':
         from .dj_worker import selection
         asset=db.execute('SELECT duration FROM web_assets WHERE id=?',(row['asset_id'],)).fetchone()

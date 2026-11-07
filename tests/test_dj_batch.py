@@ -80,3 +80,14 @@ def test_a_parallel_campaign_skips_results_completed_since_it_was_started(env):
 def test_full_scope_survives_upload_for_late_song_entries():
     value=numeric_evidence(evidence(),180)
     assert value['analysisScope']=='full'
+
+
+def test_failure_diagnostics_are_numeric_small_and_never_store_logs_or_urls(env):
+    from aidj.dj_batch import failure_diagnostics
+    _,db,*_=env;seed(db,1);run=start(db)['runId'];job=claim(db,run)['job']
+    detail={'peakRssBytes':1100*1024**2,'limitBytes':1024**3,'elapsedSeconds':5.2,'stage':'rhythm','reason':'rss_limit','stderr':'private fake text','url':'https://invalid.example/?token=TEST','other':[1]*100}
+    dispatch(db,{'op':'fail','runId':run,'md5':job['md5'],'token':job['token'],'error':'RESOURCE_LIMIT','diagnostics':detail})
+    saved=json.loads(db.execute('SELECT value FROM meta WHERE key=?',('dj_failure_diagnostics:'+job['md5'],)).fetchone()[0])
+    assert saved['stage']=='rhythm' and saved['peakRssBytes']==1100*1024**2
+    assert 'stderr' not in saved and 'url' not in saved and 'other' not in saved
+    assert failure_diagnostics({'elapsedSeconds':float('inf'),'stage':'private text'})=={}

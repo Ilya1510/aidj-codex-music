@@ -264,51 +264,68 @@ def observe_windows(evidence,windows,model,sample,language=None,checkpoint=None,
 
 def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None,full=False,cpu_threads=2):
     if type(cpu_threads) is not int or not 1<=cpu_threads<=8:raise ValueError('Threads must be between 1 and 8')
-    import numpy as np
     from .config import atomic_json
-    # Full mode is intended for an explicitly bounded batch worker, including a
-    # separate Mac. The normal VM service keeps its three targeted observations.
+    # Keep the parent small until the separate rhythm process has exited: an
+    # eager NumPy import here otherwise duplicates its libraries and workspace
+    # in the Mac watchdog's process-tree RSS budget during the heavy beat pass.
     decode_limit=600 if full else 300
     if not 0<file.stat().st_size<=40*1024**2:raise RuntimeError('SOURCE_TOO_LARGE_OR_EMPTY')
     raw=file.with_suffix('.f32');began=time.monotonic();y=None
     evidence=dict(cached or {})
+    if full:
+        evidence['analysisScope']='full';evidence['fullComplete']=False
+    def stage(value):
+        evidence['analysisStage']=value
+        if checkpoint:atomic_json(checkpoint,evidence)
     try:
+        stage('decode')
         result=subprocess.run([ffmpeg,'-nostdin','-v','error','-threads','1','-i',str(file),'-t',str(decode_limit+.1 if full else decode_limit),'-vn','-ac','1','-ar','16000','-f','f32le','-y',str(raw)],capture_output=True,timeout=60)
         if result.returncode:raise RuntimeError('DECODE_FAILED')
-        if not 0<raw.stat().st_size<=16000*decode_limit*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
-        timing=raw.with_suffix('.rhythm.json');y=np.memmap(raw,dtype=np.float32,mode='r')
-        duration=len(y)/16000
-        if cached and 'beats' in evidence and 'bpm' in evidence:
-            if not evidence.get('energy') or full and len(evidence['energy'])<math.ceil(duration):
-                evidence['energy']=energy_envelope(y,16000)
-        else:
-            # The expensive rhythmic pass uses at most four minutes even for a
-            # ten-minute original; its process exits before loading Whisper.
+        size=raw.stat().st_size
+        if not 0<size<=16000*decode_limit*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
+        duration=size/(4*16000);timing=raw.with_suffix('.rhythm.json')
+        observed=coverage(evidence) if cached else []
+        evidence['duration']=duration;evidence['coverage']=observed;evidence.setdefault('words',[])
+        reuse_rhythm=bool(cached and 'beats' in evidence and 'bpm' in evidence)
+        stage('rhythm')
+        if not reuse_rhythm:
+            # Only this child imports librosa/Numba; the parent hasn't imported
+            # NumPy or opened the PCM yet. Its beat input is capped at 90s.
             try:subprocess.run([os.sys.executable,'-m','aidj.dj_worker','rhythm','--file',str(raw),'--output',str(timing),'--ffmpeg',ffmpeg],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
             except subprocess.CalledProcessError as exc:
                 if exc.returncode in (-9,137):raise MemoryError('RHYTHM_RESOURCE_LIMIT') from None
                 raise
             structure=json.loads(timing.read_text());timing.unlink();evidence.update(structure)
-        observed=coverage(evidence) if cached else []
-        evidence['duration']=duration;evidence['coverage']=observed
-        evidence.setdefault('words',[]);evidence['timings']={'structure':round(time.monotonic()-began,3)}
-        if full:
-            evidence['analysisScope']='full';evidence['fullComplete']=False
+        import numpy as np
+        y=np.memmap(raw,dtype=np.float32,mode='r')
+        if reuse_rhythm and (not evidence.get('energy') or full and len(evidence['energy'])<math.ceil(duration)):
+            evidence['energy']=energy_envelope(y,16000)
+        evidence['timings']={'structure':round(time.monotonic()-began,3)}
         windows=full_windows(evidence) if full else probe_windows(evidence)
-        if checkpoint:atomic_json(checkpoint,evidence)
+        # Local controllers can select an interrupted checkpoint only once its
+        # schema version is current. Explicit coverage above preserves v2's
+        # narrower observations before changing that version.
+        evidence['version']=3
+        stage('asr')
         if windows:
             from faster_whisper import WhisperModel
             model=WhisperModel('base',device='cpu',compute_type='int8',cpu_threads=cpu_threads,num_workers=1,download_root=str(models))
-            # A single bounded writable NumPy sample also avoids a PyAV decoder
-            # compatibility issue and does not materialise a whole long original.
+            # Each writable ASR sample is <=28s. Reading a memmap keeps the
+            # complete original out of the parent's Python heap.
             sample=lambda lo,hi:np.array(y[int(lo*16000):int(hi*16000)],dtype=np.float32,copy=True)
             observe_windows(evidence,windows,model,sample,language,checkpoint,full)
+            # The model is no longer needed during the candidate-selection pass.
+            # Dropping it also avoids overlapping its native workspace with that
+            # pass in implementations that release model memory immediately.
+            model=None
         evidence['version']=3
+        stage('selection')
+        chosen=selection(evidence)
         if full:
             evidence['fullComplete']=not full_windows(evidence);evidence['fullDuration']=duration
         evidence['timings']['total']=round(time.monotonic()-began,3)
-        if checkpoint:atomic_json(checkpoint,evidence)
-        return {**selection(evidence),'evidence':evidence}
+        stage('complete')
+        return {**chosen,'evidence':evidence}
     finally:
         if y is not None:y._mmap.close()
         raw.unlink(missing_ok=True);raw.with_suffix('.rhythm.json').unlink(missing_ok=True)
@@ -374,7 +391,7 @@ def main():
         if not 0<args.file.stat().st_size<=16000*600*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
         y=np.memmap(args.file,dtype=np.float32,mode='r')
         try:
-            beats,bpm=rhythm(np.array(y[:16000*240],copy=True),16000)
+            beats,bpm=rhythm(np.array(y[:16000*90],copy=True),16000)
             atomic_json(args.output,{'beats':beats,'bpm':bpm,'energy':energy_envelope(y,16000)})
         finally:y._mmap.close()
         return
