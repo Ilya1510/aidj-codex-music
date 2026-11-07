@@ -101,7 +101,7 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS dj_boundary_votes(point_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
         value INTEGER NOT NULL CHECK(value IN (-1,1)),updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_boundary_comments(id INTEGER PRIMARY KEY,point_id TEXT NOT NULL,user_id INTEGER NOT NULL,
-        chat_id INTEGER NOT NULL,text TEXT NOT NULL,created REAL NOT NULL);
+        chat_id INTEGER NOT NULL,text TEXT NOT NULL,created REAL NOT NULL,event_id TEXT);
     CREATE TABLE IF NOT EXISTS dj_boundary_cards(id TEXT PRIMARY KEY,point_id TEXT NOT NULL,user_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
         state TEXT NOT NULL DEFAULT 'preparing',message_id INTEGER,telegram_file_id TEXT,comment_pending INTEGER NOT NULL DEFAULT 0,
         created REAL NOT NULL,updated REAL NOT NULL);
@@ -143,6 +143,18 @@ def connect(settings,*,dj_enrol=True):
         PRIMARY KEY(operation_id,user_id));
     CREATE TABLE IF NOT EXISTS review_web_ops(id TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL NOT NULL);
     ''')
+    # Older private snapshots predate message replay identifiers. Serialize
+    # only the migration, so concurrent bot/web starts cannot add it twice.
+    columns={row[1] for row in db.execute('PRAGMA table_info(dj_boundary_comments)')}
+    index=db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='dj_boundary_comment_event'").fetchone()
+    if 'event_id' not in columns or not index:
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            columns={row[1] for row in db.execute('PRAGMA table_info(dj_boundary_comments)')}
+            if 'event_id' not in columns:db.execute('ALTER TABLE dj_boundary_comments ADD COLUMN event_id TEXT')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS dj_boundary_comment_event ON dj_boundary_comments(event_id,user_id,chat_id)')
+            db.commit()
+        except BaseException:db.rollback();raise
     if dj_enrol:install_dj_asset_triggers(db)
     return db
 

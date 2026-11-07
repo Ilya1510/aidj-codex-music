@@ -27,11 +27,12 @@ def timestamp(seconds):
     return f'{minutes}:{part:04.1f}'
 
 
-def caption(card):
+def caption(card,from_point=False):
     roles='/'.join({'entry':'вход','exit':'выход'}[role] for role in card.get('roles',[]) if role in ('entry','exit')) or 'граница фрагмента'
     position=card.get('position',card.get('point_ms',0)/1000)
     text=(card.get('artist','')+' — '+card.get('title',''))[:600]
-    text+='\n\nТочка на 0:05 · '+roles+'\nВ оригинале: '+timestamp(position)
+    label='С опорной точки · 0:00' if from_point else 'Точка на 0:05'
+    text+='\n\n'+label+' · '+roles+'\nВ оригинале: '+timestamp(position)
     if card.get('quality')=='acoustic':text+='\nНужна проверка на слух.'
     return text[:1000]
 
@@ -46,7 +47,7 @@ class DjReviewUI:
     def start(self,event,uid,chat):
         R=self.core;R.ensure_owner(self.db,uid,chat);R.cancel_comment(self.db,uid,chat)
         self.db.execute("UPDATE review_users SET mode='menu' WHERE user_id=?",(uid,));self.db.commit()
-        self.bot.message(chat,'Проверка DJ-точек: слушай 10 секунд вокруг границы — она на 0:05. Оцени, не режется ли слово и удачно ли выбрано место. После оценки можно оставить комментарий и нажать «Следующая».',
+        self.bot.message(chat,'Для каждой DJ-точки пришлю два аудио: 10 секунд контекста с границей на 0:05 и ещё 5 секунд прямо с неё. Оцени, не режется ли слово и удачно ли выбрано место. Кнопки — под вторым аудио; после оценки можно оставить комментарий и нажать «Следующая».',
                          [[{'text':'Закончить','callback_data':'djrv:finish'}]])
         self.next(event,uid,chat)
 
@@ -57,7 +58,7 @@ class DjReviewUI:
             self.bot.message(chat,'Все доступные DJ-точки проверены. Новые появятся после анализа песен.',
                              [[{'text':'Проверить ещё','callback_data':'djrv:start'},{'text':'Закончить','callback_data':'djrv:finish'}]])
         elif not queued:
-            if card['state']=='open':self.bot.message(chat,'Текущий фрагмент уже в чате. Оцени его или нажми «Следующая».',keyboard(card['id']))
+            if card['state']=='open':self.bot.message(chat,'Оба аудио уже в чате. Оцени точку или нажми «Следующая».',keyboard(card['id']))
             else:self.bot.message(chat,'Один фрагмент уже готовится. Дождись его или нажми «Закончить».',[[{'text':'Закончить','callback_data':'djrv:finish'}]])
 
     def message(self,update):
@@ -70,6 +71,10 @@ class DjReviewUI:
             if explicit:self.bot.message(cid,'Проверка DJ-точек доступна владельцу.');return True
             return False
         R=self.core
+        # A committed comment remains consumed even if Telegram's acknowledgement
+        # failed and the poller delivers the same update again. Check before the
+        # current prompt so an old replay cannot consume a newer point's input.
+        if R.comment_handled(self.db,update.get('update_id'),uid,cid):return True
         pending=R.pending_comment(self.db,uid,cid)
         try:
             if explicit:self.start(update['update_id'],uid,cid);return True
@@ -79,7 +84,7 @@ class DjReviewUI:
                 return False
             if not pending:return False
             if not text:self.bot.message(cid,'Пришли комментарий текстом. /cancel — отменить ввод.');return True
-            R.comment(self.db,pending['id'],uid,cid,text)
+            R.comment(self.db,pending['id'],uid,cid,text,event=update['update_id'])
             self.bot.message(cid,'Комментарий сохранён к этой точке.',keyboard(pending['id']))
         except R.ReviewError as exc:self.bot.message(cid,str(exc))
         return True
@@ -148,10 +153,21 @@ def process(settings,db,row,bot,disk=None):
             card=R.owned_card(db,card_id,row['user_id'],row['chat_id'])
             if card['state']!='preparing':
                 job_update(db,job_id,status='completed',stage='Проверка уже закончена');return 0
-            result={**result,'caption':caption(card)}
-            sent=bot.audio(row['chat_id'],result,keyboard(card_id))
+            from_point=result.get('fromPoint')
+            if not isinstance(from_point,dict):raise R.ReviewError('Не подготовлено аудио с опорной точки. Нажми /djreview, чтобы повторить.')
+            context={key:value for key,value in result.items() if key!='fromPoint'}
+            context['caption']=caption(card)
+            context_sent=bot.audio(row['chat_id'],context,[])
+            job_update(db,job_id,stage='Отправляю начало с точки',result=json.dumps({'card_id':card_id,'context_message_id':context_sent['message_id']}))
+            # A finish/owner change after the context recording must prevent
+            # the second upload and must not expose a vote on an incomplete pair.
+            R.ensure_owner(db,row['user_id'],row['chat_id'])
+            card=R.owned_card(db,card_id,row['user_id'],row['chat_id'])
+            if card['state']!='preparing':
+                job_update(db,job_id,status='completed',stage='Проверка уже закончена');return 0
+            sent=bot.audio(row['chat_id'],{**from_point,'caption':caption(card,from_point=True)},keyboard(card_id))
             R.mark_open(db,card_id,row['user_id'],row['chat_id'],sent['message_id'],sent.get('audio',{}).get('file_id'))
-        job_update(db,job_id,status='completed',stage='Точка готова',result=json.dumps({'card_id':card_id,'message_id':sent['message_id']}));return 0
+        job_update(db,job_id,status='completed',stage='Точка готова',result=json.dumps({'card_id':card_id,'message_id':sent['message_id'],'context_message_id':context_sent['message_id']}));return 0
     except Exception as exc:
         # Cancellation can arrive during the download/transcode itself. A late
         # renderer failure must not reopen the session or post after Finish.

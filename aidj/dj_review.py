@@ -70,7 +70,9 @@ def _candidate(db):
                     if not 5000<=ms<=round(asset['duration']*1000)-5000:continue
                     points.setdefault(ms,set()).add(role)
             rejected=rejected_points(db,source['md5'])
-            for ms,roles in sorted(points.items()):
+            reviewed=db.execute("SELECT COUNT(*) FROM dj_boundary_cards c JOIN dj_boundary_points p ON p.id=c.point_id WHERE p.md5=? AND c.state IN ('voted','skipped')",(source['md5'],)).fetchone()[0]
+            target=asset['duration']*1000*(.55,.25,.8,.4)[reviewed%4]
+            for ms,roles in sorted(points.items(),key=lambda point:(abs(point[0]-target),point[0])):
                 identity=point_id(source['md5'],ms)
                 previous=db.execute('SELECT status FROM dj_boundary_points WHERE id=?',(identity,)).fetchone()
                 if previous and previous[0]!='unreviewed':continue
@@ -160,11 +162,35 @@ def cancel_comment(db,user_id,chat_id):
     ensure_owner(db,user_id,chat_id);db.execute('UPDATE dj_boundary_cards SET comment_pending=0 WHERE user_id=?',(user_id,));db.commit()
 
 
-def comment(db,card_id,user_id,chat_id,text):
-    card=owned_card(db,card_id,user_id,chat_id,('open','voted'))
-    if not isinstance(text,str) or not 1<=len(text.strip())<=2000:raise ReviewError('Комментарий: от 1 до 2000 символов.')
-    db.execute('INSERT INTO dj_boundary_comments(point_id,user_id,chat_id,text,created) VALUES (?,?,?,?,?)',(card['point_id'],user_id,chat_id,text.strip(),time.time()))
-    db.execute('UPDATE dj_boundary_cards SET comment_pending=0,updated=? WHERE id=?',(time.time(),card_id));db.commit();return owned_card(db,card_id,user_id,chat_id)
+def _comment_event(event):
+    if event is None:return None
+    if type(event) not in (int,str):raise ReviewError('Не удалось определить сообщение комментария.')
+    value=str(event)
+    if not re.fullmatch('[A-Za-z0-9:_-]{1,128}',value):raise ReviewError('Не удалось определить сообщение комментария.')
+    return value
+
+
+def comment_handled(db,event,user_id,chat_id):
+    ensure_owner(db,user_id,chat_id);event=_comment_event(event)
+    if event is None:return False
+    return db.execute('SELECT 1 FROM dj_boundary_comments WHERE event_id=? AND user_id=? AND chat_id=?',(event,user_id,chat_id)).fetchone() is not None
+
+
+def comment(db,card_id,user_id,chat_id,text,event=None):
+    ensure_owner(db,user_id,chat_id);event=_comment_event(event)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        # Telegram can replay this message if the acknowledgement failed. The
+        # old event must not consume or clear a newer card's comment prompt.
+        if event is not None and comment_handled(db,event,user_id,chat_id):
+            card=owned_card(db,card_id,user_id,chat_id);db.commit();return card
+        card=owned_card(db,card_id,user_id,chat_id,('open','voted'))
+        if not isinstance(text,str) or not 1<=len(text.strip())<=2000:raise ReviewError('Комментарий: от 1 до 2000 символов.')
+        db.execute('INSERT INTO dj_boundary_comments(point_id,user_id,chat_id,text,created,event_id) VALUES (?,?,?,?,?,?)',
+                   (card['point_id'],user_id,chat_id,text.strip(),time.time(),event))
+        db.execute('UPDATE dj_boundary_cards SET comment_pending=0,updated=? WHERE id=?',(time.time(),card_id))
+        db.commit();return owned_card(db,card_id,user_id,chat_id)
+    except BaseException:db.rollback();raise
 
 
 def skip(db,card_id,user_id,chat_id):
@@ -194,20 +220,36 @@ def render_clip(settings,db,card,work,disk=None,ffmpeg_path=None):
     asset=_asset(db,card['md5'])
     if asset is None or asset['bytes']>40*1024**2:raise ReviewError('Исходная песня недоступна для проверки.')
     if shutil.disk_usage(settings.state).free<256*1024**2:raise ReviewError('На сервере недостаточно места для проверки точки.')
-    work=Path(work);source=work/('dj-source'+Path(asset['remote_path']).suffix);target=work/'dj-point.m4a'
+    center=card['position']
+    if not 0<=center<=asset['duration']:raise ReviewError('Точка находится вне исходной песни.')
+    work=Path(work);source=work/('dj-source'+Path(asset['remote_path']).suffix)
     disk=disk or Disk(settings);disk.download(asset['remote_path'],source,expected_md5=card['md5'])
     if source.stat().st_size!=asset['bytes']:raise ReviewError('Исходная песня изменилась на Диске.')
-    center=card['position'];start=max(0,center-5);padding=max(0,5-center)
-    available=min(10-padding,max(0,asset['duration']-start))
-    if available<=0:raise ReviewError('Точка находится вне исходной песни.')
-    command=[ffmpeg_path or ffmpeg(),'-nostdin','-v','error','-threads','1','-filter_threads','1','-max_alloc','67108864',
-             '-ss',str(start),'-t',str(available),'-i',str(source),'-vn','-af',
-             f'adelay={round(padding*1000)}:all=1,apad=whole_dur=10,atrim=duration=10,asetpts=PTS-STARTPTS',
-             '-c:a','aac','-b:a','192k','-ar','44100','-ac','2','-threads','1','-movflags','+faststart','-fs','5242880','-y',str(target)]
-    try:process=subprocess.run(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45)
-    except (OSError,subprocess.TimeoutExpired):raise ReviewError('Не удалось подготовить проверочный фрагмент.') from None
-    if process.returncode or not target.is_file() or target.stat().st_size>5*1024**2:raise ReviewError('Не удалось подготовить проверочный фрагмент.')
-    if abs(duration(target)-10)>.08:raise ReviewError('Проверочный фрагмент не прошёл проверку длительности.')
-    return {'track':{'source':'dj-review','id':card['point_id'],'title':card['title']+' · точка '+str(round(center,3))+' с','artist':card['artist'],'url':'https://t.me/aidj_codex_music_bot'},
-            'local_path':str(target),'duration':10.0,'md5':md5(target),'bytes':target.stat().st_size,'telegram_file_id':None,
-            'pointPosition':5.0,'sourcePosition':center}
+    binary=ffmpeg_path or ffmpeg()
+    def encode(target,start,padding,seconds):
+        available=min(seconds-padding,max(0,asset['duration']-start))
+        command=[binary,'-nostdin','-v','error','-threads','1','-filter_threads','1','-max_alloc','67108864']
+        if available>0:
+            # Accurate input seeking + re-encoding starts from the selected
+            # original instant. No copied preceding AAC/MP3 frame or fade.
+            command+=['-ss',str(start),'-t',str(available),'-i',str(source)]
+        else:
+            # At the physical end there is no following audio to pad. Generate
+            # silence instead of accidentally seeking to earlier music.
+            command+=['-f','lavfi','-i','anullsrc=r=44100:cl=stereo','-t',str(seconds)]
+        command+=['-vn','-af',f'adelay={round(padding*1000)}:all=1,apad=whole_dur={seconds},atrim=duration={seconds},asetpts=PTS-STARTPTS',
+                  '-c:a','aac','-b:a','192k','-ar','44100','-ac','2','-threads','1','-movflags','+faststart','-fs','5242880','-y',str(target)]
+        try:process=subprocess.run(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45)
+        except (OSError,subprocess.TimeoutExpired):raise ReviewError('Не удалось подготовить проверочный фрагмент.') from None
+        if process.returncode or not target.is_file() or target.stat().st_size>5*1024**2:raise ReviewError('Не удалось подготовить проверочный фрагмент.')
+        if abs(duration(target)-seconds)>.08:raise ReviewError('Проверочный фрагмент не прошёл проверку длительности.')
+    context=work/'dj-point.m4a';forward=work/'dj-from-point.m4a'
+    encode(context,max(0,center-5),max(0,5-center),10)
+    encode(forward,center,0,5)
+    def result(file,seconds,point_position,label):
+        return {'track':{'source':'dj-review','id':card['point_id'],'title':card['title']+label+str(round(center,3))+' с','artist':card['artist'],'url':'https://t.me/aidj_codex_music_bot'},
+                'local_path':str(file),'duration':float(seconds),'md5':md5(file),'bytes':file.stat().st_size,'telegram_file_id':None,
+                'pointPosition':float(point_position),'sourcePosition':center}
+    answer=result(context,10,5,' · точка ')
+    answer['fromPoint']=result(forward,5,0,' · с точки ')
+    return answer

@@ -23,10 +23,12 @@ def setup(env,tmp_path,monkeypatch):
     uploads=[];rendered=[]
     def render(settings,db,card,work,disk=None):
         rendered.append(dict(card));file=work/'point.m4a';file.write_bytes(b'point-audio')
-        return {'track':result['track'],'local_path':str(file),'duration':10,'md5':'point-md5','bytes':11}
+        start_file=work/'from-point.m4a';start_file.write_bytes(b'from-point')
+        beginning={'track':result['track'],'local_path':str(start_file),'duration':5,'md5':'start-md5','bytes':10}
+        return {'track':result['track'],'local_path':str(file),'duration':10,'md5':'point-md5','bytes':11,'fromPoint':beginning}
     def audio(chat,value,keys=None):
-        assert value['duration']==10 and value['local_path']
-        uploads.append((chat,dict(value),keys));return {'message_id':800+len(uploads),'audio':{'file_id':'point-file'}}
+        assert value['duration'] in (5,10) and value['local_path']
+        uploads.append((chat,dict(value),keys));return {'message_id':800+len(uploads),'audio':{'file_id':'point-file-'+str(len(uploads))}}
     monkeypatch.setattr(R,'render_clip',render);bot.audio=audio
     return settings,db,disk,bot,manager,result,uploads,rendered
 
@@ -39,18 +41,23 @@ def start(setup,n=1):
     return R.owned_card(db,json.loads(job['payload'])['card_id'],11,22)
 
 
-def test_owner_gets_one_clip_with_explicit_center_and_vote_never_auto_advances(setup):
+def test_owner_gets_context_and_exact_point_preview_and_vote_never_auto_advances(setup):
     settings,db,disk,bot,manager,result,uploads,rendered=setup
     card=start(setup)
     assert card['state']=='open' and card['quality']=='acoustic'
-    assert len(uploads)==len(rendered)==1 and uploads[0][0]==22
-    assert 'Точка на 0:05' in uploads[0][1]['caption'] and 'В оригинале: 0:30.0' in uploads[0][1]['caption']
-    assert 'вход' in uploads[0][1]['caption']
-    assert {b['text'] for row in uploads[0][2] for b in row}=={'Хорошо','Плохо','Комментарий','Следующая','Закончить'}
+    assert len(uploads)==2 and len(rendered)==1 and all(upload[0]==22 for upload in uploads)
+    from aidj.dj_review_ui import timestamp
+    assert 'Точка на 0:05' in uploads[0][1]['caption'] and 'В оригинале: '+timestamp(card['position']) in uploads[0][1]['caption']
+    assert 'вход' in uploads[0][1]['caption'] and uploads[0][2]==[]
+    assert 'С опорной точки · 0:00' in uploads[1][1]['caption'] and uploads[1][1]['duration']==5
+    assert {b['text'] for row in uploads[1][2] for b in row}=={'Хорошо','Плохо','Комментарий','Следующая','Закончить'}
+    assert card['message_id']==802 and card['telegram_file_id']=='point-file-2'
+    record=json.loads(db.execute('SELECT result FROM jobs').fetchone()[0])
+    assert record['context_message_id']==801 and record['message_id']==802
     handle_update(db,{},bot,update(data=f'djrv:vote:{card["id"]}:1',n=2),settings)
     assert R.owned_card(db,card['id'],11,22)['state']=='voted'
     assert db.execute('SELECT value FROM dj_boundary_votes').fetchone()[0]==1
-    assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1 and len(uploads)==1
+    assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1 and len(uploads)==2
     assert '✓ Хорошо' in str(bot.markups)
     # Repeated delivery cannot enqueue another clip or change another point.
     handle_update(db,{},bot,update(data=f'djrv:vote:{card["id"]}:1',n=2),settings)
@@ -164,6 +171,11 @@ def test_telegram_audio_custom_caption_is_plain_bounded_and_preserves_default_ar
     assert fields['performer']=='Artist' and fields['title']=='Title' and 'parse_mode' not in fields
     bot.audio(22,{**original,'caption':123},keys)
     assert calls[-1][1]['caption']=='Artist — Title'
+    bot.audio(22,original,[])
+    assert json.loads(calls[-1][1]['reply_markup'])=={'inline_keyboard':[]}
+    defaults={**original,'disk_url':'https://example.invalid/disk','track':{**original['track'],'url':'https://example.invalid/source'}}
+    bot.audio(22,defaults,None)
+    assert len(json.loads(calls[-1][1]['reply_markup'])['inline_keyboard'][0])==2
 
 
 def test_normal_owner_link_is_a_music_request_until_comment_is_explicitly_requested(setup):
@@ -201,3 +213,88 @@ def test_finish_during_failed_render_does_not_send_a_late_error(setup,monkeypatc
         raise R.ReviewError('render stopped')
     monkeypatch.setattr(R,'render_clip',render_then_fail)
     assert process(settings,db,job,bot)==0 and len(bot.sent)==before
+
+
+def fail_first_comment_ack(bot,monkeypatch):
+    from aidj.telegram import TelegramError
+    original=bot.message;failed=[]
+    def send(chat,text,keys=None):
+        if text=='Комментарий сохранён к этой точке.' and not failed:
+            failed.append(True);raise TelegramError('temporary acknowledgement failure')
+        return original(chat,text,keys)
+    monkeypatch.setattr(bot,'message',send)
+    return failed
+
+
+def test_comment_replay_after_failed_ack_is_consumed_without_creating_music_job(setup,monkeypatch):
+    from aidj.telegram import TelegramError
+    settings,db,disk,bot,*_=setup
+    card=start(setup)
+    handle_update(db,{},bot,update(data=f'djrv:comment:{card["id"]}',n=2),settings)
+    failed=fail_first_comment_ack(bot,monkeypatch)
+    event=update(text='Слово оборвалось на этой точке',n=3)
+    with pytest.raises(TelegramError):handle_update(db,{},bot,event,settings)
+    assert failed and R.pending_comment(db,11,22) is None
+    assert db.execute('SELECT COUNT(*) FROM dj_boundary_comments').fetchone()[0]==1
+    handle_update(db,{},bot,event,settings)
+    assert db.execute('SELECT COUNT(*) FROM dj_boundary_comments').fetchone()[0]==1
+    assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==1
+    # A different update is still a normal owner music request, not swallowed.
+    handle_update(db,{},bot,update(text='https://www.youtube.com/watch?v=abcdefghijk',n=4),settings)
+    assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==2
+    assert json.loads(db.execute('SELECT payload FROM jobs ORDER BY id DESC LIMIT 1').fetchone()[0]).get('client')!='dj-review'
+
+
+def test_replayed_old_comment_cannot_consume_or_clear_a_new_points_pending_comment(setup,monkeypatch):
+    from aidj.telegram import TelegramError
+    settings,db,disk,bot,*_=setup
+    first=start(setup)
+    handle_update(db,{},bot,update(data=f'djrv:comment:{first["id"]}',n=2),settings)
+    fail_first_comment_ack(bot,monkeypatch)
+    old=update(text='Первый комментарий',n=3)
+    with pytest.raises(TelegramError):handle_update(db,{},bot,old,settings)
+    handle_update(db,{},bot,update(data=f'djrv:vote:{first["id"]}:1',n=4),settings)
+    handle_update(db,{},bot,update(data=f'djrv:next:{first["id"]}',n=5),settings)
+    job=claim_job(db);assert job and worker.run(job['id'])==0
+    second=R.owned_card(db,json.loads(job['payload'])['card_id'],11,22)
+    handle_update(db,{},bot,update(data=f'djrv:comment:{second["id"]}',n=6),settings)
+    assert R.pending_comment(db,11,22)['id']==second['id']
+    handle_update(db,{},bot,old,settings)
+    assert R.pending_comment(db,11,22)['id']==second['id']
+    assert db.execute('SELECT COUNT(*) FROM dj_boundary_comments').fetchone()[0]==1
+    assert db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]==2
+    handle_update(db,{},bot,update(text='Новый комментарий ко второй точке',n=7),settings)
+    rows=db.execute('SELECT point_id,text FROM dj_boundary_comments ORDER BY id').fetchall()
+    assert [(row['point_id'],row['text']) for row in rows]==[(first['point_id'],'Первый комментарий'),(second['point_id'],'Новый комментарий ко второй точке')]
+    assert R.pending_comment(db,11,22) is None
+
+
+def test_finish_after_context_upload_prevents_second_audio_and_buttons(setup,monkeypatch):
+    settings,db,disk,bot,manager,result,uploads,rendered=setup
+    handle_update(db,{},bot,update(text='/djreview'),settings);job=claim_job(db)
+    original=bot.audio
+    def finish_after_first(chat,value,keys=None):
+        sent=original(chat,value,keys)
+        if len(uploads)==1:R.finish_session(db,11,22)
+        return sent
+    monkeypatch.setattr(bot,'audio',finish_after_first)
+    assert process(settings,db,job,bot)==0
+    assert len(uploads)==1 and uploads[0][2]==[]
+    assert db.execute('SELECT state FROM dj_boundary_cards').fetchone()[0]=='closed'
+
+
+def test_second_audio_failure_does_not_mark_an_incomplete_pair_open_or_completed(setup,monkeypatch):
+    from aidj.telegram import TelegramError
+    settings,db,disk,bot,manager,result,uploads,rendered=setup
+    handle_update(db,{},bot,update(text='/djreview'),settings);job=claim_job(db)
+    original=bot.audio
+    def fail_second(chat,value,keys=None):
+        if value['duration']==5:raise TelegramError('second upload failed')
+        return original(chat,value,keys)
+    monkeypatch.setattr(bot,'audio',fail_second)
+    assert process(settings,db,job,bot)==1
+    assert len(uploads)==1 and uploads[0][2]==[]
+    assert db.execute('SELECT state FROM dj_boundary_cards').fetchone()[0]=='failed'
+    saved=db.execute('SELECT status,result FROM jobs').fetchone()
+    assert saved['status']=='failed' and json.loads(saved['result'])['context_message_id']==801
+    assert not db.execute('SELECT 1 FROM dj_boundary_votes').fetchone()
