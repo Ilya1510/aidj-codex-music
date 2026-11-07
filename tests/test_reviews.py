@@ -398,7 +398,7 @@ def test_review_skipped_alias_is_not_offered_again(setup):
     assert R.next_card(db,'after-skip',101,101)==(None,False)
 
 
-def test_unrated_suggestions_are_strictly_first_then_other_suggestions_then_library(setup,monkeypatch):
+def test_unrated_suggestions_are_strictly_first_then_join_normal_library_selection(setup,monkeypatch):
     settings,db,disk,bot,manager,result,p,*_=setup
     def suggest(key,digest):
         value={**result,'track':{**result['track'],'id':key,'title':key},'md5':digest}
@@ -412,11 +412,15 @@ def test_unrated_suggestions_are_strictly_first_then_other_suggestions_then_libr
     db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],rated,202,0,1))
     db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],original,303,-1,1));db.commit()
     offered=[]
-    def choose(population,weights,k):offered.append(list(population));return [population[-1]]
+    def choose(population,weights,k):
+        offered.append(list(population));return [fresh if fresh in population else rated if rated in population else population[-1]]
     monkeypatch.setattr(R.random,'choices',choose)
     for n,expected in enumerate((fresh,rated,original)):
         card,_=R.next_card(db,'priority:'+str(n),101,101)
-        assert offered[-1]==[expected] and card['item_id']==expected
+        if n==0:assert offered[-1]==[fresh]
+        elif n==1:assert set(offered[-1])=={rated,original}
+        else:assert offered[-1]==[original]
+        assert card['item_id']==expected
         db.execute("UPDATE jobs SET status='completed'")
         db.execute("UPDATE review_cards SET state='open' WHERE id=?",(card['id'],));db.commit()
         R.vote(db,card['id'],101,101,1)

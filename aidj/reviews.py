@@ -143,7 +143,7 @@ def next_card(db,event,user_id,chat_id):
     for identity in pool:
         digest=digests[identity];ratings=votes.get(digest,[])
         if digest in skipped or any(v['user_id']==user_id for v in ratings):continue
-        tier=0 if digest in proposed and not ratings else 1 if digest in proposed else 2
+        tier=0 if digest in proposed and not ratings else 1
         candidates.setdefault(digest,(identity,review_weight(len(ratings),sum(v['value']==-1 for v in ratings)),tier))
     values=list(candidates.values())
     if values:
