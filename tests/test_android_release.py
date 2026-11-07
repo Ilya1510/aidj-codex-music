@@ -59,7 +59,7 @@ def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_pa
     from aidj.web_auth import create_session
     import copy
     s=Settings(state=tmp_path/'state');db=connect(s);token=create_session(db);db.close()
-    value={'tracks':[{'id':'a'*24,'djV4':{'cues':[{'fade':.25}]},'djV3':{'cues':[{'fade':.5}]},'djV2':{},'dj':{}}],'playlists':[]}
+    value={'tracks':[{'id':'a'*24,'djV4':{'cues':[{'fade':.25}],'anchors':{'version':1},'acousticAnchors':{'quality':'acoustic'}},'djV3':{'cues':[{'fade':.5}]},'djV2':{},'dj':{}}],'playlists':[]}
     monkeypatch.setattr('aidj.webapp.catalog',lambda db:copy.deepcopy(value))
     server=Server(('127.0.0.1',0),Handler,s);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     url='http://127.0.0.1:'+str(server.server_port)+'/api/catalog'
@@ -71,4 +71,7 @@ def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_pa
             track=response.json()['tracks'][0]
             assert ('djV4' in track)==modern
             assert ('djV3' in track)!=modern
+            if modern:
+                assert ('anchors' in track['djV4'])==(version=='21')
+                assert ('acousticAnchors' in track['djV4'])==(version=='21')
     finally:server.shutdown();server.server_close();thread.join()

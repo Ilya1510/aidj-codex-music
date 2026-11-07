@@ -1,12 +1,13 @@
-"""Locate FFmpeg in the normal environment, then exec the isolated CPU worker."""
+"""Run the full-library controller; isolate heavy analysis in the CPU environment."""
 import os
 from pathlib import Path
+import sys
 from .audio import ffmpeg
 
 
 def main():
     root=Path(__file__).resolve().parent.parent
-    os.execv(str(root/'.dj-venv/bin/python'),[str(root/'.dj-venv/bin/python'),'-m','aidj.dj_worker','serve','--ffmpeg',ffmpeg()])
+    os.execv(sys.executable,[sys.executable,'-m','aidj.dj_batch','serve','--analysis-python',str(root/'.dj-venv/bin/python'),'--ffmpeg',ffmpeg(),'--threads','2'])
 
 
 if __name__=='__main__':main()

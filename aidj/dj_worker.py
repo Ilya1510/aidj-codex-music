@@ -92,6 +92,138 @@ def section_energy(evidence,start,end):
     return sum(part)/len(part) if part else .5
 
 
+def thin_points(rows,limit=256):
+    """Bound payload size without removing an entire part of a long song."""
+    if len(rows)<=limit:return rows
+    return [rows[round(i*(len(rows)-1)/(limit-1))] for i in range(limit)]
+
+
+def anchor_graph(evidence):
+    """Reusable whole-word boundaries, not a predetermined excerpt list.
+
+    A runtime player may pair these points at any requested duration. Entry
+    zero is the intact original start; every other point is observed between
+    two confident words, with 0.2 seconds reserved on both sides.
+    """
+    duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
+    starts={0.:round(section_energy(evidence,0,min(duration,8)),4)}
+    for lo,hi in vocal_gaps(evidence,.5):
+        if 0<lo<duration:starts[round(lo,4)]=round(section_energy(evidence,lo,min(duration,lo+8)),4)
+    stops={}
+    for lo,hi in vocal_gaps(evidence,.55):
+        if 0<hi<=duration and hi-lo>=.15-1e-7:
+            stops[round(hi,4)]=[round(min(2,hi-lo),4),round(section_energy(evidence,max(0,hi-8),hi),4)]
+    # MD5-bound previously validated exits stay useful when the latest local
+    # ASR view is uncertain. Do not manufacture entries from such an exit.
+    for lo,hi in evidence.get('safeExits',[]):
+        if 0<=lo<hi<=duration and .5<=hi-lo<=8:
+            stop=round(hi,4);fade=round(min(2,hi-lo),4)
+            if stop not in stops or fade>stops[stop][0]:stops[stop]=[fade,round(section_energy(evidence,max(0,hi-8),hi),4)]
+    graph={'version':1,'wordGuarded':True,'bpm':round(bpm,4),
+           'entries':thin_points([[t,energy] for t,energy in sorted(starts.items())]),
+           'exits':thin_points([[t,*values] for t,values in sorted(stops.items())])}
+    if bpm and beats:graph['grid']=round(beats[0]%(60/bpm),6)
+    return graph
+
+
+def usable_anchors(graph,minimum=10,maximum=120):
+    """Count actual choices without storing an O(n²) Cartesian product."""
+    entries=[row[0] for row in graph['entries']];count=0
+    for end,*_ in graph['exits']:
+        count+=sum(minimum-1e-7<=end-start<=maximum+1e-7 for start in entries)
+    return count
+
+
+def coarse_regions(energy):
+    """Legacy one-second RMS can provide provisional, review-only valleys."""
+    if not energy or max(energy)-min(energy)<.001:return []
+    threshold=min(sorted(energy)[int((len(energy)-1)*.25)],(min(energy)+max(energy))/2)
+    regions=[];start=None
+    for i,value in enumerate(energy+[float('inf')]):
+        if value<=threshold:
+            if start is None:start=i
+        elif start is not None:
+            regions.append([float(start),float(i),sum(energy[start:i])/(i-start)]);start=None
+    return regions
+
+
+def acoustic_graph(evidence):
+    """Provisional DSP boundaries, explicitly distinct from verified word gaps."""
+    duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
+    regions=evidence.get('acousticFeatures',{}).get('regions')
+    if regions is None:regions=coarse_regions(evidence.get('energy',[]))
+    occupied=merged_coverage([[max(0,w[0]-.2),min(duration,w[1]+.2)] for w in evidence.get('words',[]) if len(w)<3 or w[2] is True])
+    def clear(lo,hi):return not any(start<hi-1e-7 and end>lo+1e-7 for start,end in occupied)
+    candidates=[]
+    for lo,hi,energy in regions:
+        for t in (lo+.05,(lo+hi)/2,hi-.05):
+            if 0<t<duration:candidates.append((t,min(1,energy),min(1.2,max(.5,hi-lo-.1))))
+    # A measured stable beat grid provides phrase alternatives when the RMS
+    # valleys are shallow. Extrapolated bars remain explicitly acoustic/QA data.
+    if bpm and beats:
+        bar=4*60/bpm;origin=beats[0]%bar;t=origin
+        while t<duration:
+            if t>0:candidates.append((t,section_energy(evidence,max(0,t-2),min(duration,t+2)),.5))
+            t+=bar*2
+    candidates.append((max(0,duration-.02),section_energy(evidence,max(0,duration-8),duration),.5))
+    entries={0.:round(section_energy(evidence,0,min(duration,8)),4)};exits={}
+    for t,energy,fade in candidates:
+        time=round(t,4);fade=round(min(fade,t),4)
+        if clear(t-.001,t+.001):entries[time]=round(energy,4)
+        if fade>=.5 and clear(t-fade,t):exits[time]=[fade,round(energy,4)]
+    graph={'version':1,'quality':'acoustic','wordGuarded':False,'needsReview':True,'bpm':round(bpm,4),
+           'entries':thin_points([[t,e] for t,e in sorted(entries.items())]),
+           'exits':thin_points([[t,*v] for t,v in sorted(exits.items())])}
+    if bpm and beats:graph['grid']=round(beats[0]%(60/bpm),6)
+    return graph
+
+
+def needs_rescue(evidence):
+    """One bounded quality pass, never an endless retry of an uncuttable song."""
+    if evidence.get('boundaryPass',0)>=1:return False
+    graph=anchor_graph(evidence)
+    return len(graph['entries'])<8 or len(graph['exits'])<8 or usable_anchors(graph)<8
+
+
+def rescue_windows(evidence,limit=6):
+    if not needs_rescue(evidence):return []
+    duration=evidence['duration']
+    if duration<20:return []
+    # Shift the framing relative to the first 28-second pass. This gives words
+    # smeared at its edges another complete local context without relaxing their
+    # ASR confidence or treating missing words as a pause.
+    ranked=[]
+    for zone in range(12):
+        center=duration*(zone+.5)/12;lo=round(max(0,min(duration-20,center-10)),3);hi=lo+20
+        if any(abs(a-lo)<.25 and abs(b-hi)<.25 for a,b in evidence.get('probes',[])):continue
+        local=[w for w in evidence['words'] if w[0]<hi and w[1]>lo]
+        confidence=sum(bool(w[2]) if len(w)>2 else True for w in local)/max(1,len(local))
+        score=section_energy(evidence,lo,hi)+.7*(1-confidence)
+        ranked.append((score,lo,hi))
+    chosen=[]
+    for _,lo,hi in sorted(ranked,reverse=True):
+        if all(abs(lo-old[0])>=8 for old in chosen):chosen.append([lo,hi])
+        if len(chosen)>=limit:break
+    return chosen
+
+
+def replace_observed_words(previous,fresh,lo,hi):
+    """Refresh a local observation without retaining an uncertain blanket span.
+
+    Confident words crossing an observation edge remain whole. Uncertain spans
+    are kept outside the freshly observed interior, so a long old low-confidence
+    segment cannot mask all new, individually confident word boundaries.
+    """
+    begin,end=lo+1,hi-1;kept=[]
+    for word in previous:
+        start,stop=word[:2];confident=word[2] if len(word)>2 else True
+        if stop<=begin or start>=end or confident and (start<begin or stop>end):kept.append(word)
+        else:
+            if start<begin:kept.append([start,begin,False])
+            if stop>end:kept.append([end,stop,False])
+    return kept+fresh
+
+
 def selection(evidence):
     duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
     def cue(start,lo,end):
@@ -161,8 +293,15 @@ def selection(evidence):
                     remix.append(candidate);break
             if not pool:del zones[zone]
             if len(remix)>=32:break
-    reason=('few-recognised-words' if len(evidence['words'])<8 else 'no-safe-gap') if not cues else None
-    return {'version':3,'cueSchema':4,'cues':cues,'remix':remix,'method':'analysed','reason':reason}
+    graph=anchor_graph(evidence)
+    reason=None
+    if not cues and not remix and not usable_anchors(graph):
+        reason='few-recognised-words' if len(evidence['words'])<8 else 'no-safe-gap' if not graph['exits'] else 'no-safe-duration'
+    fallback=acoustic_graph(evidence)
+    review=not usable_anchors(graph)
+    return {'version':3,'cueSchema':4,'anchors':graph,'acousticAnchors':fallback,'needsReview':review,
+            'reviewRecommended':review or bool(evidence.get('rescuePlan')),'fullFallback':review and not usable_anchors(fallback),
+            'cues':cues,'remix':remix,'method':'analysed','reason':reason}
 
 
 def rhythm(y,sr):
@@ -192,6 +331,34 @@ def energy_envelope(y,sr):
     values=[float(np.sqrt(np.mean(y[t:t+sr]**2))) for t in range(0,len(y),sr)]
     scale=float(np.quantile(values,.9)) if values else 1
     return [round(min(1,x/max(.0001,scale)),4) for x in values]
+
+
+def acoustic_features(y,sr):
+    """Twenty-millisecond RMS valleys in one-second bounded NumPy chunks."""
+    import numpy as np
+    hop=max(1,int(sr*.02));count=math.ceil(len(y)/hop)
+    levels=np.empty(count,dtype=np.float32)
+    for start in range(0,len(y),sr):
+        block=np.array(y[start:min(len(y),start+sr)],dtype=np.float32,copy=True)
+        whole=len(block)//hop;at=start//hop
+        if whole:levels[at:at+whole]=np.sqrt(np.mean(block[:whole*hop].reshape(whole,hop)**2,axis=1))
+        if whole*hop<len(block):levels[at+whole]=float(np.sqrt(np.mean(block[whole*hop:]**2)))
+    if not count:return {'hop':.02,'regions':[]}
+    smooth=np.convolve(levels,np.ones(5,dtype=np.float32)/5,mode='same') if count>=5 else levels
+    if count>=5:
+        # Convolution's zero padding is not measured silence at the file edges.
+        smooth[:2]=levels[:2];smooth[-2:]=levels[-2:]
+    scale=max(.0001,float(np.quantile(smooth,.9)));normalized=np.minimum(1,smooth/scale)
+    if float(np.max(normalized)-np.min(normalized))<.001:return {'hop':.02,'regions':[]}
+    threshold=min(float(np.quantile(normalized,.25)),float(np.min(normalized)+np.max(normalized))/2);regions=[];begin=None
+    for i in range(count+1):
+        low=i<count and normalized[i]<=threshold
+        if low and begin is None:begin=i
+        elif not low and begin is not None:
+            if i-begin>=2:
+                regions.append([round(begin*hop/sr,4),round(min(len(y),i*hop)/sr,4),round(float(np.mean(normalized[begin:i])),4)])
+            begin=None
+    return {'hop':.02,'regions':thin_points(regions,512)}
 
 
 def probe_windows(evidence):
@@ -251,8 +418,7 @@ def observe_windows(evidence,windows,model,sample,language=None,checkpoint=None,
         for part in segments:words.extend(numeric_words(part,lo))
         # Empty ASR cannot erase previous evidence or be treated as a pause.
         if len(words)>=8:
-            evidence['words']=[w for w in evidence['words'] if not (lo+1<=w[0] and w[1]<=hi-1)]
-            evidence['words'].extend(words)
+            evidence['words']=replace_observed_words(evidence['words'],words,lo,hi)
             evidence['coverage']=[*coverage(evidence),[lo,hi]]
         evidence.setdefault('probes',[]).append([lo,hi]);analysed+=hi-lo
         evidence['timings'].update(asr=round(time.monotonic()-asr_start,3),observedSeconds=analysed)
@@ -300,6 +466,7 @@ def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None,full=Fa
         y=np.memmap(raw,dtype=np.float32,mode='r')
         if reuse_rhythm and (not evidence.get('energy') or full and len(evidence['energy'])<math.ceil(duration)):
             evidence['energy']=energy_envelope(y,16000)
+        if full and 'acousticFeatures' not in evidence:evidence['acousticFeatures']=acoustic_features(y,16000)
         evidence['timings']={'structure':round(time.monotonic()-began,3)}
         windows=full_windows(evidence) if full else probe_windows(evidence)
         # Local controllers can select an interrupted checkpoint only once its
@@ -307,22 +474,29 @@ def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None,full=Fa
         # narrower observations before changing that version.
         evidence['version']=3
         stage('asr')
-        if windows:
-            from faster_whisper import WhisperModel
-            model=WhisperModel('base',device='cpu',compute_type='int8',cpu_threads=cpu_threads,num_workers=1,download_root=str(models))
-            # Each writable ASR sample is <=28s. Reading a memmap keeps the
-            # complete original out of the parent's Python heap.
-            sample=lambda lo,hi:np.array(y[int(lo*16000):int(hi*16000)],dtype=np.float32,copy=True)
-            observe_windows(evidence,windows,model,sample,language,checkpoint,full)
-            # The model is no longer needed during the candidate-selection pass.
-            # Dropping it also avoids overlapping its native workspace with that
-            # pass in implementations that release model memory immediately.
-            model=None
+        model=None
+        def speech_model():
+            nonlocal model
+            if model is None:
+                from faster_whisper import WhisperModel
+                model=WhisperModel('base',device='cpu',compute_type='int8',cpu_threads=cpu_threads,num_workers=1,download_root=str(models))
+            return model
+        sample=lambda lo,hi:np.array(y[int(lo*16000):int(hi*16000)],dtype=np.float32,copy=True)
+        if windows:observe_windows(evidence,windows,speech_model(),sample,language,checkpoint,full)
+        if full and evidence.get('boundaryPass',0)<1:
+            plan=evidence.get('rescuePlan')
+            if plan is None:
+                plan=rescue_windows(evidence);evidence['rescuePlan']=plan;stage('asr')
+            for lo,hi in plan:
+                if any(abs(a-lo)<.25 and abs(b-hi)<.25 for a,b in evidence.get('probes',[])):continue
+                observe_windows(evidence,[(lo,hi)],speech_model(),sample,language,checkpoint,True)
+        model=None
         evidence['version']=3
         stage('selection')
         chosen=selection(evidence)
         if full:
             evidence['fullComplete']=not full_windows(evidence);evidence['fullDuration']=duration
+            if evidence['fullComplete']:evidence['boundaryPass']=1
         evidence['timings']['total']=round(time.monotonic()-began,3)
         stage('complete')
         return {**chosen,'evidence':evidence}
@@ -392,7 +566,7 @@ def main():
         y=np.memmap(args.file,dtype=np.float32,mode='r')
         try:
             beats,bpm=rhythm(np.array(y[:16000*90],copy=True),16000)
-            atomic_json(args.output,{'beats':beats,'bpm':bpm,'energy':energy_envelope(y,16000)})
+            atomic_json(args.output,{'beats':beats,'bpm':bpm,'energy':energy_envelope(y,16000),'acousticFeatures':acoustic_features(y,16000)})
         finally:y._mmap.close()
         return
     if args.action=='analyse':

@@ -24,7 +24,7 @@ public final class MainActivity extends Activity {
     private boolean visible=false;private static volatile boolean foreground=false;
     static boolean isVisible(){return foreground;}
     private final java.util.concurrent.atomic.AtomicBoolean publishing=new java.util.concurrent.atomic.AtomicBoolean(false);
-    private long lastSync=0;private volatile String lastPlayer="";
+    private long lastSync=0;private volatile String lastPlayer="";private volatile boolean playerServiceSeen=false;
     private static final String ORIGIN="https://app.aidj.local";
     private final Runnable poll=new Runnable(){public void run(){if(!visible)return;publish();if(SystemClock.elapsedRealtime()-lastSync>20000){lastSync=SystemClock.elapsedRealtime();NativeInbox.request(MainActivity.this);}main.postDelayed(this,1000);}};
 
@@ -92,7 +92,7 @@ public final class MainActivity extends Activity {
     @Override public void onBackPressed(){web.evaluateJavascript("window.__aidjBack ? window.__aidjBack() : false",value->{if(!"true".equals(value))super.onBackPressed();});}
     private JSONObject state(){
         JSONObject value=new JSONObject();try{
-            if(!lastPlayer.isEmpty())value.put("player",new JSONObject(lastPlayer));else{JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",q);p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);value.put("player",p);}
+            if(lastPlayer.isEmpty()){JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",PlaybackService.lightQueue(q));p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);lastPlayer=p.toString();}value.put("player",new JSONObject(lastPlayer));
             value.put("downloads",NativeDownloads.snapshot(this));value.put("files",State.get(this).files());value.put("versionCode",BuildConfig.VERSION_CODE);value.put("server",Api.base(this));
             value.put("libraryRevision",State.get(this).read("libraryRevision",""));value.put("network",NetworkStatus.snapshot().put("connected",DownloadRunner.network(this)));
             if(ImportService.instance!=null)value.put("transfer",ImportService.instance.snapshot());
@@ -100,7 +100,7 @@ public final class MainActivity extends Activity {
     }
     private void publish(){
         if(!publishing.compareAndSet(false,true))return;
-        PlaybackService service=PlaybackService.instance;lastPlayer=service==null?"":service.snapshot().toString();
+        PlaybackService service=PlaybackService.instance;if(service!=null){lastPlayer=service.snapshot(true).toString();playerServiceSeen=true;}else if(playerServiceSeen){lastPlayer="";playerServiceSeen=false;}
         executor.execute(()->{try{
             String value=state().toString();main.post(()->{if(web!=null&&visible&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeState && window.__aidjNativeState("+value+")",null);});
         }finally{publishing.set(false);}});
@@ -108,14 +108,14 @@ public final class MainActivity extends Activity {
     private void reply(String id,JSONObject result){main.post(()->{if(!isFinishing()&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeReply && window.__aidjNativeReply("+JSONObject.quote(id)+","+result.toString()+")",null);});}
     private class Bridge {
         @JavascriptInterface public String readMeta(String key){return key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")?State.get(MainActivity.this).read("web_"+key,"null"):"null";}
-        @JavascriptInterface public void writeMeta(String key,String value){if(key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")&&value!=null&&value.length()<=("catalog".equals(key)?8:2)*1024*1024)State.get(MainActivity.this).write("web_"+key,value);}
+        @JavascriptInterface public void writeMeta(String key,String value){if(key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")&&value!=null&&value.length()<=(("catalog".equals(key)||"player".equals(key))?8:2)*1024*1024)State.get(MainActivity.this).write("web_"+key,value);}
         @JavascriptInterface public String files(){return State.get(MainActivity.this).files().toString();}
         @JavascriptInterface public String snapshot(){return state().toString();}
         @JavascriptInterface public int version(){return BuildConfig.VERSION_CODE;}
         @JavascriptInterface public void open(String value){main.post(()->openExternal(value));}
         @JavascriptInterface public void request(String id,String payload){
             if(id==null||!id.matches("[0-9]{1,12}")||payload==null)return;
-            if(payload.length()>2*1024*1024){try{reply(id,new JSONObject().put("error","Слишком большая очередь. Выбери меньше песен."));}catch(Exception ignored){}return;}
+            if(payload.length()>8*1024*1024){try{reply(id,new JSONObject().put("error","Слишком большая очередь. Выбери меньше песен."));}catch(Exception ignored){}return;}
             ExecutorService target=executor;
             try{if("api".equals(new JSONObject(payload).optString("type")))target=apiExecutor;}catch(Exception ignored){}
             target.execute(()->{
@@ -134,11 +134,11 @@ public final class MainActivity extends Activity {
                     }
                     else if("queue".equals(type)||"play".equals(type)){
                         JSONObject queue=data.getJSONObject("queue");if(queue.optJSONArray("entries")==null||queue.getJSONArray("entries").length()>5000)throw new Exception();
-                        final boolean play="play".equals(type);State.get(MainActivity.this).write("nativeQueue",queue.toString());
+                        final boolean play="play".equals(type);State.get(MainActivity.this).write("nativeQueue",queue.toString());if(PlaybackService.instance==null)lastPlayer="";
                         main.post(()->{
                             try{
                                 PlaybackService service=PlaybackService.instance;
-                                if(play){Intent intent=new Intent(MainActivity.this,PlaybackService.class).putExtra("queue",queue.toString()).putExtra("action","play");startForegroundService(intent);}
+                                if(play){Intent intent=new Intent(MainActivity.this,PlaybackService.class).putExtra("reloadQueue",true).putExtra("action","play");startForegroundService(intent);}
                                 else if(service!=null)service.setQueue(queue);
                             }catch(Exception e){Toast.makeText(MainActivity.this,"Открой приложение и нажми воспроизведение ещё раз.",Toast.LENGTH_LONG).show();}
                         });result.put("ok",true);

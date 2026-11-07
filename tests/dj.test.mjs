@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Queue} from '../miniapp/player.mjs';
-import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix,packRemixEntries} from '../miniapp/dj.mjs';
+import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix,packRemixEntries,remixAnchors,remixAcousticAnchors,remixDurationSeconds} from '../miniapp/dj.mjs';
 import {playbackSettings} from '../miniapp/playback.mjs';
 const song=(id,bpm)=>({id,duration:240,dj:{cues:[{start:0,end:110,bpm,fade:1.8},{start:0,end:80,bpm,fade:2}]}});
 
@@ -31,7 +31,7 @@ test('only shuffle may choose compatible neighbours and queue identity survives 
   q.entries=planDj(q.entries,tracks,'normal',{reorder:true});assert.deepEqual(q.entries.map(e=>e.trackId),['a','c','b']);
   q.current.djFull=true;const restore=new Queue(JSON.parse(JSON.stringify(q.snapshot())));
   assert.equal(restore.playlistId,7);assert.equal(restore.current.djFull,true);restore.remove(restore.entries[1].id);assert.equal(restore.entries.length,2);
-  assert.deepEqual(playbackSettings({mode:'dj',length:'long'}),{audition:false,mode:'dj',length:'long',seconds:3});
+  assert.deepEqual(playbackSettings({mode:'dj',length:'long'}),{audition:false,mode:'dj',length:'long',seconds:3,remixDurationSeconds:12});
 });
 
 test('inserting an upcoming song keeps the current tempo fixed',()=>{
@@ -83,7 +83,7 @@ test('remix snippets require bounded verified entries and leave manual excerpts 
 });
 
 test('catalog refresh retains native remix deck positions, rates, visits and queue order',()=>{
-  const cues=[{start:40,end:52,bpm:128,fade:1,entryVerified:true},{start:90,end:106,bpm:128,fade:1,entryVerified:true}];
+  const cues=[{start:40,end:52,bpm:128,fade:1,entryVerified:true},{start:90,end:104,bpm:128,fade:1,entryVerified:true}];
   const tracks=new Map(['a','b','c'].map(id=>[id,{id,duration:240,djV3:{remix:cues}}]));
   const entries=['a','c','b'].map(id=>({id,trackId:id}));
   const pin={...entries[0],dj:{...cues[1],rate:1.02},remix:true,remixVisits:1};
@@ -142,4 +142,41 @@ test('all32 remix choices fit the persistent native queue for543songs',()=>{
   assert.equal(packed[0].remixPool.length,32);assert.equal(packed[0].remixCues,undefined);
   assert.deepEqual(packed[0].remixPool[0],[0,12,128,.16,3.2,.12,.8,1,1]);
   assert.deepEqual(packRemixEntries(packed),packed);assert.equal(entries[0].remixCues.length,32);
+});
+
+
+test('desired duration uses whole-phrase anchors including late song sections',()=>{
+  const anchors={version:1,wordGuarded:true,bpm:128,grid:.12,entries:[[0,.2],[80,.8],[180,1],[280,.9]],exits:[[12,.16,.2],[124,.3,.9],[220,.2,1],[284,.16,.9],[400,.3,.9]]};
+  const track={id:'a',duration:420,djV4:{anchors}};
+  const short=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:12})[0];assert.equal(short.dj.end-short.dj.start,12);
+  const medium=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:43})[0];assert(Math.abs(medium.dj.end-medium.dj.start-43)<=3);assert(anchors.entries.some(([n])=>n===medium.dj.start));assert(anchors.exits.some(([n])=>n===medium.dj.end));
+  const long=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120})[0];assert.equal(long.dj.end-long.dj.start,120);assert(long.dj.start>=280);assert.equal(long.dj.mix,3.2);assert.equal(long.dj.wordGuarded,true);
+  assert.deepEqual(long.remixCues,[]);assert.equal(packRemixEntries([long])[0].remixAnchors.packed,true);assert.equal(packRemixEntries([long])[0].remixAnchors.entries[2],80000);
+  assert.equal(remixDurationSeconds(),12);assert.equal(remixDurationSeconds(NaN),12);assert.equal(remixDurationSeconds(4),10);assert.equal(remixDurationSeconds(300),120);
+});
+test('duration settings keep current and prepared next decks and reject unguarded anchors',()=>{
+  const anchors={version:1,wordGuarded:true,bpm:120,entries:[[0,.2],[30,.8],[100,.8]],exits:[[12,.3,.8],[90,.3,.8],[160,.3,.8]]},track={id:'a',duration:240,djV4:{anchors}};
+  const entries=[{id:'e1',trackId:'a'},{id:'e2',trackId:'a'},{id:'e3',trackId:'a'}],original=planRemix(entries,new Map([['a',track]])),[pin,nextPin]=original;
+  const changed=planRemix(original,new Map([['a',track]]),{pin,nextPin,remixDurationSeconds:60});assert.deepEqual(changed[0].dj,pin.dj);assert.deepEqual(changed[1].dj,nextPin.dj);assert.equal(changed[2].dj.end-changed[2].dj.start,60);
+  assert.equal(remixAnchors({...track,djV4:{anchors:{...anchors,wordGuarded:false}}}),null);
+  const legacy={...track,djV4:{remix:[{start:40,end:52,bpm:120,fade:1,entryVerified:true}]}};assert.deepEqual(remixCues(legacy,120),[]);
+});
+test('full-song anchor queues stay below the8MB private transport limit without duplicate pools',()=>{
+  const anchors={version:1,wordGuarded:true,bpm:128.1234,grid:.123456,entries:Array.from({length:256},(_,i)=>[Number((i*2.2+.1234).toFixed(4)),.9876]),exits:Array.from({length:256},(_,i)=>[Number((i*2.2+10.1234).toFixed(4)),1.9876,.9876])};
+  const entries=Array.from({length:543},(_,i)=>({id:'e'+i,trackId:'a'.repeat(24),remixAnchors:anchors,remixAcousticAnchors:{...anchors,quality:'acoustic',wordGuarded:false,needsReview:true},remixCues:Array.from({length:32},()=>({start:0,end:12,bpm:128,fade:.2,mix:3.2,wordGuarded:true,entryVerified:true}))}));
+  const packed=packRemixEntries(entries);assert(JSON.stringify(packed).length<8*1024**2);assert.equal(packed[0].remixPool,undefined);assert.equal(packed[0].remixAnchors.packed,true);assert.equal(packed[0].remixAnchors.flat,true);assert.equal(packed[0].remixAcousticAnchors.packed,true);assert.deepEqual(packRemixEntries(packed),packed);
+});
+
+
+test('acoustic fallback is audible at its measured entry but never claims recognised words',()=>{
+  const a={version:1,quality:'acoustic',wordGuarded:false,needsReview:true,bpm:128,entries:[[40,1]],exits:[[100,.7,1]]},track={id:'a',duration:240,djV4:{acousticAnchors:a}};
+  const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:60});
+  assert.equal(entry.dj.start,40);assert.equal(entry.dj.end,100);assert.equal(entry.dj.acoustic,true);assert.equal(entry.dj.needsReview,true);assert.equal(entry.dj.entryVerified,false);assert.equal(entry.dj.wordGuarded,false);assert.equal(entry.remixNeedsReview,true);assert.equal(playbackTrack(track,entry,true).rangeStart,40);
+  const graph={...a,wordGuarded:true,entries:[[30,.2]],exits:[[90,.3,.2]]};const [verified]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,djV4:{anchors:graph,acousticAnchors:a}}]]),{remixDurationSeconds:60});assert.equal(verified.dj.entryVerified,true);assert.equal(verified.dj.acoustic,undefined);
+  assert.equal(remixAcousticAnchors({...track,djV4:{acousticAnchors:{...a,needsReview:false}}}),null);
+});
+test('missing requested duration retains a clearly marked full-source review fallback',()=>{
+  const track={id:'a',duration:240,djV4:{remix:[{start:40,end:52,bpm:128,fade:1,entryVerified:true}]}};
+  const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120});assert.equal(entry.dj,null);assert.equal(entry.remix,false);assert.equal(entry.remixNeedsReview,true);assert.equal(entry.remixFallback,'full-source');assert.equal(playbackTrack(track,entry,true),track);
+  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:100}]]),{remixDurationSeconds:120});assert.equal(manual.remixFallback,null);assert.equal(manual.remixNeedsReview,false);
 });

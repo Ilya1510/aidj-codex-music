@@ -4,6 +4,11 @@ No HTTP endpoint or exported Disk credentials. RPC replies contain only song
 metadata and numeric analysis; originals cross the authenticated SSH channel.
 """
 import argparse
+from bisect import bisect_left,bisect_right
+import fcntl
+import os
+import signal
+import threading
 import hashlib
 import json
 from pathlib import Path
@@ -43,13 +48,29 @@ def ident(value,length):
     return value
 
 
+def usable_graph(graph):
+    if not isinstance(graph,dict):return False
+    starts=sorted(row[0] for row in graph.get('entries',[]))
+    return any(bisect_right(starts,row[0]-10)>bisect_left(starts,row[0]-120) for row in graph.get('exits',[]))
+
+
 def stats(db,run):
     counts={r[0]:r[1] for r in db.execute('SELECT state,count(*) FROM dj_batch_jobs WHERE run_id=? GROUP BY state',(run,))}
     ready=db.execute("""SELECT COALESCE(sum(json_array_length(a.payload,'$.cues')>0),0),
         COALESCE(sum(json_array_length(a.payload,'$.remix')>0),0) FROM dj_batch_jobs b
         LEFT JOIN dj_analysis a ON a.md5=b.md5 WHERE b.run_id=? AND b.state='done'""",(run,)).fetchone()
+    anchors=0;word_anchors=0;acoustic_anchors=0;review=0;full_fallback=0
+    for row in db.execute("SELECT a.payload FROM dj_batch_jobs b JOIN dj_analysis a ON a.md5=b.md5 WHERE b.run_id=? AND b.state='done' AND a.payload IS NOT NULL",(run,)):
+        value=json.loads(row[0]);graph=value.get('anchors',{});acoustic=value.get('acousticAnchors',{})
+        word=usable_graph(graph);signal_ready=usable_graph(acoustic)
+        if word or signal_ready:anchors+=1
+        if word:word_anchors+=1
+        if signal_ready:acoustic_anchors+=1
+        if value.get('needsReview') is True or value.get('reviewRecommended') is True:review+=1
+        if value.get('fullFallback') is True:full_fallback+=1
     return {**{k:counts.get(k,0) for k in ('pending','running','done','failed')},'total':sum(counts.values()),
-            'regularReady':ready[0],'remixReady':ready[1],'withoutRegular':counts.get('done',0)-ready[0],'withoutRemix':counts.get('done',0)-ready[1]}
+            'regularReady':ready[0],'remixReady':ready[1],'withoutRegular':counts.get('done',0)-ready[0],'withoutRemix':counts.get('done',0)-ready[1],
+            'anchorReady':anchors,'wordAnchorsReady':word_anchors,'acousticReady':acoustic_anchors,'needsReview':review,'fullFallback':full_fallback}
 
 
 def start(db,playlist=None):
@@ -86,7 +107,8 @@ def claim(db,run):
     db.execute("UPDATE dj_batch_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,token=NULL,lease=0 WHERE run_id=? AND state='running' AND lease<=?",(run,now))
     db.execute("""UPDATE dj_batch_jobs SET state='done' WHERE run_id=? AND state='pending' AND EXISTS
         (SELECT 1 FROM dj_evidence e WHERE e.md5=dj_batch_jobs.md5
-         AND json_extract(e.payload,'$.fullComplete')=1 AND json_extract(e.payload,'$.version')>=?)""",(run,VERSION))
+         AND json_extract(e.payload,'$.fullComplete')=1 AND json_extract(e.payload,'$.version')>=?
+         AND (COALESCE(json_extract(e.payload,'$.boundaryPass'),0)>=1 OR COALESCE(dj_batch_jobs.error,'')!='REFINE_BOUNDARIES'))""",(run,VERSION))
     row=db.execute("""SELECT b.* FROM dj_batch_jobs b LEFT JOIN dj_analysis a ON a.md5=b.md5
         WHERE b.run_id=? AND b.state='pending' AND (a.status IS NULL OR a.status!='working')
         AND NOT EXISTS (SELECT 1 FROM dj_batch_jobs other WHERE other.md5=b.md5 AND other.state='running' AND other.lease>?)
@@ -114,6 +136,9 @@ def numeric_evidence(value,duration):
         return x
     out={'version':VERSION,'duration':number(value.get('duration')),'fullComplete':True,'analysisScope':'full'}
     if abs(out['duration']-duration)>1:raise BatchError('DURATION_MISMATCH')
+    marker=value.get('boundaryPass',0)
+    if type(marker) is not int or marker not in (0,1):raise BatchError('INVALID_EVIDENCE')
+    out['boundaryPass']=marker
     out['fullDuration']=number(value.get('fullDuration',out['duration']))
     if abs(out['fullDuration']-duration)>1:raise BatchError('DURATION_MISMATCH')
     bpm=number(value.get('bpm'),0,210)
@@ -133,6 +158,18 @@ def numeric_evidence(value,duration):
             if hi<lo:raise BatchError('INVALID_EVIDENCE')
             if key=='words' and type(row[2]) is not bool:raise BatchError('INVALID_EVIDENCE')
             out[key].append([lo,hi,row[2]] if key=='words' else [lo,hi])
+    if 'acousticFeatures' in value:
+        features=value['acousticFeatures']
+        if not isinstance(features,dict):raise BatchError('INVALID_EVIDENCE')
+        hop=number(features.get('hop'),.001,1);regions=features.get('regions',[])
+        if not isinstance(regions,list) or len(regions)>512:raise BatchError('INVALID_EVIDENCE')
+        clean=[]
+        for region in regions:
+            if not isinstance(region,(list,tuple)) or len(region)!=3:raise BatchError('INVALID_EVIDENCE')
+            lo,hi=number(region[0]),number(region[1])
+            if hi<=lo:raise BatchError('INVALID_EVIDENCE')
+            clean.append([lo,hi,number(region[2],0,1)])
+        out['acousticFeatures']={'hop':hop,'regions':clean}
     if len(json.dumps(out))>MAX_JSON:raise BatchError('RESULT_TOO_LARGE')
     return out
 
@@ -189,10 +226,201 @@ def audio(settings,db,body,output):
         with file.open('rb') as stream:shutil.copyfileobj(stream,output,65536)
 
 
-def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['rpc','audio']);parser.add_argument('--run');parser.add_argument('--md5');parser.add_argument('--token');args=parser.parse_args()
-    settings=Settings();db=connect(settings)
+def _restore_local(db,active):
+    """Recover only the lease token recorded by this local controller."""
     try:
+        run=ident(active.get('runId'),24);md5=ident(active.get('md5'),32);token=ident(active.get('token'),32)
+    except (BatchError,AttributeError):return
+    row=db.execute('SELECT state,token FROM dj_batch_jobs WHERE run_id=? AND md5=?',(run,md5)).fetchone()
+    if row and row['state']=='running' and not secrets.compare_digest(row['token'] or '',token):
+        return
+    if row and row['state']=='running' and secrets.compare_digest(row['token'] or '',token):
+        db.execute("UPDATE dj_batch_jobs SET state='pending',token=NULL,lease=0,attempts=MAX(0,attempts-1) WHERE run_id=? AND md5=?",(run,md5))
+    old=active.get('previousStatus')
+    if old is None and not active.get('hadPayload'):
+        db.execute("DELETE FROM dj_analysis WHERE md5=? AND status='working' AND payload IS NULL",(md5,))
+    else:
+        if old not in ('pending','complete','failed'):old='complete' if active.get('hadPayload') else 'pending'
+        db.execute("UPDATE dj_analysis SET status=? WHERE md5=? AND status='working'",(old,md5))
+    db.commit()
+
+
+def recover_local(settings,db):
+    journal=settings.state/'dj-batch-local.json'
+    try:
+        if not journal.is_file() or journal.stat().st_size>4096:return
+        active=json.loads(journal.read_text());_restore_local(db,active)
+        # Cleanup is an exact path from this controller's own private journal,
+        # never a scan of other work directories or the user's home.
+        scratch=Path(active.get('scratch',''))
+        if scratch.name.startswith('dj-full-') and not scratch.is_symlink() and scratch.parent.resolve()==(settings.state/'work').resolve():
+            shutil.rmtree(scratch,ignore_errors=True)
+    except (OSError,ValueError,TypeError):pass
+    finally:journal.unlink(missing_ok=True)
+
+
+def _checkpoint(path):
+    if path.is_file() and 0<path.stat().st_size<=MAX_JSON:
+        try:
+            value=json.loads(path.read_text())
+            return value if isinstance(value,dict) else None
+        except (ValueError,OSError):pass
+    return None
+
+
+def local_job(settings,db,run,job,analysis_python,ffmpeg,stopped,runner=None,disk_factory=None,cpu_threads=1):
+    """One original, one bounded child, one persistent numeric checkpoint."""
+    from .config import atomic_json
+    from .disk import Disk
+    from .dj import heartbeat as runtime_heartbeat
+    from .dj_remote import RemoteError,analyse_command,run_analysis,json_file,checkpoint_for,save_diagnostics
+    runner=runner or run_analysis;disk_factory=disk_factory or Disk
+    identity={'runId':run,'md5':job['md5'],'token':job['token']}
+    asset=db.execute('SELECT * FROM web_assets WHERE id=?',(job['asset']['id'],)).fetchone()
+    if not asset or asset['bytes']>40*1024**2:raise BatchError('SOURCE_NOT_FOUND')
+    checkpoints=settings.state/'dj-batch-checkpoints';checkpoints.mkdir(exist_ok=True,mode=0o700)
+    checkpoint=checkpoints/(job['md5']+'.json');journal=settings.state/'dj-batch-local.json'
+    previous=db.execute('SELECT status,payload FROM dj_analysis WHERE md5=?',(job['md5'],)).fetchone()
+    active={**identity,'previousStatus':previous['status'] if previous else None,'hadPayload':bool(previous and previous['payload'])}
+    done=threading.Event();lost=threading.Event();phase='DOWNLOAD_FAILED'
+    def renew():
+        beat=connect(settings)
+        try:
+            while not done.wait(20):
+                try:dispatch(beat,{'op':'heartbeat',**identity});runtime_heartbeat(beat,'working')
+                except Exception:lost.set();return
+        finally:beat.close()
+    keeper=None
+    try:
+        with tempfile.TemporaryDirectory(prefix='dj-full-',dir=settings.state/'work') as directory:
+            folder=Path(directory);active['scratch']=str(folder);atomic_json(journal,active)
+            db.execute("INSERT INTO dj_analysis VALUES (?,?,'working',NULL,?) ON CONFLICT(md5) DO UPDATE SET status='working',updated=excluded.updated",(job['md5'],asset['id'],time.time()));db.commit()
+            runtime_heartbeat(db,'working');keeper=threading.Thread(target=renew,daemon=True);keeper.start()
+            if stopped.is_set():raise RemoteError('INTERRUPTED')
+            source=folder/('source'+Path(asset['remote_path']).suffix)
+            disk_factory(settings).download(asset['remote_path'],source,expected_md5=job['md5'])
+            if source.stat().st_size!=asset['bytes']:raise BatchError('SOURCE_CHANGED')
+            if stopped.is_set():raise RemoteError('INTERRUPTED')
+            cached=checkpoint_for(job.get('cached'),_checkpoint(checkpoint))
+            if cached:
+                cached=dict(cached);known=(job.get('cached') or {}).get('safeExits',[])
+                cached['safeExits']=list({tuple(x) for x in cached.get('safeExits',[])+known})[:100]
+                seed=folder/'cached.json';atomic_json(seed,cached)
+            else:seed=None
+            output=folder/'result.json';command=analyse_command(source,output,checkpoint,seed,cpu_threads,ffmpeg);command[0]=str(analysis_python)
+            if re.search('[А-Яа-яЁё]',asset['artist']+' '+asset['title']):command+=['--language','ru']
+            env=dict(os.environ);env['AIDJ_STATE_DIR']=str(settings.state)
+            env.update(OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',NUMBA_NUM_THREADS='1')
+            phase='ANALYSIS_FAILED'
+            observation=runner(command,env,stopped,lost,checkpoint=checkpoint,timeout=900)
+            if stopped.is_set():raise RemoteError('INTERRUPTED')
+            phase='RESULT_INVALID';result=json_file(output)
+            reply=dispatch(db,{'op':'finish',**identity,'result':result})
+            checkpoint.unlink(missing_ok=True);return {'state':'done',**reply,'observation':observation}
+    except Exception as exc:
+        db.rollback()
+        if stopped.is_set() or isinstance(exc,RemoteError) and exc.kind in ('INTERRUPTED','LEASE_LOST'):
+            _restore_local(db,active);return {'state':'stopped'}
+        kind=exc.kind if isinstance(exc,RemoteError) else phase
+        if kind not in ('RESOURCE_LIMIT','TIMEOUT','RESULT_INVALID'):kind=phase
+        details=exc.diagnostics if isinstance(exc,RemoteError) else {}
+        try:dispatch(db,{'op':'fail',**identity,'error':kind,'diagnostics':details})
+        except BatchError:db.rollback()
+        if details:save_diagnostics(settings.state,job['md5'],details)
+        db.execute("UPDATE dj_analysis SET status=CASE WHEN payload IS NOT NULL THEN 'complete' ELSE 'failed' END WHERE md5=? AND status='working'",(job['md5'],));db.commit()
+        return {'state':'failed','error':kind,'diagnostics':details,'stats':stats(db,run)}
+    finally:
+        done.set()
+        if keeper is not None:keeper.join(timeout=1)
+        journal.unlink(missing_ok=True)
+
+
+def retry_failed(db,run,md5):
+    """Explicit owner action after fixing a diagnosed failure, never automatic."""
+    ident(run,24);ident(md5,32)
+    count=db.execute("UPDATE dj_batch_jobs SET state='pending',token=NULL,lease=0,attempts=0,error=NULL,updated=? WHERE run_id=? AND md5=? AND state='failed'",(time.time(),run,md5)).rowcount
+    db.commit();return {'retried':count,'stats':stats(db,run)}
+
+
+def refine_completed(db,run):
+    """An explicit one-time quality pass; existing Mac receipts do not loop."""
+    from .dj_worker import selection,needs_rescue
+    ident(run,24);queued=0;stamped=0
+    # Snapshot only identifiers: evidence can be up to 1 MiB per song. Read
+    # one payload at a time while updates change the selected jobs' states.
+    identifiers=[row[0] for row in db.execute("""SELECT b.md5 FROM dj_batch_jobs b
+        JOIN dj_evidence e ON e.md5=b.md5 WHERE b.run_id=? AND b.state='done'
+        AND json_extract(e.payload,'$.fullComplete')=1
+        AND COALESCE(json_extract(e.payload,'$.boundaryPass'),0)<1""",(run,))]
+    for md5 in identifiers:
+        row=db.execute("""SELECT b.md5,a.duration,e.payload FROM dj_batch_jobs b
+            JOIN web_assets a ON a.id=b.asset_id JOIN dj_evidence e ON e.md5=b.md5
+            WHERE b.run_id=? AND b.md5=?""",(run,md5)).fetchone()
+        if row is None:continue
+        evidence=json.loads(row['payload'])
+        complete(db,row['md5'],selection(evidence),row['duration'],commit=False)
+        if needs_rescue(evidence):
+            queued+=db.execute("UPDATE dj_batch_jobs SET state='pending',token=NULL,lease=0,attempts=0,error='REFINE_BOUNDARIES',updated=? WHERE run_id=? AND md5=? AND state='done'",(time.time(),run,row['md5'])).rowcount
+        else:
+            evidence['boundaryPass']=1
+            db.execute('UPDATE dj_evidence SET payload=?,updated=? WHERE md5=?',(json.dumps(evidence),time.time(),row['md5']));stamped+=1
+    db.commit();return {'queuedForRefinement':queued,'stampedFromCache':stamped,'stats':stats(db,run)}
+
+
+def serve(settings,analysis_python,ffmpeg,run=None,once=False,stopped=None,pause=None,cpu_threads=1):
+    """Continue the shared full-library campaign, one child at a time on VM."""
+    from .dj import heartbeat as runtime_heartbeat
+    stopped=stopped or threading.Event();pause=pause or stopped.wait
+    with (settings.state/'dj-worker.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);db=connect(settings)
+        recover_local(settings,db)
+        selected=ident(run,24) if run is not None else start(db)['runId']
+        refreshed=time.monotonic();failures=0
+        try:
+            while not stopped.is_set():
+                if shutil.disk_usage(settings.state).free<768*1024**2:raise BatchError('LOW_DISK')
+                if run is None and time.monotonic()-refreshed>60:
+                    start(db);refreshed=time.monotonic()
+                reply=claim(db,selected);job=reply['job']
+                if job is None:
+                    # Older Mac workers may finish while this controller is
+                    # running. Admit their evidence, then give deficient old
+                    # boundaries one resumable refinement pass after the main
+                    # sweep. boundaryPass prevents repeating that pass.
+                    refined=refine_completed(db,selected)
+                    if refined['queuedForRefinement']:
+                        print('DJ_BATCH_REFINEMENT',json.dumps(refined),flush=True)
+                        continue
+                    runtime_heartbeat(db,'idle')
+                    if once:break
+                    pause(10);continue
+                outcome=local_job(settings,db,selected,job,analysis_python,ffmpeg,stopped,cpu_threads=cpu_threads)
+                # Logs contain bounded counts, numeric observations and error
+                # enums, never transcripts, access URLs or lease tokens.
+                print('DJ_BATCH_'+outcome['state'].upper(),json.dumps({k:v for k,v in outcome.items() if k in ('stats','regular','remix','error','observation','diagnostics')}),flush=True)
+                if outcome['state']=='stopped':break
+                failures=failures+1 if outcome['state']=='failed' else 0
+                if failures>=3:raise BatchError('CONSECUTIVE_FAILURES_REVIEW')
+                if once:break
+        finally:
+            db.rollback();recover_local(settings,db);runtime_heartbeat(db,'stopped');db.close()
+
+
+def main():
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['rpc','audio','serve','retry','refine']);parser.add_argument('--run');parser.add_argument('--md5');parser.add_argument('--token');parser.add_argument('--analysis-python',type=Path);parser.add_argument('--ffmpeg');parser.add_argument('--once',action='store_true');parser.add_argument('--threads',type=int,choices=(1,2),default=1);args=parser.parse_args()
+    settings=Settings();settings.prepare()
+    if args.action=='serve':
+        stopped=threading.Event()
+        signal.signal(signal.SIGTERM,lambda signum,frame:stopped.set());signal.signal(signal.SIGINT,lambda signum,frame:stopped.set())
+        if args.analysis_python is None or not args.ffmpeg:parser.error('serve requires --analysis-python and --ffmpeg')
+        try:serve(settings,args.analysis_python,args.ffmpeg,args.run,args.once,stopped,cpu_threads=args.threads)
+        except Exception as exc:
+            print('DJ_BATCH_STOPPED',str(exc) if isinstance(exc,BatchError) else type(exc).__name__,flush=True);raise SystemExit(1)
+        return
+    db=connect(settings)
+    try:
+        if args.action=='retry':print(json.dumps(retry_failed(db,args.run,args.md5)));return
+        if args.action=='refine':print(json.dumps(refine_completed(db,args.run or start(db)['runId'])));return
         if args.action=='audio':audio(settings,db,{'runId':args.run,'md5':args.md5,'token':args.token},sys.stdout.buffer);return
         raw=sys.stdin.buffer.read(MAX_JSON+1)
         if len(raw)>MAX_JSON:raise BatchError('REQUEST_TOO_LARGE')

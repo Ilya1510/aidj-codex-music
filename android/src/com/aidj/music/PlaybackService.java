@@ -65,7 +65,7 @@ public final class PlaybackService extends Service {
     }
     @Override public int onStartCommand(Intent intent,int flags,int startId){
         if(intent!=null){
-            String next=intent.getStringExtra("queue");if(next!=null)try{setQueue(new JSONObject(next));}catch(Exception ignored){}
+            String next=intent.getBooleanExtra("reloadQueue",false)?State.get(this).read("nativeQueue","{}"):intent.getStringExtra("queue");if(next!=null)try{setQueue(new JSONObject(next));}catch(Exception ignored){}
             String action=intent.getStringExtra("action");
             if("pause".equals(action))pause();else if("next".equals(action))advance(1,false);else if("previous".equals(action)){if(position()-PlaybackRange.start(current(),duration())>3000)seek(0);else advance(-1,false);}
             else if("stop".equals(action))stopSelf();else play();
@@ -277,8 +277,24 @@ public final class PlaybackService extends Service {
         if(!error.isEmpty())state.setErrorMessage(error);session.setPlaybackState(state.build());
         ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION,notification());
     }
-    JSONObject snapshot(){
-        JSONObject state=new JSONObject();try{state.put("queue",queue);state.put("paused",!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
+    static JSONObject lightQueue(JSONObject original){
+        JSONObject result=new JSONObject();
+        try{
+            java.util.Iterator<String> keys=original.keys();while(keys.hasNext()){String key=keys.next();if(!"entries".equals(key))result.put(key,original.opt(key));}
+            JSONArray all=original.optJSONArray("entries"),visibleEntries=new JSONArray();
+            if(all!=null)for(int i=0;i<all.length();i++){
+                JSONObject source=all.optJSONObject(i);if(source==null)continue;JSONObject e=new JSONObject();keys=source.keys();
+                while(keys.hasNext()){String key=keys.next();if(!"remixAnchors".equals(key)&&!"remixAcousticAnchors".equals(key)&&!"remixPool".equals(key)&&!"remixCues".equals(key))e.put(key,source.opt(key));}
+                visibleEntries.put(e);
+            }
+            result.put("entries",visibleEntries);result.put("remixMetadataOmitted",true);
+        }catch(Exception ignored){}
+        return result;
+    }
+    JSONObject snapshot(){return snapshot(false);}
+    JSONObject snapshot(boolean light){
+        JSONObject visibleQueue=light?lightQueue(queue):queue;
+        JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
     }
     @Override public void onDestroy(){handler.removeCallbacks(librarySync);handler.removeCallbacks(rangeTick);savePosition();releasePlayer();audio.abandonAudioFocusRequest(focus);if(noisy!=null)unregisterReceiver(noisy);if(session!=null)session.release();instance=null;super.onDestroy();}
 }

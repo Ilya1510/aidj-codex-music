@@ -48,6 +48,9 @@ def client_catalog(db,version):
     hidden=('djV3','djV2','dj') if modern else ('djV4',)
     for track in value['tracks']:
         for field in hidden:track.pop(field,None)
+        if modern and int(version)<21 and isinstance(track.get('djV4'),dict):
+            track['djV4'].pop('anchors',None)
+            track['djV4'].pop('acousticAnchors',None)
     return value
 
 

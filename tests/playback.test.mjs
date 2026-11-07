@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {playbackSettings,fadeGain} from '../miniapp/playback.mjs';
 
 test('ordinary playback is the default and always keeps original gain',()=>{
-  assert.deepEqual(playbackSettings(null),{audition:false,mode:'normal',length:'normal',seconds:3});
+  assert.deepEqual(playbackSettings(null),{audition:false,mode:'normal',length:'normal',seconds:3,remixDurationSeconds:12});
   for(const position of [0,1,59,60])assert.equal(fadeGain(position,0,60,0),1);
 });
 test('smooth mode fades in and out inside the selected fragment',()=>{
@@ -16,7 +16,14 @@ test('short fragments keep a valid envelope and every seek recomputes gain',()=>
   assert.equal(fadeGain(25,10,30,3),1);assert.equal(fadeGain(29,10,30,3),1/3);
 });
 test('stored settings are validated and duration remains bounded',()=>{
-  assert.deepEqual(playbackSettings({mode:'smooth',seconds:30}),{audition:false,mode:'smooth',length:'normal',seconds:8});
-  assert.deepEqual(playbackSettings({mode:'undefined',seconds:null}),{audition:false,mode:'normal',length:'normal',seconds:3});
+  assert.deepEqual(playbackSettings({mode:'smooth',seconds:30}),{audition:false,mode:'smooth',length:'normal',seconds:8,remixDurationSeconds:12});
+  assert.deepEqual(playbackSettings({mode:'undefined',seconds:null}),{audition:false,mode:'normal',length:'normal',seconds:3,remixDurationSeconds:12});
   assert.equal(playbackSettings({mode:'smooth',seconds:.1}).seconds,1);
+});
+
+test('remix duration is bounded, finite and independent of smooth transition',()=>{
+  for(const [value,expected] of [[10,10],[30,30],[60,60],[120,120],[1,10],[999,120],[NaN,12],[Infinity,12],['30',12],[null,12]]){
+    const result=playbackSettings({mode:'remix',remixDurationSeconds:value,seconds:4});
+    assert.equal(result.remixDurationSeconds,expected);assert.equal(result.seconds,4);
+  }
 });

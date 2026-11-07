@@ -4,19 +4,21 @@ import org.json.*;
 /** Queue-local interpretation. Never rewrites an original or a manual excerpt. */
 final class DjPlan {
     static boolean manual(JSONObject t){return t!=null&&(t.optDouble("rangeStart",0)>.001||t.optDouble("rangeEnd",t.optDouble("duration"))<t.optDouble("duration")-.1);}
+    static boolean acoustic(JSONObject cue){return cue!=null&&cue.optBoolean("acoustic")&&cue.optBoolean("needsReview")&&"acoustic".equals(cue.optString("quality"));}
     static boolean guarded(JSONObject cue){return cue!=null&&cue.optBoolean("wordGuarded")&&cue.optBoolean("entryVerified");}
     static double minimumFade(JSONObject cue,boolean remix){return guarded(cue)?(remix?.15:.25):.5;}
     static JSONObject cue(JSONObject t,JSONObject entry,boolean enabled){
         if(!enabled||t==null||entry==null||entry.optBoolean("djFull")||manual(t))return null;
         JSONObject c=entry.optJSONObject("dj");if(c==null)return null;
         double start=c.optDouble("start",-1),end=c.optDouble("end",-1),bpm=c.optDouble("bpm",0),fade=c.optDouble("fade",0);
-        if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end-start<(entry.optBoolean("remix")&&c.optBoolean("entryVerified")?8:30)||end>t.optDouble("duration")+.1||!Double.isFinite(bpm)||(bpm!=0&&bpm<60)||bpm>210||!Double.isFinite(fade)||fade<minimumFade(c,entry.optBoolean("remix"))||fade>8)return null;
+        if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end-start<(entry.optBoolean("remix")&&(c.optBoolean("entryVerified")||acoustic(c))?8:30)||end>t.optDouble("duration")+.1||!Double.isFinite(bpm)||(bpm!=0&&bpm<60)||bpm>210||!Double.isFinite(fade)||fade<minimumFade(c,entry.optBoolean("remix"))||fade>8)return null;
+        if(entry.optBoolean("remix")&&end-start>123)return null;
         if(guarded(c)&&c.has("mix")){double mix=c.optDouble("mix",Double.NaN);if(!Double.isFinite(mix)||mix<Math.max(1.5,fade)||mix>8)return null;}
         return c;
     }
     static JSONObject track(JSONObject t,JSONObject entry,boolean enabled){
         JSONObject c=cue(t,entry,enabled);if(c==null)return t;
-        try{return new JSONObject(t.toString()).put("rangeStart",c.optBoolean("entryVerified")?c.optDouble("start"):0).put("rangeEnd",c.getDouble("end"));}catch(Exception e){return t;}
+        try{return new JSONObject(t.toString()).put("rangeStart",c.optBoolean("entryVerified")||acoustic(c)?c.optDouble("start"):0).put("rangeEnd",c.getDouble("end"));}catch(Exception e){return t;}
     }
     static long previewTail(JSONObject track,long duration,float rate){return Math.max(PlaybackRange.start(track,duration),PlaybackRange.end(track,duration)-(long)(10000*rate));}
     static float rate(JSONObject t,JSONObject entry,boolean enabled){
@@ -39,7 +41,7 @@ final class DjPlan {
         double bpm=left.optDouble("bpm")*rate,other=right.optDouble("bpm")*nextRate;
         if(bpm<=0||other<=0||Math.abs(bpm-other)>.1)return window;
         double a=(left.optDouble("end")-left.optDouble("grid"))*left.optDouble("bpm")/60;
-        double b=((right.optBoolean("entryVerified")?right.optDouble("start"):0)-right.optDouble("grid"))*right.optDouble("bpm")/60;
+        double b=((right.optBoolean("entryVerified")||acoustic(right)?right.optDouble("start"):0)-right.optDouble("grid"))*right.optDouble("bpm")/60;
         double phase=(a-Math.floor(a))-(b-Math.floor(b)),beat=60/bpm;
         double count=Math.floor(window/1000.0/beat-phase)+phase;
         return count>=.5&&(!guarded(left)||count*beat>=1.5)?(long)(count*beat*1000):window;

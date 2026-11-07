@@ -8,6 +8,37 @@ VERSION=3
 ACTIVE_LIMIT=10
 
 
+def validate_anchors(graph,duration):
+    if not isinstance(graph,dict) or type(graph.get('version')) is not int or graph['version']!=1:raise ValueError('Invalid anchor graph')
+    acoustic=graph.get('quality')=='acoustic' and graph.get('wordGuarded') is False and graph.get('needsReview') is True
+    if graph.get('wordGuarded') is not True and not acoustic:raise ValueError('Invalid anchor quality')
+    def number(value,lo,hi):
+        if type(value) not in (int,float) or not math.isfinite(value) or not lo<=value<=hi:raise ValueError('Invalid anchor number')
+        return value
+    bpm=number(graph.get('bpm'),0,210)
+    if bpm and bpm<60:raise ValueError('Invalid anchor tempo')
+    out={'version':1,'wordGuarded':not acoustic,'bpm':bpm}
+    if acoustic:out.update(quality='acoustic',needsReview=True)
+    for key,width in (('entries',2),('exits',3)):
+        rows=graph.get(key)
+        if not isinstance(rows,list) or len(rows)>256:raise ValueError('Invalid anchor list')
+        clean=[];previous=-1
+        for row in rows:
+            if not isinstance(row,(list,tuple)) or len(row)!=width:raise ValueError('Invalid anchor point')
+            t=number(row[0],0,duration+.1)
+            if t<=previous:raise ValueError('Unsorted anchor points')
+            if key=='exits':
+                fade=number(row[1],.5 if acoustic else .15,min(8,t));clean.append([t,fade,number(row[2],0,1)])
+            else:clean.append([t,number(row[1],0,1)])
+            previous=t
+        out[key]=clean
+    if 'grid' in graph:
+        if not bpm:raise ValueError('Invalid anchor phase')
+        out['grid']=number(graph['grid'],0,60/bpm)
+        if out['grid']>=60/bpm:raise ValueError('Invalid anchor phase')
+    return out
+
+
 def validate(value,duration):
     if not isinstance(value,dict):raise ValueError('Invalid DJ metadata')
     schema=value.get('cueSchema',3)
@@ -49,8 +80,19 @@ def validate(value,duration):
     remix=clean_cues(value.get('remix',[]),8,30)
     if any(c.get('entryVerified') is not True for c in remix):raise ValueError('Unverified remix entry')
     result={'version':VERSION,'cues':clean_cues(value.get('cues',[]),30),'remix':remix,'method':'listened' if value.get('method')=='listened' else 'analysed'}
-    if schema==4:result['cueSchema']=4
-    if value.get('reason') in ('no-safe-gap','few-recognised-words','too-short','kept-previous'):result['reason']=value['reason']
+    if schema==4:
+        result['cueSchema']=4
+        if 'anchors' in value:
+            result['anchors']=validate_anchors(value['anchors'],duration)
+            if result['anchors']['wordGuarded'] is not True:raise ValueError('Primary graph must be word guarded')
+        if 'acousticAnchors' in value:
+            result['acousticAnchors']=validate_anchors(value['acousticAnchors'],duration)
+            if result['acousticAnchors'].get('quality')!='acoustic':raise ValueError('Invalid acoustic graph')
+        for marker in ('needsReview','reviewRecommended','fullFallback'):
+            if marker in value:
+                if type(value[marker]) is not bool:raise ValueError('Invalid review marker')
+                result[marker]=value[marker]
+    if value.get('reason') in ('no-safe-gap','no-safe-duration','few-recognised-words','too-short','kept-previous'):result['reason']=value['reason']
     return result
 
 
@@ -102,6 +144,7 @@ def complete(db,md5,payload,duration,*,commit=True):
     if previous and previous[0]:
         old=validate(json.loads(previous[0]),duration)
         if old.get('cueSchema')==4:value['cueSchema']=4
+        if old.get('anchors') and not value.get('anchors',{}).get('exits'):value['anchors']=old['anchors']
         for field in ('cues','remix'):
             if not value[field] and old[field]:value['reason']='kept-previous'
             # A preferred narrow fade is visible only to APK 20+. Retain the
@@ -133,7 +176,7 @@ def metadata(db):
 def compatible_v3(value):
     """APK 19 supports whole-word entries but requires >=0.5s exit fades."""
     result={**value}
-    result.pop('cueSchema',None)
+    for field in ('cueSchema','anchors','acousticAnchors','needsReview','reviewRecommended','fullFallback'):result.pop(field,None)
     for field in ('cues','remix'):
         candidates=[{k:v for k,v in c.items() if k!='wordGuarded'} for c in value.get(field,[]) if c['fade']>=.5]
         if field=='remix':

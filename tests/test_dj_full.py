@@ -9,7 +9,7 @@ from aidj.dj_worker import full_windows,merged_coverage,observe_windows,selectio
 
 def evidence(duration=100):
     return {'version':3,'duration':duration,'words':[],'coverage':[],'beats':[],'bpm':120,
-            'energy':[.7]*int(duration),'timings':{},'analysisScope':'full','fullComplete':False}
+            'energy':[.7]*int(duration),'acousticFeatures':{'hop':.02,'regions':[]},'timings':{},'analysisScope':'full','fullComplete':False}
 
 
 @pytest.mark.parametrize('duration',[12,28,30,50,100,240,599.2,600])
@@ -176,7 +176,7 @@ def test_uncached_rhythm_exits_before_parent_imports_numpy_and_stages_precede_wo
             assert json.loads(checkpoint.read_text())['analysisStage']=='rhythm'
             assert 'parent-numpy-import' not in events and not arrays
             events.append('rhythm-child-exited')
-            atomic_json(tmp_path/'original.rhythm.json',{'beats':[],'bpm':120,'energy':[.5]*duration})
+            atomic_json(tmp_path/'original.rhythm.json',{'beats':[],'bpm':120,'energy':[.5]*duration,'acousticFeatures':{'hop':.02,'regions':[]}})
         return N(returncode=0)
     real_import=builtins.__import__
     numpy=N(float32=object(),memmap=Samples,array=lambda value,**kwargs:value)
@@ -221,6 +221,7 @@ def test_rhythm_child_uses_only_ninety_seconds_while_energy_covers_original(tmp_
     monkeypatch.setattr('aidj.dj_worker.Settings',lambda:N(prepare=lambda:None))
     monkeypatch.setattr('aidj.dj_worker.rhythm',beats)
     monkeypatch.setattr('aidj.dj_worker.energy_envelope',energy)
+    monkeypatch.setattr('aidj.dj_worker.acoustic_features',lambda sample,sr:{'hop':.02,'regions':[]})
     monkeypatch.setattr(sys,'argv',['dj_worker','rhythm','--file',str(raw),'--output',str(output),'--ffmpeg','ffmpeg'])
     main()
     assert observed==[('beats',(None,16000*90),16000),('energy',16000*600,16000)]
