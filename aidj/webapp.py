@@ -41,6 +41,16 @@ LINKS={}
 LINK_LOCK=threading.Lock()
 
 
+def client_catalog(db,version):
+    """Do not send modern pools to old APKs or duplicate them in a new APK."""
+    value=catalog(db)
+    modern=bool(re.fullmatch(r'[0-9]{1,6}',version or '')) and int(version)>=20
+    hidden=('djV3','djV2','dj') if modern else ('djV4',)
+    for track in value['tracks']:
+        for field in hidden:track.pop(field,None)
+    return value
+
+
 def public_url(settings):
     path=settings.state/'miniapp-url.json'
     try:
@@ -199,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/discover' and self.command=='GET':return self.output(200,discover_recent(db))
             match=re.fullmatch(r'/api/discover/([1-9][0-9]{0,12})',path)
             if match and self.command=='GET':return self.output(200,public_job(owned_job(db,int(match[1]))))
-            if path=='/api/catalog' and self.command=='GET':return self.output(200,catalog(db))
+            if path=='/api/catalog' and self.command=='GET':return self.output(200,client_catalog(db,self.headers.get('X-AIDJ-Version')))
             if path=='/api/session' and self.command=='GET':return self.output(200,{'ok':True})
             if path=='/api/import-register' and self.command=='POST':
                 register_transfer(db,body)
@@ -218,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/edit' and self.command=='POST':
                 with editing(settings),tempfile.TemporaryDirectory(prefix='web-edit-',dir=settings.state/'work') as work:
                     mutate(settings,db,Disk(settings),body,Path(work))
-                return self.output(200,catalog(db))
+                return self.output(200,client_catalog(db,self.headers.get('X-AIDJ-Version')))
             if self.command in ('GET','HEAD') and re.fullmatch(r'/api/audio/[a-f0-9]{24}',path):
                 asset=db.execute('SELECT * FROM web_assets WHERE id=?',(path.rsplit('/',1)[1],)).fetchone()
                 if not asset:return self.output(404,{'error':'Песня не найдена.'})

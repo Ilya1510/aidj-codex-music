@@ -53,3 +53,22 @@ def test_android_shell_allows_every_local_frontend_module_import():
         for module in re.findall(r"from ['\"]\./([^'\"]+)['\"]",file.read_text()):
             assert '/'+module in allowed,(file.name,module)
             assert (root/'miniapp'/module).is_file()
+
+
+def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_path,monkeypatch):
+    from aidj.web_auth import create_session
+    import copy
+    s=Settings(state=tmp_path/'state');db=connect(s);token=create_session(db);db.close()
+    value={'tracks':[{'id':'a'*24,'djV4':{'cues':[{'fade':.25}]},'djV3':{'cues':[{'fade':.5}]},'djV2':{},'dj':{}}],'playlists':[]}
+    monkeypatch.setattr('aidj.webapp.catalog',lambda db:copy.deepcopy(value))
+    server=Server(('127.0.0.1',0),Handler,s);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    url='http://127.0.0.1:'+str(server.server_port)+'/api/catalog'
+    try:
+        for version,modern in [(None,False),('19',False),('20',True),('21',True),('garbage',False)]:
+            headers={'Cookie':'aidj_session='+token}
+            if version:headers['X-AIDJ-Version']=version
+            response=requests.get(url,headers=headers);assert response.status_code==200
+            track=response.json()['tracks'][0]
+            assert ('djV4' in track)==modern
+            assert ('djV3' in track)!=modern
+    finally:server.shutdown();server.server_close();thread.join()
