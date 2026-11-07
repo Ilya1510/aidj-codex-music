@@ -4,8 +4,6 @@ import math
 from pathlib import Path
 import tempfile
 
-from .audio import AudioError
-from .disk import DiskError
 from .locking import worker_lock
 from .review_ui import owner
 from .store import job_update
@@ -141,11 +139,18 @@ def process(settings,db,row,bot,disk=None):
     """Render one queued owner point, serialized with other audio workers."""
     from . import dj_review as R
     payload=json.loads(row['payload']);card_id=payload.get('card_id');job_id=row['id']
+    phase='render';context_message_id=None
+    def diagnostics(exception=None):
+        value={'card_id':card_id,'phase':phase}
+        if context_message_id is not None:value['context_message_id']=context_message_id
+        if exception is not None:value['exception_type']=type(exception).__name__[:100]
+        return json.dumps(value)
     try:
         R.ensure_owner(db,row['user_id'],row['chat_id'])
         card=R.owned_card(db,card_id,row['user_id'],row['chat_id'])
         if card['state']!='preparing':
             job_update(db,job_id,status='completed',stage='Проверка уже закончена');return 0
+        job_update(db,job_id,stage='Готовлю DJ-точку',result=diagnostics())
         with worker_lock(settings),tempfile.TemporaryDirectory(prefix=f'dj-review-{job_id}-',dir=settings.state/'work') as folder:
             result=R.render_clip(settings,db,card,Path(folder),disk=disk)
             # A finish/cancel received while rendering must prevent late audio.
@@ -157,8 +162,12 @@ def process(settings,db,row,bot,disk=None):
             if not isinstance(from_point,dict):raise R.ReviewError('Не подготовлено аудио с опорной точки. Нажми /djreview, чтобы повторить.')
             context={key:value for key,value in result.items() if key!='fromPoint'}
             context['caption']=caption(card)
+            phase='send_context'
+            job_update(db,job_id,stage='Отправляю контекст точки',result=diagnostics())
             context_sent=bot.audio(row['chat_id'],context,[])
-            job_update(db,job_id,stage='Отправляю начало с точки',result=json.dumps({'card_id':card_id,'context_message_id':context_sent['message_id']}))
+            context_message_id=context_sent['message_id']
+            phase='send_from_point'
+            job_update(db,job_id,stage='Отправляю начало с точки',result=diagnostics())
             # A finish/owner change after the context recording must prevent
             # the second upload and must not expose a vote on an incomplete pair.
             R.ensure_owner(db,row['user_id'],row['chat_id'])
@@ -178,11 +187,15 @@ def process(settings,db,row,bot,disk=None):
                 job_update(db,job_id,status='completed',stage='Проверка уже закончена');return 0
         try:R.mark_failed(db,card_id,row['user_id'],row['chat_id'])
         except R.ReviewError:pass
-        text=str(exc) if isinstance(exc,(R.ReviewError,AudioError,DiskError)) else 'Не получилось подготовить DJ-точку. Нажми /djreview, чтобы повторить.'
-        job_update(db,job_id,status='failed',stage='Ошибка DJ-проверки',error=text)
+        text=('Не удалось отправить аудио проверки DJ-точки в Telegram. Нажми «Повторить».'
+              if isinstance(exc,TelegramError) and phase.startswith('send_')
+              else 'Не удалось подготовить проверку DJ-точки. Нажми «Повторить».')
+        # Persist only the class and bounded workflow identifiers. Exception
+        # messages may contain private download URLs or Telegram credentials.
+        job_update(db,job_id,status='failed',stage='Ошибка DJ-проверки',error=text,result=diagnostics(exc))
         # Re-check the destination even on an error: a forged queued job cannot
         # make the bot send any response or private clip to a guest chat.
         if owner(db,row['user_id'],row['chat_id']):
-            try:bot.message(row['chat_id'],text,[[{'text':'Проверить ещё','callback_data':'djrv:start'}]])
+            try:bot.message(row['chat_id'],text,[[{'text':'Повторить','callback_data':'djrv:start'}]])
             except TelegramError:pass
         print('DJ_REVIEW_JOB_FAILED',job_id,type(exc).__name__,flush=True);return 1

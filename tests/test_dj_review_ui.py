@@ -295,6 +295,40 @@ def test_second_audio_failure_does_not_mark_an_incomplete_pair_open_or_completed
     assert process(settings,db,job,bot)==1
     assert len(uploads)==1 and uploads[0][2]==[]
     assert db.execute('SELECT state FROM dj_boundary_cards').fetchone()[0]=='failed'
-    saved=db.execute('SELECT status,result FROM jobs').fetchone()
-    assert saved['status']=='failed' and json.loads(saved['result'])['context_message_id']==801
+    saved=db.execute('SELECT status,result,error FROM jobs').fetchone()
+    details=json.loads(saved['result'])
+    assert saved['status']=='failed' and details['context_message_id']==801
+    assert details['phase']=='send_from_point' and details['exception_type']=='TelegramError'
+    assert details['card_id']==json.loads(job['payload'])['card_id']
+    assert 'second upload failed' not in saved['result']+saved['error']
+    assert 'Telegram' in saved['error'] and 'Повторить' in saved['error'] and 'Диске' not in saved['error']
+    assert 'Повторить' in str(bot.sent[-1])
     assert not db.execute('SELECT 1 FROM dj_boundary_votes').fetchone()
+
+
+def test_first_audio_failure_has_durable_safe_phase_without_a_receipt(setup,monkeypatch):
+    from aidj.telegram import TelegramError
+    settings,db,disk,bot,manager,result,uploads,rendered=setup
+    handle_update(db,{},bot,update(text='/djreview'),settings);job=claim_job(db)
+    secret='https://private.invalid/download?token=must-not-persist'
+    def fail_upload(chat,value,keys=None):raise TelegramError(secret)
+    monkeypatch.setattr(bot,'audio',fail_upload)
+    assert process(settings,db,job,bot)==1 and not uploads
+    saved=db.execute('SELECT status,result,error FROM jobs').fetchone()
+    assert saved['status']=='failed'
+    assert json.loads(saved['result'])=={'card_id':json.loads(job['payload'])['card_id'],'phase':'send_context','exception_type':'TelegramError'}
+    assert secret not in saved['result']+saved['error']+str(bot.sent)
+    assert 'Telegram' in saved['error'] and 'Повторить' in saved['error'] and 'Диске' not in saved['error']
+    assert R.owned_card(db,json.loads(job['payload'])['card_id'],11,22)['state']=='failed'
+
+
+def test_renderer_failure_has_durable_safe_phase_and_no_upload(setup,monkeypatch):
+    settings,db,disk,bot,manager,result,uploads,rendered=setup
+    handle_update(db,{},bot,update(text='/djreview'),settings);job=claim_job(db)
+    def fail_render(*args,**kwargs):raise OSError('private filesystem details')
+    monkeypatch.setattr(R,'render_clip',fail_render)
+    assert process(settings,db,job,bot)==1 and not uploads
+    saved=db.execute('SELECT status,result,error FROM jobs').fetchone()
+    assert saved['status']=='failed'
+    assert json.loads(saved['result'])=={'card_id':json.loads(job['payload'])['card_id'],'phase':'render','exception_type':'OSError'}
+    assert 'private filesystem details' not in saved['result']+saved['error']+str(bot.sent)

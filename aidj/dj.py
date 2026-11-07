@@ -188,6 +188,51 @@ def apply_boundary_feedback(db,md5,payload):
     return filter_boundary_points(payload,rejected_points(db,md5))
 
 
+def preserve_approved_boundaries(db,md5,previous,current,duration):
+    """Retain exact owner-approved observations as acoustic alternatives only."""
+    # Preserve acoustic observations in their own graph. A word-guarded
+    # boundary has a different fade contract and must not be downgraded.
+    old_graphs=[previous.get('acousticAnchors') or {}]
+    candidates={round(row[0]*1000) for graph in old_graphs for role in ('entries','exits') for row in graph.get(role,[])}
+    if not candidates:return current
+    approved=set()
+    # Stream historical labels; retain at most the bounded previous graph's
+    # positions. A label without an observed source row cannot invent a cut.
+    for row in db.execute("""SELECT p.point_ms FROM dj_boundary_points p JOIN dj_boundary_votes v ON v.point_id=p.id
+        WHERE p.md5=? AND v.value=1
+        AND v.user_id=CAST((SELECT value FROM meta WHERE key='owner_id') AS INTEGER)
+        AND v.chat_id=CAST((SELECT value FROM meta WHERE key='owner_chat_id') AS INTEGER)""",(md5,)):
+        if row[0] in candidates:approved.add(row[0])
+    if not approved:return current
+    graph=current.get('acousticAnchors')
+    if graph is None:
+        basis=next((g for g in old_graphs if g),{})
+        graph={'version':1,'wordGuarded':False,'quality':'acoustic','needsReview':True,'bpm':basis.get('bpm',0),'entries':[],'exits':[]}
+    graph={**graph}
+    def thin(rows,count):
+        if count<=0:return []
+        if len(rows)<=count:return rows
+        if count==1:return [rows[len(rows)//2]]
+        return [rows[round(i*(len(rows)-1)/(count-1))] for i in range(count)]
+    for role in ('entries','exits'):
+        observed={}
+        for old in old_graphs:
+            for row in old.get(role,[]):
+                if round(row[0]*1000) in approved:observed.setdefault(row[0],row)
+        fresh={row[0]:row for row in graph.get(role,[])}
+        protected=observed
+        chosen=thin(sorted(protected.values(),key=lambda row:row[0]),256)
+        remaining=[row for t,row in sorted(fresh.items()) if t not in protected]
+        graph[role]=sorted(chosen+thin(remaining,256-len(chosen)),key=lambda row:row[0])
+    result={**current,'acousticAnchors':validate_anchors(graph,duration)}
+    ends=[row[0] for row in graph['exits']]
+    for start,*_ in graph['entries']:
+        at=bisect_left(ends,start+8-1e-7)
+        if at<len(ends) and ends[at]<=start+123+1e-7:
+            result['fullFallback']=False;break
+    return result
+
+
 def complete(db,md5,payload,duration,*,commit=True):
     value=validate(payload,duration)
     # Keep the source before feedback so changing a vote can restore its exact
@@ -197,6 +242,7 @@ def complete(db,md5,payload,duration,*,commit=True):
     if previous and previous[0]:
         old=validate(json.loads(previous[0]),duration)
         if old.get('cueSchema')==4:value['cueSchema']=4
+        if value.get('cueSchema')==4:value=preserve_approved_boundaries(db,md5,old,value,duration)
         if old.get('anchors') and not value.get('anchors',{}).get('exits'):value['anchors']=old['anchors']
         for field in ('cues','remix'):
             if not value[field] and old[field]:value['reason']='kept-previous'

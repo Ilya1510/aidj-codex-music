@@ -152,14 +152,24 @@ def acoustic_graph(evidence):
     duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
     regions=evidence.get('acousticFeatures',{}).get('regions')
     if regions is None:regions=coarse_regions(evidence.get('energy',[]))
-    occupied=merged_coverage([[max(0,w[0]-.2),min(duration,w[1]+.2)] for w in evidence.get('words',[]) if len(w)<3 or w[2] is True])
+    # A low-confidence word is still detected vocal activity, not permission
+    # to start inside it. Keep the original 0.2s uncertainty padding on every
+    # detected span, including uncertain/long singing alignments.
+    occupied=merged_coverage([[max(0,w[0]-.2),min(duration,w[1]+.2)] for w in evidence.get('words',[])])
     def clear(lo,hi):return not any(start<hi-1e-7 and end>lo+1e-7 for start,end in occupied)
+    def entry_clear(t):
+        # Combined with the occupied padding, this leaves >=0.4s after the
+        # preceding detected word and >=0.35s before the next detected word.
+        # Also require actual measured quiet after the point: a bare beat grid
+        # cannot certify a breath or an unobserved vocal onset.
+        quiet=any(lo+.05-1e-7<=t and t+.35<=hi+1e-7 for lo,hi,_ in regions)
+        return quiet and clear(t-.2,t+.15)
     candidates=[]
     for lo,hi,energy in regions:
-        for t in (lo+.05,(lo+hi)/2,hi-.05):
-            if 0<t<duration:candidates.append((t,min(1,energy),min(1.2,max(.5,hi-lo-.1))))
-    # A measured stable beat grid provides phrase alternatives when the RMS
-    # valleys are shallow. Extrapolated bars remain explicitly acoustic/QA data.
+        for t in (lo+.05,(lo+hi)/2,hi-.35,hi-.05):
+            if lo<=t<=hi and 0<t<duration:candidates.append((t,min(1,energy),min(1.2,max(.5,hi-lo-.1))))
+    # A measured stable beat grid may align an entry inside an existing RMS
+    # valley, never replace the valley/word checks. Bar exits remain provisional.
     if bpm and beats:
         bar=4*60/bpm;origin=beats[0]%bar;t=origin
         while t<duration:
@@ -169,8 +179,8 @@ def acoustic_graph(evidence):
     entries={0.:round(section_energy(evidence,0,min(duration,8)),4)};exits={}
     for t,energy,fade in candidates:
         time=round(t,4);fade=round(min(fade,t),4)
-        if clear(t-.001,t+.001):entries[time]=round(energy,4)
-        if fade>=.5 and clear(t-fade,t):exits[time]=[fade,round(energy,4)]
+        if entry_clear(time):entries[time]=round(energy,4)
+        if fade>=.5 and clear(time-fade,time):exits[time]=[fade,round(energy,4)]
     graph={'version':1,'quality':'acoustic','wordGuarded':False,'needsReview':True,'bpm':round(bpm,4),
            'entries':thin_points([[t,e] for t,e in sorted(entries.items())]),
            'exits':thin_points([[t,*v] for t,v in sorted(exits.items())])}

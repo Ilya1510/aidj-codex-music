@@ -73,14 +73,15 @@ def test_rescue_is_shifted_bounded_and_never_repeated_after_completed_quality_pa
     assert not needs_rescue(base())
 
 
-def test_acoustic_points_are_review_only_and_do_not_cross_confident_words():
+def test_acoustic_points_are_review_only_and_do_not_cross_any_detected_words():
     e=base();e['words']=[(12,25,True),(45,58,True),(60,80,False)]
     e['acousticFeatures']={'hop':.02,'regions':[[10,11,.1],[29,31,.1],[49,51,.1],[69,71,.1],[100,102,.1]]}
     graph=acoustic_graph(e)
     assert graph['wordGuarded'] is False and graph['quality']=='acoustic' and graph['needsReview'] is True
-    assert any(60<t<80 for t,_ in graph['entries'])  # Unknown speech is provisional, never marked verified.
+    assert not any(59.8<t<80.2 for t,_ in graph['entries'])  # Uncertain vocals also block entry.
+
     for t,_ in graph['entries'][1:]:assert not (11.8<t<25.2 or 44.8<t<58.2)
-    for t,fade,_ in graph['exits']:assert all(not(lo-.2<t and hi+.2>t-fade) for lo,hi,good in e['words'] if good)
+    for t,fade,_ in graph['exits']:assert all(not(lo-.2<t and hi+.2>t-fade) for lo,hi,_ in e['words'])
     value=validate({'cueSchema':4,'cues':[],'remix':[],'acousticAnchors':graph,'needsReview':True},180)
     assert value['needsReview'] and value['acousticAnchors']['wordGuarded'] is False
     with pytest.raises(ValueError):validate({'cueSchema':4,'anchors':graph},180)
