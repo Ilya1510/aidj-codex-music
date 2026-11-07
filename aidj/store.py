@@ -49,6 +49,11 @@ def connect(settings):
     CREATE TABLE IF NOT EXISTS device_diagnostics(device_id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS library_added(track_key TEXT PRIMARY KEY,added REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS audio_clips(track_key TEXT PRIMARY KEY,result TEXT NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_batch_runs(id TEXT PRIMARY KEY,scope TEXT NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_batch_jobs(run_id TEXT NOT NULL,md5 TEXT NOT NULL,asset_id TEXT NOT NULL,state TEXT NOT NULL,
+        lease REAL NOT NULL DEFAULT 0,token TEXT,attempts INTEGER NOT NULL DEFAULT 0,error TEXT,updated REAL NOT NULL,
+        PRIMARY KEY(run_id,md5));
+    CREATE INDEX IF NOT EXISTS dj_batch_lease ON dj_batch_jobs(md5,state,lease);
     CREATE TABLE IF NOT EXISTS dj_runtime(id INTEGER PRIMARY KEY CHECK(id=1),heartbeat REAL NOT NULL,phase TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_priority(md5 TEXT PRIMARY KEY,rank INTEGER NOT NULL,requested REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_evidence(md5 TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);

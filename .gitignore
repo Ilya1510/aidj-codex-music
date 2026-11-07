@@ -40,3 +40,5 @@ build/
 /tidy_volleyball.py
 
 .dj-venv/
+
+.dj-mac-venv/

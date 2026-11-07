@@ -6,6 +6,7 @@ scratch file at a time. Only numeric cues survive; transcripts are not stored.
 import argparse
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -55,10 +56,19 @@ def vocal_cues(words,beats,bpm,duration):
     return cues
 
 
+def merged_coverage(intervals):
+    """Union observed intervals; unobserved holes never become vocal pauses."""
+    merged=[]
+    for lo,hi in sorted((float(lo),float(hi)) for lo,hi in intervals if hi>lo):
+        if merged and lo<=merged[-1][1]+.001:merged[-1][1]=max(merged[-1][1],hi)
+        else:merged.append([lo,hi])
+    return merged
+
+
 def coverage(evidence):
     if 'coverage' in evidence:return evidence['coverage']
-    # v2 transcribed the three contiguous 45-second windows, plus occupied
-    # separators. Earlier hand-authored numeric fixtures covered the full file.
+    # v2 transcribed three contiguous 45-second windows. Older hand-authored
+    # numeric fixtures covered the full file.
     return [[45,min(180,evidence['duration'])]] if evidence.get('version')==2 else [[0,evidence['duration']]]
 
 
@@ -95,7 +105,8 @@ def selection(evidence):
     for lo,hi in evidence.get('safeExits',[]):
         if 0<=lo<hi<=duration and .5<=hi-lo<=8 and (lo,hi) not in exits:exits.append((lo,hi))
     entry_gaps=vocal_gaps(evidence,.5)
-    entries=[0]+[lo for lo,hi in entry_gaps if 12<=lo<=min(130,duration-35)]
+    entry_limit=duration-35 if evidence.get('analysisScope')=='full' else min(130,duration-35)
+    entries=[0]+[lo for lo,hi in entry_gaps if 12<=lo<=entry_limit]
     cues=[]
     for target in (80,110,140):
         choices=[]
@@ -121,7 +132,10 @@ def selection(evidence):
     remix=[]
     for _,candidate in sorted(remixes,key=lambda item:item[0]):
         # Return genuinely different excerpts, not twelve near-identical cuts.
-        if all(abs(candidate['start']-old['start'])>=6 for old in remix):remix.append(candidate)
+        distinct=all(abs(candidate['start']-old['start'])>=6 for old in remix)
+        if evidence.get('analysisScope')=='full':
+            distinct=distinct and all(max(0,min(candidate['end'],old['end'])-max(candidate['start'],old['start']))<=min(2,.25*min(candidate['end']-candidate['start'],old['end']-old['start'])) for old in remix)
+        if distinct:remix.append(candidate)
         if len(remix)>=6:break
     reason=('few-recognised-words' if len(evidence['words'])<8 else 'no-safe-gap') if not cues else None
     return {'version':3,'cues':cues,'remix':remix,'method':'analysed','reason':reason}
@@ -184,57 +198,95 @@ def probe_windows(evidence):
     return windows[:3]
 
 
-def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None):
+def full_windows(evidence):
+    """Observe the entire original in bounded windows; resume completed work.
+
+    Attempted probes include uncertain/empty ASR. Trusted coverage includes only
+    observations with enough words. Neither is an instruction to invent a cue.
+    """
+    duration=float(evidence['duration'])
+    if not math.isfinite(duration) or not 0<duration<=600.1:raise ValueError('Invalid full duration')
+    all_windows=[];lo=0.
+    while lo+28<duration:
+        all_windows.append((lo,lo+28));lo+=24
+    last=(max(0.,duration-28),duration)
+    if not all_windows or last!=all_windows[-1]:all_windows.append(last)
+    observed=merged_coverage(coverage(evidence));probes=evidence.get('probes',[])
+    return [(lo,hi) for lo,hi in all_windows
+            if not any(abs(a-lo)<.25 and abs(b-hi)<.25 for a,b in probes)
+            and not any(a<=lo+.001 and hi<=b+.001 for a,b in observed)]
+
+
+def observe_windows(evidence,windows,model,sample,language=None,checkpoint=None,full=False):
+    """Only numeric timings survive; save progress after each small observation."""
+    from .config import atomic_json
+    asr_start=time.monotonic();analysed=0
+    for lo,hi in windows:
+        segments,_=model.transcribe(sample(lo,hi),language=language,beam_size=3,temperature=0.0,word_timestamps=True,condition_on_previous_text=False,vad_filter=False)
+        words=[]
+        for part in segments:words.extend(numeric_words(part,lo))
+        # Empty ASR cannot erase previous evidence or be treated as a pause.
+        if len(words)>=8:
+            evidence['words']=[w for w in evidence['words'] if not (lo+1<=w[0] and w[1]<=hi-1)]
+            evidence['words'].extend(words)
+            evidence['coverage']=[*coverage(evidence),[lo,hi]]
+        evidence.setdefault('probes',[]).append([lo,hi]);analysed+=hi-lo
+        evidence['timings'].update(asr=round(time.monotonic()-asr_start,3),observedSeconds=analysed)
+        if checkpoint:atomic_json(checkpoint,evidence)
+        if not full:
+            chosen=selection(evidence)
+            if chosen['cues'] and len(chosen['remix'])>=2:break
+
+
+def analyse(file,ffmpeg,models,language=None,cached=None,checkpoint=None,full=False,cpu_threads=2):
+    if type(cpu_threads) is not int or not 1<=cpu_threads<=8:raise ValueError('Threads must be between 1 and 8')
     import numpy as np
     from .config import atomic_json
-    # Full structural pass is cheap and reused. ASR sees at most 3x28 seconds,
-    # with no repeated temperature fallback/beam search over the whole song.
-    raw=file.with_suffix('.f32');began=time.monotonic()
+    # Full mode is intended for an explicitly bounded batch worker, including a
+    # separate Mac. The normal VM service keeps its three targeted observations.
+    decode_limit=600 if full else 300
+    if not 0<file.stat().st_size<=40*1024**2:raise RuntimeError('SOURCE_TOO_LARGE_OR_EMPTY')
+    raw=file.with_suffix('.f32');began=time.monotonic();y=None
     evidence=dict(cached or {})
     try:
-        result=subprocess.run([ffmpeg,'-nostdin','-v','error','-threads','1','-i',str(file),'-t','300','-vn','-ac','1','-ar','16000','-f','f32le','-y',str(raw)],capture_output=True,timeout=60)
+        result=subprocess.run([ffmpeg,'-nostdin','-v','error','-threads','1','-i',str(file),'-t',str(decode_limit+.1 if full else decode_limit),'-vn','-ac','1','-ar','16000','-f','f32le','-y',str(raw)],capture_output=True,timeout=60)
         if result.returncode:raise RuntimeError('DECODE_FAILED')
-        if raw.stat().st_size>16000*300*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
-        timing=raw.with_suffix('.rhythm.json');y=np.fromfile(raw,dtype=np.float32)
-        if cached and 'beats' in evidence and 'bpm' in evidence and not evidence.get('energy'):
-            evidence['energy']=energy_envelope(y,16000)
-        if not evidence.get('energy'):
+        if not 0<raw.stat().st_size<=16000*decode_limit*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
+        timing=raw.with_suffix('.rhythm.json');y=np.memmap(raw,dtype=np.float32,mode='r')
+        duration=len(y)/16000
+        if cached and 'beats' in evidence and 'bpm' in evidence:
+            if not evidence.get('energy') or full and len(evidence['energy'])<math.ceil(duration):
+                evidence['energy']=energy_envelope(y,16000)
+        else:
+            # The expensive rhythmic pass uses at most four minutes even for a
+            # ten-minute original; its process exits before loading Whisper.
             try:subprocess.run([os.sys.executable,'-m','aidj.dj_worker','rhythm','--file',str(raw),'--output',str(timing),'--ffmpeg',ffmpeg],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
             except subprocess.CalledProcessError as exc:
                 if exc.returncode in (-9,137):raise MemoryError('RHYTHM_RESOURCE_LIMIT') from None
                 raise
-            structure=json.loads(timing.read_text());timing.unlink()
-            evidence.update(structure)
-        evidence.setdefault('duration',len(y)/16000);evidence['duration']=len(y)/16000
-        evidence['coverage']=coverage(evidence) if cached else []
-        evidence.setdefault('words',[])
-        evidence['timings']={'structure':round(time.monotonic()-began,3)}
-        def save():
-            if checkpoint:atomic_json(checkpoint,evidence)
-        save()
-        from faster_whisper import WhisperModel
-        model=WhisperModel('base',device='cpu',compute_type='int8',cpu_threads=2,num_workers=1,download_root=str(models))
-        windows=probe_windows(evidence)
-        asr_start=time.monotonic();analysed=0
-        for lo,hi in windows:
-            sample=y[int(lo*16000):int(hi*16000)]
-            segments,_=model.transcribe(sample,language=language,beam_size=3,temperature=0.0,word_timestamps=True,condition_on_previous_text=False,vad_filter=False)
-            words=[]
-            for part in segments:words.extend(numeric_words(part,lo))
-            # Keep occupied edges, replace only the freshly observed interior.
-            # Empty/failed ASR cannot erase previous evidence.
-            if len(words)>=8:
-                evidence['words']=[w for w in evidence['words'] if not (lo+1<=w[0] and w[1]<=hi-1)]
-                evidence['words'].extend(words);evidence['coverage'].append([lo,hi])
-            evidence.setdefault('probes',[]).append([lo,hi]);analysed+=hi-lo
-            # Window boundaries are not evidence of a pause. The coverage test
-            # rejects a gap straddling separate, non-overlapping observations.
-            evidence['timings'].update(asr=round(time.monotonic()-asr_start,3),observedSeconds=analysed)
-            save();chosen=selection(evidence)
-            if chosen['cues'] and len(chosen['remix'])>=2:break
-        evidence['version']=3;evidence['timings']['total']=round(time.monotonic()-began,3);save()
+            structure=json.loads(timing.read_text());timing.unlink();evidence.update(structure)
+        observed=coverage(evidence) if cached else []
+        evidence['duration']=duration;evidence['coverage']=observed
+        evidence.setdefault('words',[]);evidence['timings']={'structure':round(time.monotonic()-began,3)}
+        if full:
+            evidence['analysisScope']='full';evidence['fullComplete']=False
+        windows=full_windows(evidence) if full else probe_windows(evidence)
+        if checkpoint:atomic_json(checkpoint,evidence)
+        if windows:
+            from faster_whisper import WhisperModel
+            model=WhisperModel('base',device='cpu',compute_type='int8',cpu_threads=cpu_threads,num_workers=1,download_root=str(models))
+            # A single bounded writable NumPy sample also avoids a PyAV decoder
+            # compatibility issue and does not materialise a whole long original.
+            sample=lambda lo,hi:np.array(y[int(lo*16000):int(hi*16000)],dtype=np.float32,copy=True)
+            observe_windows(evidence,windows,model,sample,language,checkpoint,full)
+        evidence['version']=3
+        if full:
+            evidence['fullComplete']=not full_windows(evidence);evidence['fullDuration']=duration
+        evidence['timings']['total']=round(time.monotonic()-began,3)
+        if checkpoint:atomic_json(checkpoint,evidence)
         return {**selection(evidence),'evidence':evidence}
     finally:
+        if y is not None:y._mmap.close()
         raw.unlink(missing_ok=True);raw.with_suffix('.rhythm.json').unlink(missing_ok=True)
 
 
@@ -288,19 +340,23 @@ def process(settings,db,row,ffmpeg):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['serve','once','analyse','rhythm']);parser.add_argument('--file',type=Path);parser.add_argument('--output',type=Path);parser.add_argument('--ffmpeg',required=True);parser.add_argument('--language');parser.add_argument('--cached',type=Path);parser.add_argument('--checkpoint',type=Path);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['serve','once','analyse','rhythm']);parser.add_argument('--file',type=Path);parser.add_argument('--output',type=Path);parser.add_argument('--ffmpeg',required=True);parser.add_argument('--language');parser.add_argument('--cached',type=Path);parser.add_argument('--checkpoint',type=Path);parser.add_argument('--full',action='store_true');parser.add_argument('--threads',type=int,choices=range(1,9),default=2);args=parser.parse_args()
     settings=Settings();settings.prepare()
     def terminate(signum,frame):raise SystemExit(0)
     signal.signal(signal.SIGTERM,terminate)
     if args.action=='rhythm':
         import numpy as np
         from .config import atomic_json
-        if args.file.stat().st_size>16000*300*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
-        y=np.fromfile(args.file,dtype=np.float32);beats,bpm=rhythm(y,16000)
-        atomic_json(args.output,{'beats':beats,'bpm':bpm,'energy':energy_envelope(y,16000)});return
+        if not 0<args.file.stat().st_size<=16000*600*4+4096:raise RuntimeError('DECODE_TOO_LARGE')
+        y=np.memmap(args.file,dtype=np.float32,mode='r')
+        try:
+            beats,bpm=rhythm(np.array(y[:16000*240],copy=True),16000)
+            atomic_json(args.output,{'beats':beats,'bpm':bpm,'energy':energy_envelope(y,16000)})
+        finally:y._mmap.close()
+        return
     if args.action=='analyse':
         from .config import atomic_json
-        atomic_json(args.output,analyse(args.file,args.ffmpeg,settings.state/'dj-models',args.language,json.loads(args.cached.read_text()) if args.cached else None,args.checkpoint));return
+        atomic_json(args.output,analyse(args.file,args.ffmpeg,settings.state/'dj-models',args.language,json.loads(args.cached.read_text()) if args.cached else None,args.checkpoint,args.full,args.threads));return
     with (settings.state/'dj-worker.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);db=connect(settings)
         db.execute("UPDATE dj_analysis SET status='pending' WHERE status='working'");db.commit();upgrade_queue(db);idle_heartbeat=0
@@ -309,7 +365,7 @@ def main():
                 row=next_job(db)
                 if row:
                     heartbeat(db,'working')
-                    claimed=db.execute("UPDATE dj_analysis SET status='working',updated=? WHERE md5=? AND status='pending'",(time.time(),row['md5'])).rowcount;db.commit()
+                    claimed=db.execute("UPDATE dj_analysis SET status='working',updated=? WHERE md5=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM dj_batch_jobs b WHERE b.md5=dj_analysis.md5 AND b.state='running' AND b.lease>?)",(time.time(),row['md5'],time.time())).rowcount;db.commit()
                     if not claimed:continue
                     try:
                         process(settings,db,row,args.ffmpeg)

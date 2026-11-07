@@ -87,14 +87,15 @@ def _trim_queue(db,keep):
     return db.execute(f"DELETE FROM dj_analysis WHERE status='pending' AND payload IS NULL AND {outside}",keep).rowcount
 
 
-def complete(db,md5,payload,duration):
+def complete(db,md5,payload,duration,*,commit=True):
     value=validate(payload,duration)
     previous=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()
     if previous and previous[0]:
         old=validate(json.loads(previous[0]),duration)
         for field in ('cues','remix'):
             if not value[field] and old[field]:value={**value,field:old[field],'reason':'kept-previous'}
-    db.execute("UPDATE dj_analysis SET status='complete',payload=?,updated=? WHERE md5=?",(json.dumps(value),time.time(),md5));db.commit()
+    db.execute("UPDATE dj_analysis SET status='complete',payload=?,updated=? WHERE md5=?",(json.dumps(value),time.time(),md5))
+    if commit:db.commit()
 
 
 def metadata(db):
@@ -117,7 +118,7 @@ def legacy(value):
 
 def next_job(db):
     return db.execute("""SELECT j.* FROM dj_analysis j LEFT JOIN dj_priority p ON p.md5=j.md5 AND p.requested>?
-        WHERE j.status='pending' ORDER BY p.md5 IS NULL,p.rank,j.updated LIMIT 1""",(time.time()-3600,)).fetchone()
+        WHERE j.status='pending' AND NOT EXISTS (SELECT 1 FROM dj_batch_jobs b WHERE b.md5=j.md5 AND b.state='running' AND b.lease>?) ORDER BY p.md5 IS NULL,p.rank,j.updated LIMIT 1""",(time.time()-3600,time.time())).fetchone()
 
 
 def heartbeat(db,phase):
