@@ -149,3 +149,28 @@ def test_authenticated_http_catalog_and_range_stream_do_not_expose_disk_credenti
         assert client.request('GET',base+'/../../.local/share/telegram.json').status_code in (401,404)
     finally:
         client.close();server.shutdown();server.server_close();thread.join()
+
+
+def test_edit_disk_failures_are_retryable_and_operation_replays_after_partial_commit(prepared,tmp_path,monkeypatch):
+    from aidj.disk import DiskError
+    from aidj.web_auth import create_session
+    settings,db,disk,manager,result,p,track=prepared
+    cookie=create_session(db)
+    monkeypatch.setattr('aidj.webapp.Disk',lambda settings:disk)
+    real_upload=disk.upload
+    def unavailable(*args,**kwargs):raise DiskError('Диск временно недоступен.')
+    monkeypatch.setattr(disk,'upload',unavailable)
+    body={'opId':'retry-disk-edit-001','action':'remove','playlistId':p['id'],'trackId':track['id'],'revision':revision(db,p['id'])}
+    server=Server(('127.0.0.1',0),Handler,settings);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    headers={'Cookie':'aidj_session='+cookie,'X-AIDJ-App':'1'};url=f'http://127.0.0.1:{server.server_port}/api/edit'
+    try:
+        response=requests.post(url,json=body,headers=headers,timeout=5)
+        assert response.status_code==503
+        assert db.execute('SELECT state FROM web_operations WHERE id=?',(body['opId'],)).fetchone()[0]=='pending'
+        assert catalog(db)['playlists'][0]['trackIds']==[]
+        monkeypatch.setattr(disk,'upload',real_upload)
+        response=requests.post(url,json=body,headers=headers,timeout=5)
+        assert response.status_code==200 and response.json()['playlists'][0]['trackIds']==[]
+        assert db.execute('SELECT state FROM web_operations WHERE id=?',(body['opId'],)).fetchone()[0]=='complete'
+        assert requests.post(url,json=body,headers=headers,timeout=5).status_code==200
+    finally:server.shutdown();server.server_close();thread.join()

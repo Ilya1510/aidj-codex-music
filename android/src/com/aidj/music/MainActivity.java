@@ -51,7 +51,7 @@ public final class MainActivity extends Activity {
                 Uri uri=request.getUrl();String path=uri.getPath();
                 if(!"app.aidj.local".equals(uri.getHost())||!"https".equals(uri.getScheme())||!"GET".equals(request.getMethod()))return blocked();
                 if(path==null||path.equals("/"))path="/index.html";
-                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
+                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/playlist-changes.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
                 if(!allowed.contains(path))return blocked();
                 try{
                     String mime=path.endsWith(".mjs")||path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":path.endsWith(".webmanifest")?"application/manifest+json":"text/html";

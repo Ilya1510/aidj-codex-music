@@ -240,6 +240,7 @@ def main():
                 assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 page.screenshot(path=str(output/'review-people.png'))
                 page.get_by_role('button',name='Добавить в Volleyball QA',exact=True).click();page.get_by_role('button',name='Снять с разметки',exact=True).wait_for()
+                page.wait_for_function('()=>JSON.parse(localStorage.getItem("qa-meta-playlist-changes")||"[]").length===0')
                 assert songs[3]['id'] in data['playlists'][0]['trackIds'] and len(edits)==1
                 page.get_by_role('button',name='Снять с разметки',exact=True).click();page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row').count()==0

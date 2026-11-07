@@ -33,7 +33,7 @@ from .review_web import request as review_request
 PORT=18782
 STATIC=Path(__file__).resolve().parent.parent/'miniapp'
 FILES={'/':'index.html','/index.html':'index.html','/app.css':'app.css','/app.mjs':'app.mjs',
-       '/native.mjs':'native.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
+       '/native.mjs':'native.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
        '/player.mjs':'player.mjs','/storage.mjs':'storage.mjs','/sw.js':'sw.js',
        '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/telegram-web-app.js':'telegram-web-app.js'}
 STREAMS=threading.BoundedSemaphore(2)
@@ -273,7 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError,socket.timeout):self.close_connection=True
         except AuthError as exc:fail(403,str(exc))
         except Conflict as exc:fail(409,str(exc))
-        except (PlaylistError,DiskError,SourceError,DiscoverError,AudioError) as exc:fail(400,str(exc))
+        except DiskError as exc:fail(503 if urlsplit(self.path).path=='/api/edit' else 400,str(exc))
+        except (PlaylistError,SourceError,DiscoverError,AudioError) as exc:fail(400,str(exc))
         except (ValueError,TypeError,KeyError):fail(400,'Некорректный запрос.')
         except Exception as exc:
             print('WEB_REQUEST_FAILED',type(exc).__name__,flush=True)

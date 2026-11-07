@@ -1,5 +1,6 @@
 import {Queue} from './player.mjs';
 import {sortablePeople} from './reorder.mjs';
+import {PlaylistChanges} from './playlist-changes.mjs';
 import * as storage from './storage.mjs';
 import {native,command,nativeFetch,NativeAudio,NativeDownloads} from './native.mjs';
 import {LocalTransfer} from './transfer.mjs';
@@ -63,7 +64,7 @@ const withLocalRange=track=>rangeOverrides[track.id]?.pending?{...track,rangeSta
 async function syncLibrary(revision=null){
   if(libraryRefreshing||document.hidden||editing||!loggedIn)return;
   libraryRefreshing=true;
-  try{await flushRanges();await flushVotes();const next=revision||(await api('library-version')).revision;if(next!==libraryRevision){await applyData(await api('catalog'));libraryRevision=next;}}
+  try{await flushRanges();await flushVotes();playlistChanges.flush();const next=revision||(await api('library-version')).revision;if(next!==libraryRevision){const generation=playlistChanges.generation;if(await applyData(await api('catalog'),generation))libraryRevision=next;}}
   catch{}finally{libraryRefreshing=false;}
 }
 const audio=native?new NativeAudio():$('audio'), main=$('main');
@@ -77,17 +78,30 @@ async function api(path, body) {
   try { response=native?await nativeFetch(path,body):await fetch('/api/'+path,body===undefined?{cache:'no-store'}:{method:'POST',headers:{'Content-Type':'application/json','X-AIDJ-App':'1'},body:JSON.stringify(body)}); }
   catch { online=false; connection(); throw new Error('Нет соединения. Скачанные песни доступны без сети.'); }
   const result=await response.json();
-  if (!response.ok) { if (response.status===401||response.status===403) loggedIn=false; throw new Error(result.error||'Не удалось выполнить запрос.'); }
+  if (!response.ok) { if (response.status===401||response.status===403){loggedIn=false;connection();} const error=new Error(result.error||'Не удалось выполнить запрос.');error.status=response.status;throw error; }
   online=true; loggedIn=true; connection(); return result;
 }
-function connection() { $('connection').textContent=online?'':'Офлайн'; $('connection').classList.toggle('offline',!online); }
-async function applyData(value) {
+function connection() { $('connection').textContent=online?(playlistChanges.pending.length?(loggedIn?'Сохраняю…':'Подключи приложение'):''):'Офлайн'; $('connection').classList.toggle('offline',!online); }
+function displayCatalog(value) {
   const before=queue.current&&tracks.get(queue.current.trackId);
   data={...value,tracks:value.tracks.map(withLocalRange)};
-  tracks=new Map(data.tracks.map(x=>[x.id,x]));await storage.putMeta('catalog',data);render();refreshRatingBars();
+  tracks=new Map(data.tracks.map(x=>[x.id,x]));render();refreshRatingBars();connection();
+  if(activeReviewTrack&&$('sheet').open){const track=tracks.get(activeReviewTrack);if(track)paintReviewDetails(track);}
   const after=queue.current&&tracks.get(queue.current.trackId);
-  if(after&&before&&(after.rangeStart!==before.rangeStart||after.rangeEnd!==before.rangeEnd))await updatePlayerRange();
+  if(after&&before&&(after.rangeStart!==before.rangeStart||after.rangeEnd!==before.rangeEnd))updatePlayerRange().catch(showError);
 }
+const playlistChanges=new PlaylistChanges({
+  save:pending=>storage.putMeta('playlist-changes',pending),
+  cache:value=>storage.putMeta('catalog',value),
+  send:body=>api('edit',body),refresh:()=>api('catalog'),changed:displayCatalog,
+  canSend:()=>loggedIn&&navigator.onLine,
+  failed:(error,item)=>{
+    const title=tracks.get(item.trackId)?.title||'Песня';
+    toast((item.action==='remove'?'Не удалось убрать «':'Не удалось добавить «')+title+'»: '+error.message);
+  },
+});
+async function applyData(value,generation=playlistChanges.generation) {return playlistChanges.accept(value,generation);}
+async function cacheCatalog(){await playlistChanges.update(()=>storage.putMeta('catalog',playlistChanges.base));}
 async function updatePlayerRange(){
   const track=queue.current&&tracks.get(queue.current.trackId);if(!track)return;
   if(native&&nativeReady){nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}
@@ -101,17 +115,23 @@ async function flushRanges(){
 async function savePlaybackRange(track,part){
   const latest=tracks.get(track.id);if(!latest)return;
   latest.rangeStart=part.start;latest.rangeEnd=part.end;rangeOverrides[track.id]={start:part.start,end:part.end,pending:true};
-  await storage.putMeta('playback-ranges',rangeOverrides);await storage.putMeta('catalog',data);await updatePlayerRange();
+  const original=playlistChanges.base.tracks.find(t=>t.id===track.id);if(original){original.rangeStart=part.start;original.rangeEnd=part.end;}
+  await storage.putMeta('playback-ranges',rangeOverrides);await cacheCatalog();await updatePlayerRange();
   if($('range-label'))$('range-label').textContent='Фрагмент · '+formatTime(part.start)+'–'+formatTime(part.end);
   flushRanges();
 }
 async function refresh(silent=false) {
-  try { await applyData(await api('catalog')); if(!silent)toast('Библиотека обновлена'); }
+  const generation=playlistChanges.generation;
+  try { await applyData(await api('catalog'),generation);playlistChanges.flush();if(!silent)toast('Библиотека обновлена'); }
   catch(error) { if(!silent||!data.tracks.length)showError(error); }
 }
 async function edit(action,extra={}) {
+  if(action==='add'||action==='remove')return playlistChanges.enqueue(action,extra);
+  await playlistChanges.flush();
+  if(playlistChanges.pending.length)throw new Error('Изменения ещё сохраняются. Попробуй чуть позже.');
   const p=data.playlists.find(x=>x.id===extra.playlistId);
-  try { await applyData(await api('edit',{action,opId:crypto.randomUUID(),revision:p?.revision,...extra})); }
+  const generation=playlistChanges.generation;
+  try { await applyData(await api('edit',{action,opId:crypto.randomUUID(),revision:p?.revision,...extra}),generation); }
   catch(error) { if (online) await refresh(true); throw error; }
 }
 function navigate(next,playlist=null) { view=next;selectedPlaylist=playlist;query='';editing=null;shown=70;render();window.scrollTo(0,0);if(next==='discover')refreshDiscovery().catch(showError); }
@@ -272,7 +292,7 @@ function discoverPage(){
 function scheduleDiscovery(){clearTimeout(discoveryTimer);if(view==='discover'&&!discovery.busy&&discovery.job&&['queued','processing'].includes(discovery.job.status))discoveryTimer=setTimeout(()=>refreshDiscovery().catch(()=>{}),1800);}
 async function acceptDiscovery(job){
   discovery.job=job;await storage.putMeta('discovery',{query:discovery.query,id:job.id});
-  if(job.trackId&&!tracks.has(job.trackId))await applyData(await api('catalog'));
+  if(job.trackId&&!tracks.has(job.trackId))await refresh(true);
   if(view==='discover')render();
   if(job.trackId&&discovery.listenJob===job.id&&view==='discover'&&!document.hidden){discovery.listenJob=null;await startPlaylist([job.trackId]);}
 }
@@ -591,7 +611,8 @@ async function flushVotes(){
       for(const track of data.tracks)if(track.md5===md5)track.rating={...result.rating};
       reviewPeople[md5]=result;
       if(voteOverrides[md5]===draft)delete voteOverrides[md5];
-      await storage.putMeta('review-votes',voteOverrides);await storage.putMeta('review-people',reviewPeople);await storage.putMeta('catalog',data);
+      for(const track of playlistChanges.base.tracks)if(track.md5===md5)track.rating={...result.rating};
+      await storage.putMeta('review-votes',voteOverrides);await storage.putMeta('review-people',reviewPeople);await cacheCatalog();
       render();refreshRatingBars();
       if(activeReviewTrack&&tracks.get(activeReviewTrack)?.md5===md5&&$('sheet').open)paintReviewDetails(tracks.get(activeReviewTrack));
     }
@@ -613,8 +634,10 @@ function paintReviewDetails(track){
   if(detail?.similar?.some(x=>!x.exact))children.push(el('p',{class:'subtitle'},'Похожие в общем плейлисте: '+detail.similar.filter(x=>!x.exact).map(x=>x.label).join('; ')));
   if(r.proposals){
     children.push(el('p',{class:'subtitle'},'Предложили: '+r.proposals));
-    if(!detail?.inPlaylist)children.push(button('Добавить в '+(data.review?.playlistName||'Volleyball'),'plus',async()=>{
-      await edit('add',{playlistId:data.review.playlistId,trackId:track.id});await reviewDetails(tracks.get(track.id)||track);toast('Песня добавлена в общий плейлист');
+    const shared=data.playlists.find(p=>p.id===data.review?.playlistId);
+    const present=shared?.trackIds.some(id=>id===track.id||tracks.get(id)?.md5===track.md5);
+    if(!present)children.push(button('Добавить в '+(data.review?.playlistName||'Volleyball'),'plus',async()=>{
+      await edit('add',{playlistId:data.review.playlistId,trackId:track.id});toast('Песня добавлена в общий плейлист');
     },'button primary full'));
     children.push(button('Снять с разметки',null,()=>reviewAction('archive',track),'button full'));
   }else if(detail&&!detail.inPlaylist)children.push(button('Предложить на разметку','plus',()=>reviewAction('propose',track),'button full'));
@@ -674,7 +697,10 @@ function songMenu(track,context={}){
 function playlistMenu(p){
   showSheet(p.name,
     sheetAction('Скачать плейлист','download',()=>downloadPlaylist(p)),
-    sheetAction('Изменить порядок','queue',()=>{editing={ids:[...p.trackIds],revision:p.revision};query='';$('sheet').close();render();}),
+    sheetAction('Изменить порядок','queue',async()=>{
+      await playlistChanges.flush();if(playlistChanges.pending.length)throw new Error('Изменения ещё сохраняются. Попробуй чуть позже.');
+      const latest=data.playlists.find(x=>x.id===p.id);editing={ids:[...latest.trackIds],revision:latest.revision};query='';$('sheet').close();render();
+    }),
     sheetAction('Переименовать','edit',()=>nameForm('Название плейлиста',p.name,async name=>{await edit('rename',{playlistId:p.id,name});$('sheet').close();toast('Плейлист переименован');})),
     sheetAction('Открыть на Диске','external',()=>openLink(p.diskUrl)));
 }
@@ -782,7 +808,7 @@ audio.addEventListener('error',()=>{loadedEntry=null;toast(online?'Не удал
 window.addEventListener('online',()=>{online=true;connection();(async()=>{await flushVotes();await refresh(true);})().catch(showError);});window.addEventListener('offline',()=>{online=false;connection();});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)persist();else{syncLibrary();if(view==='discover')refreshDiscovery().catch(showError);}});
-setInterval(()=>{if(!document.hidden){flushRanges();flushVotes();}if(!native||native.version()<5)syncLibrary();},20000);
+setInterval(()=>{if(!document.hidden){flushRanges();flushVotes();playlistChanges.flush();}if(!native||native.version()<5)syncLibrary();},20000);
 if(!native&&'mediaSession' in navigator){
   const handlers={play:()=>loadCurrent(true),pause:()=>audio.pause(),previoustrack:previous,nexttrack:()=>next(),seekto:e=>{audio.currentTime=e.seekTime;},seekbackward:e=>{audio.currentTime=Math.max(0,audio.currentTime-(e.seekOffset||10));},seekforward:e=>{audio.currentTime=Math.min(audio.duration,audio.currentTime+(e.seekOffset||10));}};
   for(const [name,fn] of Object.entries(handlers))try{navigator.mediaSession.setActionHandler(name,event=>Promise.resolve(fn(event)).catch(showError));}catch{}
@@ -796,7 +822,7 @@ async function initialize(){
     listOptions=await storage.meta('review-list-options')||{};voteOverrides=await storage.meta('review-votes')||{};reviewPeople=await storage.meta('review-people')||{};
     rangeOverrides=await storage.meta('playback-ranges')||{};
     const lastSearch=await storage.meta('discovery');if(lastSearch){discovery.query=lastSearch.query||'';if(lastSearch.id)discovery.job={id:lastSearch.id};}
-    const cached=await storage.meta('catalog');if(cached){data={...cached,tracks:cached.tracks.map(withLocalRange)};tracks=new Map(data.tracks.map(x=>[x.id,x]));render();}
+    const cached=await storage.meta('catalog');playlistChanges.restore(cached,await storage.meta('playlist-changes'));if(cached)displayCatalog(playlistChanges.project());
     const state=await storage.meta('player');if(state){queue=new Queue(state);queue.entries=queue.entries.filter(x=>tracks.has(x.trackId));restoredTime=state.time||0;restoreEntry=queue.currentId;renderMini();}
     if(native){nativeReady=true;globalThis.__aidjNativeState(JSON.parse(native.snapshot()));}
     const params=new URLSearchParams(location.hash.slice(1));const loginCode=params.get('login');

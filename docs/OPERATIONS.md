@@ -85,6 +85,7 @@ sudo systemd-run --unit=aidj-apk-build --collect --wait --pipe --uid=aidj \
 .venv/bin/pip install -r requirements-browser.txt
 .venv/bin/playwright install --with-deps chromium --only-shell
 .venv/bin/python -m tests.browser_reviews
+.venv/bin/python -m tests.browser_playlist_changes
 ```
 
 Используется Chromium, установленный Playwright; `AIDJ_CHROMIUM` задаёт альтернативный
