@@ -396,3 +396,28 @@ def test_review_skipped_alias_is_not_offered_again(setup):
     R.ensure_user(db,101,101)
     db.execute("INSERT INTO review_cards(id,user_id,chat_id,playlist_id,item_id,state,created) VALUES ('skip',101,101,?,?,'skipped',0)",(p['id'],alias));db.commit()
     assert R.next_card(db,'after-skip',101,101)==(None,False)
+
+
+def test_unrated_suggestions_are_strictly_first_then_other_suggestions_then_library(setup,monkeypatch):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    def suggest(key,digest):
+        value={**result,'track':{**result['track'],'id':key,'title':key},'md5':digest}
+        identity=R.remember(db,value);proposal=R.proposal(db,202,202,p['id'],identity)
+        db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposal['id'],));db.commit()
+        return identity
+    fresh=suggest('fresh','f'*32);rated=suggest('rated','e'*32)
+    original=R.remember(db,result)
+    # Neutral counts as an existing assessment; the old dislike bonus cannot
+    # overtake a globally unassessed suggestion.
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],rated,202,0,1))
+    db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],original,303,-1,1));db.commit()
+    offered=[]
+    def choose(population,weights,k):offered.append(list(population));return [population[-1]]
+    monkeypatch.setattr(R.random,'choices',choose)
+    for n,expected in enumerate((fresh,rated,original)):
+        card,_=R.next_card(db,'priority:'+str(n),101,101)
+        assert offered[-1]==[expected] and card['item_id']==expected
+        db.execute("UPDATE jobs SET status='completed'")
+        db.execute("UPDATE review_cards SET state='open' WHERE id=?",(card['id'],));db.commit()
+        R.vote(db,card['id'],101,101,1)
+    assert R.next_card(db,'priority:finished',101,101)==(None,False)

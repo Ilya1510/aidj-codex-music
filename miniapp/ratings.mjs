@@ -83,6 +83,7 @@ export function selectRated(list,settings={},pending={},review={}){
 export function reviewOrder(list,pending={},random=Math.random){
   return list.map(track=>{const r=rating(track,pending[track.md5]);
     const weight=r.dislikes>0?1.25:1/(1+r.total);
-    return {track,key:-Math.log(Math.max(Number.MIN_VALUE,random()))/weight};
-  }).sort((a,b)=>a.key-b.key).map(x=>x.track);
+    const priority=r.proposals>0?(r.total===0?0:1):2;
+    return {track,priority,key:-Math.log(Math.max(Number.MIN_VALUE,random()))/weight};
+  }).sort((a,b)=>a.priority-b.priority||a.key-b.key).map(x=>x.track);
 }

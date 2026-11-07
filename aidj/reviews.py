@@ -139,11 +139,16 @@ def next_card(db,event,user_id,chat_id):
         JOIN review_items i ON i.id=c.item_id WHERE c.playlist_id=? AND c.user_id=? AND c.state='skipped'""",(pid,user_id))}
     candidates={}
     digests={r['id']:r['md5'] for r in db.execute("SELECT id,json_extract(result,'$.md5') AS md5 FROM review_items")}
+    proposed={digests[r[0]] for r in db.execute("SELECT DISTINCT item_id FROM review_proposals WHERE playlist_id=? AND status='confirmed'",(pid,)) if r[0] in digests}
     for identity in pool:
         digest=digests[identity];ratings=votes.get(digest,[])
         if digest in skipped or any(v['user_id']==user_id for v in ratings):continue
-        candidates.setdefault(digest,(identity,review_weight(len(ratings),sum(v['value']==-1 for v in ratings))))
+        tier=0 if digest in proposed and not ratings else 1 if digest in proposed else 2
+        candidates.setdefault(digest,(identity,review_weight(len(ratings),sum(v['value']==-1 for v in ratings)),tier))
     values=list(candidates.values())
+    if values:
+        priority=min(v[2] for v in values)
+        values=[v for v in values if v[2]==priority]
     item=random.choices([v[0] for v in values],weights=[v[1] for v in values],k=1)[0] if values else None
     if not item:return None,False
     card=secrets.token_hex(8)

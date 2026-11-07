@@ -122,3 +122,16 @@ test('priority order survives reopening, removes duplicate IDs and leaves source
  assert.deepEqual(listSettings(JSON.parse(JSON.stringify(value))),value);
  assert.deepEqual(listSettings({ratingMode:'priority',priorityOrder:[]}).priorityOrder,[]);
 });
+
+test('unassessed proposals strictly lead other proposals and ordinary library songs',()=>{
+ const list=[
+  {id:'library',md5:'l',rating:{dislikes:20,total:20}},
+  {id:'assessed',md5:'a',rating:{proposals:1,total:1,neutral:1}},
+  {id:'fresh',md5:'f',rating:{proposals:1,total:0}}
+ ];
+ for(const random of [()=>.00001,()=>.5,()=>.99999])assert.deepEqual(reviewOrder(list,{},random).map(t=>t.id),['fresh','assessed','library']);
+ // A pending local neutral vote moves a formerly fresh proposal into the
+ // assessed tier without losing its proposal priority over the library.
+ const second={id:'second-fresh',md5:'s',rating:{proposals:1,total:0}};
+ assert.equal(reviewOrder([...list,second],{f:{value:0}},()=>.5)[0].id,'second-fresh');
+});

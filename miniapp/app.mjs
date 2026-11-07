@@ -208,7 +208,7 @@ async function startPlaylist(ids,start=0,shuffle=false) {
 }
 function entryCaption(track,entry){
   if(entry.djFull)return 'Полный трек';
-  if(entry.remixFallback==='full-source')return 'Ремикс · полный трек · нужна проверка';
+  if(remixMode(activePreferences())&&entry.remixFallback==='full-source')return 'Ремикс · полный трек · нужна проверка';
   if(entry.dj){const part=segment(playbackTrack(track,entry,true));return (entry.remix?'Ремикс':'DJ')+' · '+formatTime(part.start)+'–'+formatTime(part.end)+(entry.dj.needsReview?' · по звуку, проверить':'');}
   return track.djStatus==='working'?'DJ · готовится':null;
 }
