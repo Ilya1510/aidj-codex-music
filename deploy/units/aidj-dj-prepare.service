@@ -1,0 +1,29 @@
+[Unit]
+Description=AI DJ sequential music cue preparation
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=@PROJECT@/.dj-venv/bin/python
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@PROJECT@
+Environment=HOME=@HOME@
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+ExecStart=@PROJECT@/.venv/bin/python -m aidj.dj_launcher
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+MemoryAccounting=true
+CPUQuota=100%
+MemoryHigh=1G
+MemoryMax=1G
+MemoryLimit=1G
+TasksMax=64
+Nice=10
+BlockIOWeight=10
+TimeoutStopSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -113,8 +113,9 @@ final class NativeDownloads {
     static JSONObject diagnostics(Context c)throws JSONException{
         State db=State.get(c);JSONObject result=new JSONObject();
         result.put("versionCode",BuildConfig.VERSION_CODE);result.put("sdk",android.os.Build.VERSION.SDK_INT);result.put("paused",paused(c));
-        for(String key:new String[]{"PauseReason","Mode","ScheduleError","StopReason","LastHttp"})result.put(Character.toLowerCase(key.charAt(0))+key.substring(1),db.read("download"+key,""));
+        for(String key:new String[]{"PauseReason","Mode","ScheduleError","StopReason","LastHttp","LastCause"})result.put(Character.toLowerCase(key.charAt(0))+key.substring(1),db.read("download"+key,""));
         for(String status:new String[]{"active","pending","retry","failed","ready"})result.put(status,db.list(status).length());
+        try{result.put("lastBytes",Long.parseLong(db.read("downloadLastBytes","0")));}catch(NumberFormatException ignored){}
         try{result.put("freeBytes",folder(c).getUsableSpace());}catch(IOException ignored){}
         return result;
     }

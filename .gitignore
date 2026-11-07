@@ -38,3 +38,5 @@ build/
 /audit_218.py
 /clean_playlist.py
 /tidy_volleyball.py
+
+.dj-venv/

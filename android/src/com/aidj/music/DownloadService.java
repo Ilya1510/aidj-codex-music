@@ -12,7 +12,7 @@ public final class DownloadService extends Service {
     private ConnectivityManager connectivity;
     private final ConnectivityManager.NetworkCallback networkCallback=new ConnectivityManager.NetworkCallback(){
         @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities){
-            updateWake(capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET));
+            boolean available=capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);updateWake(available);if(available&&token!=null)token.retryUntil=0;
         }
     };
     private DownloadRunner.Token token;private PowerManager.WakeLock wake;

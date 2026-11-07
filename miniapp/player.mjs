@@ -1,5 +1,6 @@
 export class Queue {
   constructor(snapshot = {}) {
+    this.playlistId = snapshot.playlistId ?? null;
     this.entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
     this.currentId = snapshot.currentId || null;
     this.shuffle = Boolean(snapshot.shuffle);
@@ -60,5 +61,5 @@ export class Queue {
     const [item] = this.entries.splice(at, 1); this.entries.splice(to, 0, item);
   }
   clearUpcoming() { if (this.index >= 0) this.entries.splice(this.index + 1); else this.entries = []; }
-  snapshot() { return { entries: this.entries, currentId: this.currentId, shuffle: this.shuffle, repeat: this.repeat }; }
+  snapshot() { return { playlistId:this.playlistId, entries: this.entries, currentId: this.currentId, shuffle: this.shuffle, repeat: this.repeat }; }
 }

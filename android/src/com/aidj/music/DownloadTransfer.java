@@ -39,7 +39,7 @@ final class DownloadTransfer {
         }
         long offset=part.length();
         HttpURLConnection connection=control.open(url);
-        connection.setConnectTimeout(15000);connection.setReadTimeout(30000);connection.setInstanceFollowRedirects(false);
+        connection.setConnectTimeout(15000);connection.setReadTimeout(60000);connection.setInstanceFollowRedirects(false);
         connection.setRequestProperty("Cookie",cookie);connection.setRequestProperty("Accept-Encoding","identity");
         if(offset>0){connection.setRequestProperty("Range","bytes="+offset+"-");connection.setRequestProperty("If-Range","\""+digest+"\"");}
         control.connection(connection);

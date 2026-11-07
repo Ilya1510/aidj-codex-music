@@ -33,7 +33,7 @@ from .review_web import request as review_request
 PORT=18782
 STATIC=Path(__file__).resolve().parent.parent/'miniapp'
 FILES={'/':'index.html','/index.html':'index.html','/app.css':'app.css','/app.mjs':'app.mjs',
-       '/native.mjs':'native.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
+       '/native.mjs':'native.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/dj.mjs':'dj.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
        '/player.mjs':'player.mjs','/storage.mjs':'storage.mjs','/sw.js':'sw.js',
        '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/telegram-web-app.js':'telegram-web-app.js'}
 STREAMS=threading.BoundedSemaphore(2)
@@ -188,6 +188,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200,{'ok':True},cookie='aidj_session='+token+'; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000')
             if not self.authenticated(db):return self.output(401,{'error':'Открой приложение из бота.'})
             if path=='/api/reviews' and self.command=='POST':return self.output(200,review_request(db,body))
+            if path=='/api/dj' and self.command=='POST':
+                from .dj import enqueue
+                return self.output(200,enqueue(db,body))
             if path=='/api/range' and self.command=='POST':return self.output(200,save_range(db,body))
             if path=='/api/device-inbox' and self.command=='POST':return self.output(200,inbox_pending(db,body))
             if path=='/api/device-ack' and self.command=='POST':return self.output(200,inbox_ack(db,body))

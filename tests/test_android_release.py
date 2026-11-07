@@ -39,3 +39,17 @@ def test_apk_release_download_is_immutable_and_supports_system_download_resumpti
         assert requests.get(base+'/android/releases/../identity.json').status_code in (401,404)
         assert requests.get(base+'/api/catalog').status_code==401
     finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_android_shell_allows_every_local_frontend_module_import():
+    # New JS files can pass browser QA but fail on the APK's asset allowlist.
+    from pathlib import Path
+    import re
+    root=Path(__file__).resolve().parents[1]
+    native=(root/'android/src/com/aidj/music/MainActivity.java').read_text()
+    block=native.split('Set<String> allowed=',1)[1].split('if(!allowed.contains',1)[0]
+    allowed=set(re.findall(r'"(/[^" ]+)"',block))
+    for file in (root/'miniapp').glob('*.mjs'):
+        for module in re.findall(r"from ['\"]\./([^'\"]+)['\"]",file.read_text()):
+            assert '/'+module in allowed,(file.name,module)
+            assert (root/'miniapp'/module).is_file()

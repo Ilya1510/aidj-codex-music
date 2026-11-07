@@ -1,0 +1,7 @@
+# Optional CPU-only environment for the serial DJ preparation service.
+numpy==2.2.6
+faster-whisper==1.1.1
+requests==2.34.2
+librosa==0.11.0
+scipy==1.15.3
+numba==0.61.2

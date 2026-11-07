@@ -46,11 +46,11 @@ def pending(db,body):
         # Owner-only operational state. Never retain arbitrary client text,
         # filenames, URLs, headers, cookies, or contents of the device's storage.
         clean={}
-        for key in ('versionCode','sdk','freeBytes','active','pending','retry','failed','ready'):
+        for key in ('versionCode','sdk','freeBytes','lastBytes','active','pending','retry','failed','ready'):
             value=diagnostics.get(key)
             if type(value) is int and 0<=value<=10**15:clean[key]=value
         if type(diagnostics.get('paused')) is bool:clean['paused']=diagnostics['paused']
-        allowed={'pauseReason':{'','user','system','auth','storage','cancelled'},'mode':{'','service','user-job','background-job'},
+        allowed={'lastCause':{'','http','dns','timeout','tls','connect','incomplete','interrupted','io'},'pauseReason':{'','user','system','auth','storage','cancelled'},'mode':{'','service','user-job','background-job'},
                  'scheduleError':{'','rejected','SecurityException','IllegalStateException','ForegroundServiceStartNotAllowedException'}}
         for key,values in allowed.items():
             value=diagnostics.get(key)

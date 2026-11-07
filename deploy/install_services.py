@@ -25,6 +25,7 @@ def render(project,user,home,template):
     quoted(project)  # Validate control characters; WorkingDirectory is not shell-quoted.
     text=text.replace('WorkingDirectory=@PROJECT@','WorkingDirectory='+str(project).replace('%','%%'))
     text=text.replace('Environment=HOME=@HOME@','Environment='+quoted('HOME='+str(home)))
+    text=text.replace('ConditionPathExists=@PROJECT@/', 'ConditionPathExists='+str(project).replace('%','%%')+'/')
     text=text.replace('ExecStart=@PROJECT@/.venv/bin/python','ExecStart='+quoted(Path(project)/'.venv/bin/python'))
     if '@PROJECT@' in text or '@HOME@' in text or '@USER@' in text:raise ValueError('Unresolved placeholder')
     return text

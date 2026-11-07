@@ -29,7 +29,7 @@ def main():
             browser=launch(p);context=browser.new_context(viewport={'width':360,'height':800},is_mobile=True,has_touch=True,service_workers='block');context.add_init_script(BRIDGE)
             page=context.new_page();page.route('**/api/**',json_api);page.goto('http://127.0.0.1:18782',wait_until='networkidle')
             page.locator('main .song-row').first.locator('.song-main').click();page.locator('#settings').click()
-            page.get_by_role('button',name='Воспроизведение · Обычное',exact=True).click()
+            page.locator('#sheet-content').get_by_role('button',name='Воспроизведение · Обычное',exact=True).click()
             assert page.get_by_role('button',name='Обычное',exact=True).get_attribute('aria-pressed')=='true'
             assert page.get_by_label('Длительность плавного перехода').is_disabled()
             page.get_by_role('button',name='Плавное',exact=True).click();slider=page.get_by_label('Длительность плавного перехода');slider.fill('2.5');slider.dispatch_event('input');slider.dispatch_event('change')
@@ -37,7 +37,7 @@ def main():
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             assert not any(value in page.locator('#sheet-content').inner_text().split() for value in ('undefined','true','false'))
             page.screenshot(path=str(settings.state/'browser-qa/playback-settings.png'))
-            stage='restore';page.reload(wait_until='networkidle');page.locator('#settings').click();page.get_by_role('button',name='Воспроизведение · Плавное',exact=True).click()
+            stage='restore';page.reload(wait_until='networkidle');page.locator('#settings').click();page.locator('#sheet-content').get_by_role('button',name='Воспроизведение · Плавное',exact=True).click()
             assert page.get_by_label('Длительность плавного перехода').input_value()=='2.5'
             page.get_by_role('button',name='Обычное',exact=True).click();page.get_by_role('button',name='Закрыть',exact=True).click();page.locator('main .song-row').first.locator('.song-main').click()
             page.wait_for_function('()=>window.__fadeCalls.some(x=>x.type==="play"&&x.queue.transitionMs===0)')
@@ -56,7 +56,7 @@ def main():
                 else:json_api(route)
             page.route('**/api/**',api);page.goto('http://127.0.0.1:18782',wait_until='networkidle');page.locator('.playlist-card').click();page.get_by_role('button',name='Слушать',exact=True).click()
             page.wait_for_function('()=>document.querySelector("audio").currentTime>.1&&!document.querySelector("audio").paused');assert page.evaluate('document.querySelector("audio").volume')==1
-            page.locator('#mini-play').click();page.locator('#settings').click();page.get_by_role('button',name='Воспроизведение · Обычное',exact=True).click();page.get_by_role('button',name='Плавное',exact=True).click()
+            page.locator('#mini-play').click();page.locator('#settings').click();page.locator('#sheet-content').get_by_role('button',name='Воспроизведение · Обычное',exact=True).click();page.get_by_role('button',name='Плавное',exact=True).click()
             slider=page.get_by_label('Длительность плавного перехода');slider.fill('1');slider.dispatch_event('input');slider.dispatch_event('change');page.get_by_role('button',name='Закрыть',exact=True).click()
             page.get_by_role('button',name='Слушать',exact=True).click()
             page.wait_for_function('()=>{const a=document.querySelector("audio");return !a.paused&&a.currentTime>.1&&a.currentTime<.8&&a.volume>0&&a.volume<.9;}')

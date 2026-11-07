@@ -84,6 +84,12 @@ public final class DownloadRunnerProbe {
             Api.session=200;JSONObject g=db.add('g',data('G',10000)),h=db.add('h',data('H',10000));
             Events proxy=new Events();run(c,proxy);proxy.await();
             check(!NativeDownloads.paused(c)&&db.file(g.getString("md5"))!=null&&db.file(h.getString("md5"))!=null,"one audio 403 with valid session retries without pausing other songs");
+            JSONObject vpnSong=db.add('i',data('I',10000));Events vpn=new Events();DownloadRunner.Token stale=new DownloadRunner.Token();
+            stale.network=new android.net.Network(){@Override public java.net.URLConnection openConnection(java.net.URL u)throws java.io.IOException{throw new java.net.UnknownHostException("stale VPN route");}};
+            DownloadRunner.start(c,stale,vpn);waitFor(()->"dns".equals(db.read("downloadLastCause","")),"transport cause must be classified");
+            check(stale.network==null&&DownloadRunner.phase.contains("сервер"),"stale route is discarded and the batch waits instead of spinning through titles");
+            vpn.await();check(db.file(vpnSong.getString("md5"))!=null,"download recovers through the current route after VPN changes");
+            check(NetworkStatus.snapshot().getBoolean("reachable"),"successful download clears unavailable server evidence");
             System.out.println("RUNNER_PASSED retry remaining_files pause resume cached offline auth verified_ack");System.exit(0);
         }catch(Throwable error){System.err.println(error.getClass().getSimpleName()+": "+error.getMessage());System.exit(1);}
     }

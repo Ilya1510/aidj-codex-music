@@ -49,6 +49,7 @@ def connect(settings):
     CREATE TABLE IF NOT EXISTS device_diagnostics(device_id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS library_added(track_key TEXT PRIMARY KEY,added REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS audio_clips(track_key TEXT PRIMARY KEY,result TEXT NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_analysis(md5 TEXT PRIMARY KEY,asset_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS playback_ranges(track_id TEXT PRIMARY KEY,start REAL NOT NULL,end REAL NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS review_users(user_id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL,
         playlist_id INTEGER NOT NULL,mode TEXT NOT NULL DEFAULT 'menu',created REAL NOT NULL);

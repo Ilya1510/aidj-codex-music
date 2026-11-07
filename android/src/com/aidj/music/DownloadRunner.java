@@ -16,11 +16,11 @@ final class DownloadRunner {
     private static final ExecutorService disconnects=Executors.newSingleThreadExecutor();
     static final class Token implements DownloadTransfer.Control {
         volatile boolean stopped=false,skip=false;volatile String md5="";volatile HttpURLConnection connection;volatile Network network;
-        long lastProgress=0;Listener listener;
+        long lastProgress=0;volatile long retryUntil=0;int networkFailures=0;String retryPhase="";Listener listener;
         public HttpURLConnection open(URL url)throws IOException{return (HttpURLConnection)(network!=null?network.openConnection(url):url.openConnection());}
         public boolean cancelled(){return stopped||skip;}
         public void connection(HttpURLConnection c){connection=c;}
-        public void progress(long bytes){long now=android.os.SystemClock.elapsedRealtime();if(now-lastProgress>1000){lastProgress=now;listener.progress();}}
+        public void progress(long bytes){phase=bytes>0?"Скачиваю":"Жду ответа сервера";long now=android.os.SystemClock.elapsedRealtime();if(now-lastProgress>1000){lastProgress=now;listener.progress();}}
         void cancel(){stopped=true;disconnect();}
         void skip(){skip=true;disconnect();}
         private void disconnect(){HttpURLConnection c=connection;if(c!=null)disconnects.execute(c::disconnect);}
@@ -49,11 +49,12 @@ final class DownloadRunner {
         NativeDownloads.migrate(c);long lastAck=0;
         while(!token.stopped&&!NativeDownloads.paused(c)){
             if(!NativeDownloads.hasWork(c))break;
+            if(System.currentTimeMillis()<token.retryUntil){phase=token.retryPhase;listener.progress();Thread.sleep(1000);continue;}
             if(!network(c)){phase="Жду подключения к сети";listener.progress();Thread.sleep(1000);continue;}
             JSONObject chosen=db.next(System.currentTimeMillis());
             if(chosen==null){phase="Повторю загрузку автоматически";listener.progress();Thread.sleep(1000);continue;}
             JSONObject track=chosen.getJSONObject("track");String md5=track.getString("md5");
-            token.md5=md5;token.skip=false;File part=NativeDownloads.part(c,md5);
+            token.md5=md5;token.skip=false;long request=NetworkStatus.begin();File part=NativeDownloads.part(c,md5);
             try{
                 if(db.file(md5)!=null){db.update(md5,"ready",db.file(md5).getAbsolutePath(),0,"");continue;}
                 String extension="m4a".equals(track.optString("format"))?".m4a":".mp3";File destination=new File(NativeDownloads.folder(c),md5+extension);
@@ -61,21 +62,21 @@ final class DownloadRunner {
                 if(part.getParentFile().getUsableSpace()<Math.max(0,track.getLong("bytes")-part.length())+8L*1024*1024){
                     NativeDownloads.markPaused(c,"storage","Не хватает места на устройстве. Освободи место и нажми «Продолжить».");break;
                 }
-                db.update(md5,"active",destination.getAbsolutePath(),0,"");phase="Скачиваю";listener.progress();
+                db.update(md5,"active",destination.getAbsolutePath(),0,"");phase="Подключаюсь к серверу";listener.progress();
                 URL url=new URL(Api.validate(Api.base(c))+"/api/audio/"+track.getString("id"));
-                DownloadTransfer.fetch(url,Api.cookie(c),part,track.getLong("bytes"),md5,token);
+                DownloadTransfer.fetch(url,Api.cookie(c),part,track.getLong("bytes"),md5,token);NetworkStatus.finish(request,true);token.networkFailures=0;
                 synchronized(NativeDownloads.class){
                     if(db.file(md5)!=null){part.delete();continue;}
                     if(token.cancelled()||NativeDownloads.paused(c)||db.download(md5)==null)continue;
                     if(destination.exists()&&!destination.delete())throw new IOException("Cannot replace file");
                     if(!part.renameTo(destination))throw new IOException("Cannot commit file");
-                    db.imported(track,destination);
+                    db.imported(track,destination);db.write("downloadLastCause","");db.write("downloadLastHttp","200");
                 }
                 long ackNow=android.os.SystemClock.elapsedRealtime();if(ackNow-lastAck>10000){NativeInbox.request(c);lastAck=ackNow;}listener.progress();
             }catch(Exception error){
                 if(token.stopped||token.skip||NativeDownloads.paused(c)||db.download(md5)==null)continue;
                 int code=error instanceof DownloadTransfer.Failure?((DownloadTransfer.Failure)error).code:0;
-                db.write("downloadLastHttp",String.valueOf(code));
+                NetworkStatus.finish(request,code>0);db.write("downloadLastHttp",String.valueOf(code));String cause=DownloadPolicy.cause(error);db.write("downloadLastCause",cause);db.write("downloadLastBytes",String.valueOf(part.length()));
                 int attempts=chosen.optInt("attempts")+1;
                 if(code==401||code==403){
                     // A proxy/CDN can reject an audio URL even with a valid
@@ -85,6 +86,12 @@ final class DownloadRunner {
                 }
                 if(DownloadPolicy.permanent(code,attempts))db.update(md5,"failed",chosen.optString("path"),0,DownloadPolicy.error(code));
                 else db.retry(md5,attempts,System.currentTimeMillis()+DownloadPolicy.retryDelay(attempts),"");
+                if(code==0||code==429||code>=500){
+                    token.retryPhase=code>=429?"Сервер временно недоступен — повторю автоматически":DownloadPolicy.waiting(cause);token.networkFailures++;token.retryUntil=System.currentTimeMillis()+Math.min(30000,DownloadPolicy.retryDelay(token.networkFailures));phase=token.retryPhase;
+                    // A JobScheduler Network can become stale when a VPN is switched.
+                    // Retry on Android's current default route instead of pinning that old network.
+                    token.network=null;listener.progress();
+                }
             }finally{if(db.download(md5)==null||db.file(md5)!=null)part.delete();token.md5="";}
         }
         phase=NativeDownloads.paused(c)?"Загрузка приостановлена":"";NativeInbox.request(c);listener.progress();

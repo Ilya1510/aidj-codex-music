@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aidj-codex-music"
-version = "0.11.2"
+version = "0.12.0"
 description = "Telegram music bot, Yandex Disk library and Android player with shared ratings"
 requires-python = ">=3.11"
 dynamic = ["dependencies"]

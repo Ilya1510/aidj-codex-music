@@ -51,7 +51,7 @@ public final class MainActivity extends Activity {
                 Uri uri=request.getUrl();String path=uri.getPath();
                 if(!"app.aidj.local".equals(uri.getHost())||!"https".equals(uri.getScheme())||!"GET".equals(request.getMethod()))return blocked();
                 if(path==null||path.equals("/"))path="/index.html";
-                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/playlist-changes.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
+                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/playlist-changes.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/dj.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
                 if(!allowed.contains(path))return blocked();
                 try{
                     String mime=path.endsWith(".mjs")||path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":path.endsWith(".webmanifest")?"application/manifest+json":"text/html";
@@ -94,7 +94,7 @@ public final class MainActivity extends Activity {
         JSONObject value=new JSONObject();try{
             if(!lastPlayer.isEmpty())value.put("player",new JSONObject(lastPlayer));else{JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",q);p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);value.put("player",p);}
             value.put("downloads",NativeDownloads.snapshot(this));value.put("files",State.get(this).files());value.put("versionCode",BuildConfig.VERSION_CODE);value.put("server",Api.base(this));
-            value.put("libraryRevision",State.get(this).read("libraryRevision",""));
+            value.put("libraryRevision",State.get(this).read("libraryRevision",""));value.put("network",NetworkStatus.snapshot().put("connected",DownloadRunner.network(this)));
             if(ImportService.instance!=null)value.put("transfer",ImportService.instance.snapshot());
         }catch(Exception ignored){}return value;
     }
@@ -141,8 +141,8 @@ public final class MainActivity extends Activity {
                                 else if(service!=null)service.setQueue(queue);
                             }catch(Exception e){Toast.makeText(MainActivity.this,"Открой приложение и нажми воспроизведение ещё раз.",Toast.LENGTH_LONG).show();}
                         });result.put("ok",true);
-                    }else if("pause".equals(type)||"seek".equals(type)){
-                        main.post(()->{PlaybackService s=PlaybackService.instance;if(s!=null){if("pause".equals(type))s.pause();else s.seek((long)(data.optDouble("time")*1000));}});result.put("ok",true);
+                    }else if("pause".equals(type)||"seek".equals(type)||"next".equals(type)||"previous".equals(type)){
+                        main.post(()->{PlaybackService s=PlaybackService.instance;if(s!=null){if("pause".equals(type))s.pause();else if("next".equals(type))s.skip(1);else if("previous".equals(type))s.skip(-1);else s.seek((long)(data.optDouble("time")*1000));}else if("next".equals(type)||"previous".equals(type)){startForegroundService(new Intent(MainActivity.this,PlaybackService.class).putExtra("action",type));}});result.put("ok",true);
                     }else throw new Exception();
                 }catch(Exception e){try{result.put("error","Не удалось выполнить действие. Проверь сеть или подключение к боту.");}catch(Exception ignored){}}
                 reply(id,result);main.post(MainActivity.this::publish);
