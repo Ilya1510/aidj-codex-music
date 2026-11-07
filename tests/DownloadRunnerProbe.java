@@ -35,11 +35,12 @@ final class NativeDownloads {
     static File folder(Context c){return root;}
     static File part(Context c,String md5){return new File(root,md5+".part");}
     static boolean paused(Context c){return "true".equals(State.instance.read("downloadPaused","false"));}
+    static void markPaused(Context c,String reason,String message){State.instance.write("downloadPauseReason",reason);State.instance.write("downloadError",message);State.instance.write("downloadPaused","true");}
     static boolean hasWork(Context c){return State.instance.list("active").length()+State.instance.list("pending").length()+State.instance.list("retry").length()>0;}
     static void migrate(Context c){}
 }
 final class NativeInbox {static int acknowledgements=0;static void request(Context c){acknowledgements++;}}
-final class Api {static String server;static String base(Context c){return server;}static String validate(String value){return value;}static String cookie(Context c){return "aidj_session=test-only";}}
+final class Api {static String server;static int session=401;static String base(Context c){return server;}static String validate(String value){return value;}static String cookie(Context c){return "aidj_session=test-only";}static JSONObject request(Context c,String path,JSONObject body){return new JSONObject().put("status",session);}}
 
 public final class DownloadRunnerProbe {
     static class Events implements DownloadRunner.Listener {
@@ -79,6 +80,10 @@ public final class DownloadRunnerProbe {
             ConnectivityManager.online=true;offline.await();check(db.file(e.getString("md5"))!=null,"network restoration resumes without user interaction");
             db.add('f',data('F',1000));Events auth=new Events();run(c,auth);auth.await();
             check(NativeDownloads.paused(c)&&db.read("downloadError","").contains("подключение"),"expired auth has an actionable status instead of retry spam");
+            db.write("downloadPaused","false");db.rows.remove(db.rows.values().stream().filter(r->r.getJSONObject("track").getString("id").startsWith("f")).findFirst().get().getJSONObject("track").getString("md5"));
+            Api.session=200;JSONObject g=db.add('g',data('G',10000)),h=db.add('h',data('H',10000));
+            Events proxy=new Events();run(c,proxy);proxy.await();
+            check(!NativeDownloads.paused(c)&&db.file(g.getString("md5"))!=null&&db.file(h.getString("md5"))!=null,"one audio 403 with valid session retries without pausing other songs");
             System.out.println("RUNNER_PASSED retry remaining_files pause resume cached offline auth verified_ack");System.exit(0);
         }catch(Throwable error){System.err.println(error.getClass().getSimpleName()+": "+error.getMessage());System.exit(1);}
     }

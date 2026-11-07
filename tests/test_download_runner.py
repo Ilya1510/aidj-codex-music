@@ -46,7 +46,9 @@ def test_native_queue_survives_retry_pause_job_restart_and_network_restoration(t
             counts[kind]=counts.get(kind,0)+1
             if kind in ('c','f'):
                 self.send_response(404 if kind=='c' else 401);self.send_header('Content-Length','0');self.end_headers();return
-            length={'a':300000,'b':200000,'d':1000000,'e':50000}[kind];body=kind.upper().encode()*length
+            if kind=='g' and counts[kind]==1:
+                self.send_response(403);self.send_header('Content-Length','0');self.end_headers();return
+            length={'a':300000,'b':200000,'d':1000000,'e':50000,'g':10000,'h':10000}[kind];body=kind.upper().encode()*length
             self.send_response(206 if offset else 200);self.send_header('Content-Length',str(length-offset));self.send_header('ETag','"'+hashlib.md5(body).hexdigest()+'"')
             if offset:self.send_header('Content-Range',f'bytes {offset}-{length-1}/{length}')
             self.end_headers()
@@ -66,4 +68,5 @@ def test_native_queue_survives_retry_pause_job_restart_and_network_restoration(t
         assert counts['a']==2 and ('a',100000) in calls
         assert counts['b']==1 and counts['d']==2 and any(k=='d' and o>0 for k,o in calls)
         assert counts['c']==1 and counts['f']==1 and counts['e']==1
+        assert counts['g']==2 and counts['h']==1
     finally:server.shutdown();server.server_close();thread.join()

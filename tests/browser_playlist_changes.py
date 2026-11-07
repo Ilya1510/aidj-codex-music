@@ -1,4 +1,4 @@
-"""Real UI clicks with deliberately held Disk responses; synthetic API only."""
+"""Real playlist clicks and download states; synthetic API and native bridge."""
 import json
 import os
 from pathlib import Path
@@ -33,6 +33,7 @@ def main():
     script=r'''(()=>{
       const meta=k=>'qa-playlist-'+k,state={player:{queue:{entries:[],currentId:null,tracks:{},uiRevision:0},paused:true,time:0,duration:180},files:[SONG],downloads:{pending:[],active:null,paused:false}};
       window.__calls=[];
+      window.__downloadState=state;
       window.AndroidMusic={version:()=>14,readMeta:k=>localStorage.getItem(meta(k))||'null',writeMeta:(k,v)=>localStorage.setItem(meta(k),v),files:()=>JSON.stringify(state.files),snapshot:()=>JSON.stringify(state),
         request(id,raw){const v=JSON.parse(raw);window.__calls.push(v);(async()=>{
           let result={ok:true};if(v.type==='api'){const r=await fetch(v.path,v.body?{method:'POST',headers:{'Content-Type':'application/json','X-AIDJ-App':'1'},body:JSON.stringify(v.body)}:{});result={status:r.status,body:await r.json()};}
@@ -49,6 +50,20 @@ def main():
                 context=browser.new_context(viewport={'width':360,'height':800},is_mobile=True,has_touch=True,service_workers='block')
                 context.add_init_script(script);page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
                 page.route('**/api/**',route_api);url=f'http://127.0.0.1:{server.server_port}/';page.goto(url,wait_until='networkidle')
+                # Failed files, manual/OS pause, and network waiting are distinct.
+                page.evaluate('''track=>{const s=window.__downloadState;s.downloads={active:null,pending:[track],completed:1,total:2,paused:false,needsRetry:true,failedCount:1,error:'Песня C: файл недоступен',phase:''};window.__aidjNativeState(structuredClone(s));}''',songs[2])
+                assert 'Не скачано: 1' in page.locator('#downloads-progress').inner_text()
+                assert 'Загрузка приостановлена' not in page.locator('#downloads-progress').inner_text()
+                page.get_by_role('button',name='Повторить',exact=True).wait_for()
+                for reason in ['Android остановил загрузку. Нажми «Продолжить».','Не хватает места на устройстве.','Обнови подключение приложения через бота.']:
+                    page.evaluate('''error=>{const s=window.__downloadState;Object.assign(s.downloads,{paused:true,needsRetry:false,error,phase:'Загрузка приостановлена'});window.__aidjNativeState(structuredClone(s));}''',reason)
+                    assert page.locator('#downloads-progress').inner_text().count('Загрузка приостановлена')==1
+                    assert reason in page.locator('#downloads-progress').inner_text()
+                page.evaluate('''()=>{const s=window.__downloadState;Object.assign(s.downloads,{paused:false,error:null,phase:'Жду подключения к сети'});window.__aidjNativeState(structuredClone(s));}''')
+                assert 'Жду подключения к сети' in page.locator('#downloads-progress').inner_text()
+                assert 'Загрузка приостановлена' not in page.locator('#downloads-progress').inner_text()
+                page.evaluate('''()=>{const s=window.__downloadState;s.downloads={active:null,pending:[],paused:false,completed:1,total:1,error:null};window.__aidjNativeState(structuredClone(s));}''')
+                page.locator('#downloads-progress').wait_for(state='hidden')
                 def open_playlist():page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
                 def remove(title):
                     page.locator('main .song-row').filter(has_text=title).get_by_role('button',name='Действия с песней',exact=True).click()
@@ -97,7 +112,7 @@ def main():
                 assert not page.evaluate('window.__calls.some(c=>c.type==="download")')
                 assert not errors,errors
                 browser.close()
-            print('PLAYLIST_UI_PASSED immediate_remove immediate_add serial_requests no_resurrection restart_lost_response same_opId rejection_rollback cached_audio_preserved',flush=True)
+            print('PLAYLIST_UI_PASSED download_pause_causes failed_file_status network_wait immediate_remove immediate_add serial_requests no_resurrection restart_lost_response same_opId rejection_rollback cached_audio_preserved',flush=True)
         finally:server.shutdown();server.server_close();thread.join()
 
 

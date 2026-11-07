@@ -30,3 +30,14 @@ test('background batch progress and automatic network waiting never restart down
  downloads.accept({active:track,pending:[],completed:4,total:10,paused:false,error:null,phase:'Скачиваю',percent:46,bytesTotal:1000});
  assert.equal(downloads.percent,46);assert.equal(calls.length,before);
 });
+
+test('Resume sends an explicit desired state even when snapshots change during the request',async()=>{
+ globalThis.AndroidMusic.version=()=>16;
+ const downloads=new NativeDownloads(()=>{});downloads.accept({paused:true,error:null});
+ const first=downloads.setPaused(false);
+ downloads.accept({paused:false,error:null});
+ const second=downloads.setPaused(false);await Promise.all([first,second]);
+ assert.deepEqual(calls.slice(-2),[{type:'downloadPause',paused:false},{type:'downloadPause',paused:false}]);
+ assert.equal(downloads.controlling,false);
+ await downloads.setPaused(true);assert.deepEqual(calls.at(-1),{type:'downloadPause',paused:true});
+});

@@ -743,9 +743,13 @@ function renderDownloads(){
   const panel=$('downloads-progress');panel.hidden=!downloads.active&&!downloads.pending.length;document.body.classList.toggle('has-downloads',!panel.hidden);
   if(panel.hidden)return;
   const error=downloads.error?.name==='QuotaExceededError'?'Не хватает места на устройстве':downloads.error?.message;
-  panel.replaceChildren(...visibleChildren([el('div',{},el('strong',{},downloads.paused?'Загрузка приостановлена':`Скачивание · ${downloads.completed} / ${downloads.total}`),el('span',{},error||(downloads.phase&&downloads.phase!=='Скачиваю'?downloads.phase:downloads.active?.title)||'Готово к продолжению')),
+  const resuming=downloads.paused||downloads.needsRetry;
+  const phase=downloads.phase&&!['Скачиваю','Загрузка приостановлена'].includes(downloads.phase)?downloads.phase:'';
+  const title=downloads.needsRetry?`Не скачано: ${downloads.failedCount}`:downloads.paused?'Загрузка приостановлена':`Скачивание · ${downloads.completed} / ${downloads.total}`;
+  const detail=error||(downloads.paused?'Нажми «Продолжить», чтобы возобновить загрузку.':phase||downloads.active?.title)||'Готово к продолжению';
+  panel.replaceChildren(...visibleChildren([el('div',{},el('strong',{},title),el('span',{},detail)),
     downloads.bytesTotal>0?el('progress',{class:'batch-download-progress',max:100,value:downloads.percent||0,'aria-label':'Скачивание плейлиста'}):null,
-    button(downloads.paused?'Продолжить':'Пауза',null,()=>downloads.toggle(),'text-button'),button('Отменить загрузку','close',()=>downloads.cancel(),'icon-button small')]));
+    button(downloads.needsRetry?'Повторить':resuming?'Продолжить':'Пауза',null,()=>native?downloads.setPaused(!resuming):downloads.toggle(),'text-button',{disabled:downloads.controlling}),button('Отменить загрузку','close',()=>downloads.cancel(),'icon-button small')]));
 }
 function openLink(url){if(native)native.open(url);else if(tg?.initData)tg.openLink(url);else window.open(url,'_blank','noopener,noreferrer');}
 function applyBrowserVolume(){

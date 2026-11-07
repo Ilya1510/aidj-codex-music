@@ -9,15 +9,19 @@ import org.json.*;
 /** One silent notification and one OS-owned task for the whole queue. */
 final class DownloadBatch {
     static volatile boolean finishing=false;
+    static volatile boolean serviceStarting=false;
     static final int JOB=4301,NOTIFICATION=102;
     private static boolean channelReady=false;
     private static final String CHANNEL="aidj-downloads-silent-v1";
     static synchronized void request(Context c,boolean user){
         if(NativeDownloads.paused(c)||!NativeDownloads.hasWork(c))return;
         JobScheduler scheduler=(JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE);
-        if(Build.VERSION.SDK_INT<34&&user){
+        // Start an explicit download in a foreground service on every supported
+        // Android version. A persisted JobScheduler task remains the fallback.
+        if(user){
             if(DownloadService.running)return;
-            try{scheduler.cancel(JOB);c.startForegroundService(new Intent(c,DownloadService.class));return;}catch(RuntimeException ignored){}
+            try{serviceStarting=true;scheduler.cancel(JOB);c.startForegroundService(new Intent(c,DownloadService.class));State.get(c).write("downloadMode","service");return;}
+            catch(RuntimeException error){serviceStarting=false;State.get(c).write("downloadScheduleError",error.getClass().getSimpleName());}
         }
         if(DownloadService.running)return;
         JobInfo old=scheduler.getPendingJob(JOB);
@@ -34,8 +38,10 @@ final class DownloadBatch {
                 long bytes=0;for(String state:new String[]{"active","pending","retry"}){JSONArray rows=State.get(c).list(state);for(int i=0;i<rows.length();i++)bytes+=rows.optJSONObject(i).optJSONObject("track").optLong("bytes");}
                 builder.setUserInitiated(true).setEstimatedNetworkBytes(bytes,0);
             }
-            boolean accepted=scheduler.schedule(builder.build())==JobScheduler.RESULT_SUCCESS;if(accepted)finishing=false;return accepted;
-        }catch(RuntimeException ignored){return false;}
+            boolean accepted=scheduler.schedule(builder.build())==JobScheduler.RESULT_SUCCESS;
+            if(accepted){finishing=false;State.get(c).write("downloadMode",user?"user-job":"background-job");}
+            else State.get(c).write("downloadScheduleError","rejected");return accepted;
+        }catch(RuntimeException error){State.get(c).write("downloadScheduleError",error.getClass().getSimpleName());return false;}
     }
     static void stop(Context c){DownloadRunner.stop();((JobScheduler)c.getSystemService(Context.JOB_SCHEDULER_SERVICE)).cancel(JOB);c.stopService(new Intent(c,DownloadService.class));((NotificationManager)c.getSystemService(Context.NOTIFICATION_SERVICE)).cancel(NOTIFICATION);}
     static Notification notification(Context c,JSONObject state,boolean done){
@@ -46,7 +52,7 @@ final class DownloadBatch {
         }}
         PendingIntent open=PendingIntent.getActivity(c,102,new Intent(c,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         Notification.Builder builder=new Notification.Builder(c,CHANNEL).setSmallIcon(R.drawable.ic_music).setContentIntent(open)
-            .setContentTitle(done?"Скачивание завершено":"Скачивание музыки").setOnlyAlertOnce(true).setDefaults(0).setSound(null).setVibrate(new long[]{0})
+            .setContentTitle(done?(state!=null&&state.optInt("failedCount")>0?"Не все песни скачаны":"Скачивание завершено"):"Скачивание музыки").setOnlyAlertOnce(true).setDefaults(0).setSound(null).setVibrate(new long[]{0})
             .setShowWhen(false).setCategory(Notification.CATEGORY_PROGRESS).setVisibility(Notification.VISIBILITY_PRIVATE).setOngoing(!done).setAutoCancel(done);
         if(state!=null){
             int completed=state.optInt("completed"),total=state.optInt("total");String text=completed+" / "+total;
@@ -56,7 +62,8 @@ final class DownloadBatch {
             if(!done)builder.setProgress(100,state.optInt("percent"),state.optLong("bytesTotal")==0);
         }else builder.setContentText("Подготавливаю очередь").setProgress(0,0,true);
         if(!done){
-            builder.addAction(new Notification.Action.Builder(android.R.drawable.ic_media_pause,"Пауза",action(c,"pause",103)).build());
+            boolean paused=state!=null&&state.optBoolean("paused");
+            builder.addAction(new Notification.Action.Builder(android.R.drawable.ic_media_pause,paused?"Продолжить":"Пауза",action(c,paused?"resume":"pause",103)).build());
             builder.addAction(new Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel,"Отменить",action(c,"cancel",104)).build());
         }
         return builder.build();

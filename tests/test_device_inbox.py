@@ -82,6 +82,20 @@ def test_invalid_devices_and_unbounded_receipts_are_rejected(env):
     with pytest.raises(ValueError):acknowledge(db,{'deviceId':DEVICE,'items':[{}]*101})
 
 
+def test_download_diagnostics_are_bounded_and_only_allow_operational_fields(env):
+    settings,db,*_=env
+    report={'versionCode':16,'sdk':35,'paused':True,'pauseReason':'storage','freeBytes':1024,
+            'lastHttp':'403','stopReason':'7','mode':'service','pending':5,'ready':500,
+            'cookie':'PRIVATE','url':'https://private.invalid/secret','error':'UNTRUSTED','active':True,'failed':-1}
+    pending(db,{'deviceId':DEVICE,'diagnostics':report})
+    clean=json.loads(db.execute('SELECT payload FROM device_diagnostics').fetchone()[0])
+    assert clean=={'versionCode':16,'sdk':35,'freeBytes':1024,'pending':5,'ready':500,'paused':True,
+                   'pauseReason':'storage','mode':'service','lastHttp':403,'stopReason':7}
+    for n in range(15):pending(db,{'deviceId':f'phone-diag-{n:08d}','diagnostics':{'mode':'PRIVATE','freeBytes':10**20}})
+    assert db.execute('SELECT COUNT(*) FROM device_diagnostics').fetchone()[0]==10
+    assert all('PRIVATE' not in r[0] for r in db.execute('SELECT payload FROM device_diagnostics'))
+
+
 def test_inbox_http_is_authenticated_and_exposes_only_public_track_metadata(env):
     settings,db,disk,bot,manager,result=env;publish(db,result)
     server=Server(('127.0.0.1',0),Handler,settings);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()

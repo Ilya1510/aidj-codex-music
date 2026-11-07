@@ -26,7 +26,15 @@ public final class DownloadBatchJob extends JobService {
     }
     @Override public boolean onStopJob(JobParameters params){
         if(token!=null)token.cancel();
-        if(Build.VERSION.SDK_INT>=31&&params.getStopReason()==JobParameters.STOP_REASON_USER){State.get(this).write("downloadPaused","true");return false;}
+        if(DownloadBatch.serviceStarting||DownloadService.running)return false;
+        int reason=Build.VERSION.SDK_INT>=31?params.getStopReason():0;
+        State.get(this).write("downloadStopReason",String.valueOf(reason));
+        if(Build.VERSION.SDK_INT>=31&&reason==JobParameters.STOP_REASON_USER){
+            // Respect a stop through Android's controls. Keep its cause distinct
+            // from pressing Pause in the app, and only restart on a new request.
+            NativeDownloads.markPaused(this,"system","Android остановил загрузку. Нажми «Продолжить», чтобы запустить её снова.");
+            NativeInbox.request(this);return false;
+        }
         boolean again=!NativeDownloads.paused(this)&&NativeDownloads.hasWork(this);
         if(again){DownloadRunner.phase="Продолжу загрузку автоматически";DownloadBatch.progress(this,false);}
         else ((android.app.NotificationManager)getSystemService(NOTIFICATION_SERVICE)).cancel(DownloadBatch.NOTIFICATION);

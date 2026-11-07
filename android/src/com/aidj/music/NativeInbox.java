@@ -21,7 +21,7 @@ final class NativeInbox {
         try{
             Context c=context.getApplicationContext();State state=State.get(c);if(Api.cookie(c).isEmpty())return true;
             String device=state.read("deviceId","");if(device.isEmpty()){device=UUID.randomUUID().toString();state.write("deviceId",device);}
-            JSONObject body=new JSONObject();body.put("deviceId",device);
+            JSONObject body=new JSONObject();body.put("deviceId",device);body.put("diagnostics",NativeDownloads.diagnostics(c));
             JSONObject response=Api.request(c,"/api/device-inbox",body);if(response.optInt("status")!=200)return false;
             JSONObject inbox=response.getJSONObject("body"),receipts=new JSONObject(state.read("deliveryReceipts","{}"));
             JSONArray items=inbox.getJSONArray("items"),tracks=new JSONArray(),acks=new JSONArray();

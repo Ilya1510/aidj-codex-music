@@ -7,7 +7,8 @@ public final class DownloadActions extends BroadcastReceiver {
         PendingResult result=goAsync();Context app=context.getApplicationContext();
         new Thread(()->{try{
             if("cancel".equals(intent.getAction()))NativeDownloads.cancel(app);
-            else if("pause".equals(intent.getAction())&&!NativeDownloads.paused(app))NativeDownloads.toggle(app);
+            else if("pause".equals(intent.getAction()))NativeDownloads.setPaused(app,true);
+            else if("resume".equals(intent.getAction()))NativeDownloads.setPaused(app,false);
         }finally{result.finish();}},"aidj-download-action").start();
     }
 }

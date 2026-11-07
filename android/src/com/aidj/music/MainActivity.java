@@ -124,6 +124,7 @@ public final class MainActivity extends Activity {
                     if("api".equals(type))result=Api.request(MainActivity.this,data.getString("path"),data.isNull("body")?null:data.getJSONObject("body"));
                     else if("download".equals(type)){NativeDownloads.addUser(MainActivity.this,data.getJSONArray("tracks"));result.put("ok",true);}
                     else if("downloadToggle".equals(type)){NativeDownloads.toggle(MainActivity.this);result.put("ok",true);}
+                    else if("downloadPause".equals(type)){NativeDownloads.setPaused(MainActivity.this,data.getBoolean("paused"));result.put("ok",true);}
                     else if("downloadCancel".equals(type)){NativeDownloads.cancel(MainActivity.this);result.put("ok",true);}
                     else if("removeFile".equals(type)){String md5=data.getString("md5");if(!md5.matches("[a-f0-9]{32}"))throw new Exception();State.get(MainActivity.this).remove(md5);result.put("ok",true);}
                     else if("importStart".equals(type)){

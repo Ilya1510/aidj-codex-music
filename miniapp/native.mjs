@@ -27,9 +27,14 @@ export class NativeAudio extends EventTarget {
   }
 }
 export class NativeDownloads {
-  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;this.phase='';this.percent=0;this.bytesTotal=0;}
+  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;this.phase='';this.percent=0;this.bytesTotal=0;this.failedCount=0;this.needsRetry=false;this.controlling=false;}
   add(tracks){command('download',{tracks}).catch(error=>{this.error=error;this.changed();});}
-  toggle(){command('downloadToggle').catch(()=>{});}
+  toggle(){return this.setPaused(!(this.paused||this.needsRetry));}
+  setPaused(paused){
+    const modern=typeof native.version==='function'&&native.version()>=16;
+    this.controlling=true;this.changed();
+    return command(modern?'downloadPause':'downloadToggle',modern?{paused}:{}).catch(error=>{this.error=error;}).finally(()=>{this.controlling=false;this.changed();});
+  }
   cancel(){command('downloadCancel').catch(()=>{});}
-  accept(state){Object.assign(this,state);this.error=state.error?new Error(state.error):null;this.changed();}
+  accept(state){Object.assign(this,{failedCount:0,needsRetry:false},state);this.error=state.error?new Error(state.error):null;this.changed();}
 }

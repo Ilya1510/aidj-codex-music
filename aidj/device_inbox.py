@@ -41,6 +41,26 @@ def device(body):
 
 def pending(db,body):
     did=device(body);revision=library_revision(db)
+    diagnostics=body.get('diagnostics')
+    if isinstance(diagnostics,dict):
+        # Owner-only operational state. Never retain arbitrary client text,
+        # filenames, URLs, headers, cookies, or contents of the device's storage.
+        clean={}
+        for key in ('versionCode','sdk','freeBytes','active','pending','retry','failed','ready'):
+            value=diagnostics.get(key)
+            if type(value) is int and 0<=value<=10**15:clean[key]=value
+        if type(diagnostics.get('paused')) is bool:clean['paused']=diagnostics['paused']
+        allowed={'pauseReason':{'','user','system','auth','storage','cancelled'},'mode':{'','service','user-job','background-job'},
+                 'scheduleError':{'','rejected','SecurityException','IllegalStateException','ForegroundServiceStartNotAllowedException'}}
+        for key,values in allowed.items():
+            value=diagnostics.get(key)
+            if isinstance(value,str):clean[key]=value if value in values else 'other'
+        for key in ('lastHttp','stopReason'):
+            value=str(diagnostics.get(key,''))
+            if re.fullmatch(r'[0-9]{1,3}',value):clean[key]=int(value)
+        now=time.time()
+        db.execute('INSERT INTO device_diagnostics VALUES (?,?,?) ON CONFLICT(device_id) DO UPDATE SET payload=excluded.payload,updated=excluded.updated',(did,json.dumps(clean),now))
+        db.execute('DELETE FROM device_diagnostics WHERE updated<? OR device_id NOT IN (SELECT device_id FROM device_diagnostics ORDER BY updated DESC LIMIT 10)',(now-7*86400,));db.commit()
     rows=db.execute('''SELECT d.*,a.title,a.artist,a.duration,a.bytes,a.remote_path FROM app_deliveries d
         JOIN web_assets a ON a.id=d.asset_id LEFT JOIN app_delivery_acks k ON k.delivery_id=d.id AND k.device_id=?
         WHERE k.revision IS NULL OR k.revision<d.revision ORDER BY d.created LIMIT 50''',(did,)).fetchall()

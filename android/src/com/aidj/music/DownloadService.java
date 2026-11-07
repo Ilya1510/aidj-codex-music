@@ -5,7 +5,7 @@ import android.content.*;
 import android.os.*;
 import android.net.*;
 
-/** Compatibility path below Android 14. Modern versions use UIDT jobs. */
+/** User-started foreground transfer, with JobScheduler for deferred recovery. */
 public final class DownloadService extends Service {
     static volatile boolean running=false;
     private volatile boolean alive=true;
@@ -21,7 +21,7 @@ public final class DownloadService extends Service {
         if(!alive||wake==null)return;if(online){if(!wake.isHeld())wake.acquire(10*60*1000L);}else if(wake.isHeld())wake.release();
     }
     @Override public void onCreate(){
-        super.onCreate();running=true;startForeground(DownloadBatch.NOTIFICATION,DownloadBatch.notification(this,null,false));
+        super.onCreate();running=true;DownloadBatch.serviceStarting=false;startForeground(DownloadBatch.NOTIFICATION,DownloadBatch.notification(this,null,false));
         wake=((PowerManager)getSystemService(POWER_SERVICE)).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"aidj:playlist-download");wake.setReferenceCounted(false);wake.acquire(10*60*1000L);
         connectivity=(ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);connectivity.registerDefaultNetworkCallback(networkCallback);
     }
@@ -35,7 +35,11 @@ public final class DownloadService extends Service {
                 DownloadBatch.progress(DownloadService.this,false);
             }
             public void finished(boolean remaining){main.post(()->{
-                if(current.stopped)return;DownloadBatch.progress(DownloadService.this,!remaining);stopForeground(STOP_FOREGROUND_DETACH);stopSelf();
+                if(current.stopped)return;
+                if(!NativeDownloads.paused(DownloadService.this)&&NativeDownloads.hasWork(DownloadService.this)){
+                    token=null;main.postDelayed(()->{if(alive&&token==null)onStartCommand(null,0,0);},1000);return;
+                }
+                DownloadBatch.progress(DownloadService.this,!NativeDownloads.hasWork(DownloadService.this));stopForeground(STOP_FOREGROUND_DETACH);stopSelf();
             });}
         });return START_STICKY;
     }

@@ -46,6 +46,7 @@ def connect(settings):
     CREATE TABLE IF NOT EXISTS app_deliveries(id TEXT PRIMARY KEY,md5 TEXT UNIQUE NOT NULL,asset_id TEXT NOT NULL,revision INTEGER NOT NULL,created REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS app_delivery_acks(delivery_id TEXT NOT NULL,device_id TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,PRIMARY KEY(delivery_id,device_id));
     CREATE TABLE IF NOT EXISTS app_keyboard_updates(sid TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS device_diagnostics(device_id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS library_added(track_key TEXT PRIMARY KEY,added REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS audio_clips(track_key TEXT PRIMARY KEY,result TEXT NOT NULL,created REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS playback_ranges(track_id TEXT PRIMARY KEY,start REAL NOT NULL,end REAL NOT NULL,updated REAL NOT NULL);

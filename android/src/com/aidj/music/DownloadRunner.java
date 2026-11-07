@@ -59,7 +59,7 @@ final class DownloadRunner {
                 String extension="m4a".equals(track.optString("format"))?".m4a":".mp3";File destination=new File(NativeDownloads.folder(c),md5+extension);
                 if(DownloadTransfer.verify(destination,track.getLong("bytes"),md5)){db.imported(track,destination);continue;}
                 if(part.getParentFile().getUsableSpace()<Math.max(0,track.getLong("bytes")-part.length())+8L*1024*1024){
-                    db.write("downloadError","Не хватает места на устройстве. Освободи место и нажми «Продолжить».");db.write("downloadPaused","true");break;
+                    NativeDownloads.markPaused(c,"storage","Не хватает места на устройстве. Освободи место и нажми «Продолжить».");break;
                 }
                 db.update(md5,"active",destination.getAbsolutePath(),0,"");phase="Скачиваю";listener.progress();
                 URL url=new URL(Api.validate(Api.base(c))+"/api/audio/"+track.getString("id"));
@@ -75,8 +75,14 @@ final class DownloadRunner {
             }catch(Exception error){
                 if(token.stopped||token.skip||NativeDownloads.paused(c)||db.download(md5)==null)continue;
                 int code=error instanceof DownloadTransfer.Failure?((DownloadTransfer.Failure)error).code:0;
+                db.write("downloadLastHttp",String.valueOf(code));
                 int attempts=chosen.optInt("attempts")+1;
-                if(code==401||code==403){db.write("downloadError",DownloadPolicy.error(code));db.write("downloadPaused","true");break;}
+                if(code==401||code==403){
+                    // A proxy/CDN can reject an audio URL even with a valid
+                    // login. Pause the batch only when the session is invalid.
+                    int session=0;try{session=Api.request(c,"/api/session",null).optInt("status");}catch(Exception ignored){}
+                    if(session==401||session==403){NativeDownloads.markPaused(c,"auth",DownloadPolicy.error(code));break;}
+                }
                 if(DownloadPolicy.permanent(code,attempts))db.update(md5,"failed",chosen.optString("path"),0,DownloadPolicy.error(code));
                 else db.retry(md5,attempts,System.currentTimeMillis()+DownloadPolicy.retryDelay(attempts),"");
             }finally{if(db.download(md5)==null||db.file(md5)!=null)part.delete();token.md5="";}
