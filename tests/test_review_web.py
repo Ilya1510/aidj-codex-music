@@ -136,3 +136,14 @@ def test_voter_catalog_is_owner_only_http(setup):
         assert response.status_code==200
         assert any(v['label']=='Private friend' for v in response.json()['review']['voters'])
     finally:server.shutdown();server.server_close();thread.join()
+
+
+def test_owner_automatic_review_pool_excludes_own_proposal_aliases(setup):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    original=R.remember(db,result)
+    alias=R.remember(db,{**result,'track':{**result['track'],'source':'youtube','id':'owner-proposal'}})
+    proposed=R.proposal(db,11,22,p['id'],alias)
+    db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposed['id'],));db.commit()
+    value=catalog(db)
+    assert value['tracks'] and value['review']['poolTrackIds']==[]
+    assert value['tracks'][0]['rating']['proposals']==1

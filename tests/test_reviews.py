@@ -425,3 +425,23 @@ def test_unrated_suggestions_are_strictly_first_then_join_normal_library_selecti
         db.execute("UPDATE review_cards SET state='open' WHERE id=?",(card['id'],));db.commit()
         R.vote(db,card['id'],101,101,1)
     assert R.next_card(db,'priority:finished',101,101)==(None,False)
+
+
+@pytest.mark.parametrize('foreign_vote',[None,-1,0,1])
+def test_author_never_receives_own_suggestion_even_through_a_library_alias(setup,foreign_vote):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    original=R.remember(db,result)
+    alias=R.remember(db,{**result,'track':{**result['track'],'source':'youtube','id':'self-alias'}})
+    proposed=R.proposal(db,101,101,p['id'],alias)
+    db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposed['id'],))
+    if foreign_vote is not None:db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],original,202,foreign_vote,1))
+    db.commit()
+    assert R.next_card(db,'self-excluded',101,101)==(None,False)
+    # Archiving the suggestion does not make its accepted library copy fair
+    # game for automatic self-review later.
+    db.execute("UPDATE review_proposals SET status='archived' WHERE id=?",(proposed['id'],));db.commit()
+    assert R.next_card(db,'self-archived',101,101)==(None,False)
+    other={**result,'track':{**result['track'],'id':'somebody-else'},'md5':'b'*32}
+    item=R.remember(db,other);proposal=R.proposal(db,202,202,p['id'],item)
+    db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposal['id'],));db.commit()
+    assert R.next_card(db,'other-author',101,101)[0]['item_id']==item

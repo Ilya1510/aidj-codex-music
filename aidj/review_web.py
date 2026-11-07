@@ -60,6 +60,9 @@ def snapshot(db):
     roster.sort(key=lambda p:(not p['isMine'],p['label'].casefold(),p['id']))
     pool=set(r[0] for r in db.execute("SELECT md5 FROM playlist_tracks WHERE playlist_id=? AND state='complete'",(pid,)))
     pool.update(digest for digest,value in ratings.items() if value['proposals'])
+    pool.difference_update(r[0] for r in db.execute("""SELECT DISTINCT json_extract(i.result,'$.md5')
+        FROM review_proposals p JOIN review_items i ON i.id=p.item_id
+        WHERE p.playlist_id=? AND p.user_id=? AND p.status IN ('confirmed','archived')""",(pid,owner)))
     return ratings,{'playlistId':pid,'playlistName':playlist['name'] if playlist else '',
         'suggestionsPlaylistId':int(meta_get(db,'review_suggestions_playlist','0')) or None,
         'total':total,'participants':len(participants),'voters':roster,'votes':votes},pool

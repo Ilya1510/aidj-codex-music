@@ -140,9 +140,10 @@ def next_card(db,event,user_id,chat_id):
     candidates={}
     digests={r['id']:r['md5'] for r in db.execute("SELECT id,json_extract(result,'$.md5') AS md5 FROM review_items")}
     proposed={digests[r[0]] for r in db.execute("SELECT DISTINCT item_id FROM review_proposals WHERE playlist_id=? AND status='confirmed'",(pid,)) if r[0] in digests}
+    own_proposed={digests[r[0]] for r in db.execute("SELECT DISTINCT item_id FROM review_proposals WHERE playlist_id=? AND user_id=? AND status IN ('confirmed','archived')",(pid,user_id)) if r[0] in digests}
     for identity in pool:
         digest=digests[identity];ratings=votes.get(digest,[])
-        if digest in skipped or any(v['user_id']==user_id for v in ratings):continue
+        if digest in skipped or digest in own_proposed or any(v['user_id']==user_id for v in ratings):continue
         tier=0 if digest in proposed and not ratings else 1
         candidates.setdefault(digest,(identity,review_weight(len(ratings),sum(v['value']==-1 for v in ratings)),tier))
     values=list(candidates.values())
