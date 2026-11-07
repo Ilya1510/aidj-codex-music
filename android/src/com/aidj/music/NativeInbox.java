@@ -16,6 +16,19 @@ final class NativeInbox {
         if(syncing.get()||!scheduled.compareAndSet(false,true))return;
         Context app=c.getApplicationContext();network.execute(()->{try{sync(app);}finally{scheduled.set(false);}});
     }
+    private static void prioritize(Context c,State state){
+        try{
+            JSONObject q=new JSONObject(state.read("nativeQueue","{}"));if(!q.optBoolean("djEnabled"))return;
+            JSONArray entries=q.optJSONArray("entries");if(entries==null)return;
+            int at=-1;for(int i=0;i<entries.length();i++)if(q.optString("currentId").equals(entries.getJSONObject(i).optString("id"))){at=i;break;}
+            if(at<0)return;JSONArray ids=new JSONArray();java.util.Set<String> seen=new java.util.LinkedHashSet<>();
+            for(int i=at;i<Math.min(entries.length(),at+6);i++){String id=entries.getJSONObject(i).optString("trackId");if(id.matches("[a-f0-9]{24}")&&seen.add(id))ids.put(id);}
+            String key=ids.toString();long now=System.currentTimeMillis(),last=0;try{last=Long.parseLong(state.read("djPriorityAt","0"));}catch(Exception ignored){}
+            if(ids.length()==0||key.equals(state.read("djServerPriority",""))&&now-last<900000)return;
+            JSONObject body=new JSONObject().put("trackIds",ids).put("nextTrackIds",ids);
+            if(Api.request(c,"/api/dj",body).optInt("status")==200){state.write("djServerPriority",key);state.write("djPriorityAt",String.valueOf(now));}
+        }catch(Exception ignored){}  // Preparation never blocks delivery acknowledgements.
+    }
     static boolean sync(Context context){
         if(!syncing.compareAndSet(false,true))return true;
         try{
@@ -51,7 +64,7 @@ final class NativeInbox {
                     state.write("deliveryReceipts",receipts.toString());
                 }
             }
-            return true;
+            prioritize(c,state);return true;
         }catch(Exception ignored){return false;}
         finally{syncing.set(false);}
     }

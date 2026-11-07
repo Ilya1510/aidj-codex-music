@@ -75,7 +75,8 @@ public class DjServiceProbe {
  long overlap=DjPlan.matchedOverlap(t,left,t,right,1,1);double aphase=(130-g-overlap/1000.0)*2,bphase=(20-.2)*2;
  check(overlap<=1800&&Math.abs((aphase-Math.floor(aphase))-(bphase-Math.floor(bphase)))<.003,"beat phase alignment stays within the vocal gap");
  }
- PlaybackService s=service();MediaPlayer a=MediaPlayer.all.get(0);check(a.isPlaying()&&a.pos==20000,"start at cue");tick(s);MediaPlayer b=MediaPlayer.all.get(1);b.firePrepared();check(!b.isPlaying()&&b.pos==20000&&b.gain==0,"preload never leaks/autoplays");
+ check(DjPlan.track(new JSONObject().put("duration",240).put("rangeStart",35).put("rangeEnd",90),new JSONObject().put("dj",new JSONObject().put("start",0).put("end",130).put("bpm",0).put("fade",.5)),true).getDouble("rangeStart")==35,"manual fragment still has priority over safe automatic entry");
+ PlaybackService s=service();MediaPlayer a=MediaPlayer.all.get(0);check(a.isPlaying()&&a.pos==0,"legacy automatic cue must keep the first complete phrase");tick(s);MediaPlayer b=MediaPlayer.all.get(1);b.firePrepared();check(!b.isPlaying()&&b.pos==0&&b.gain==0,"preload never leaks/autoplays");
  a.pos=129000;tick(s);check(a.isPlaying()&&b.isPlaying(),"two real decks overlap");s.pause();check(!a.isPlaying()&&!b.isPlaying(),"pause stops both decks");a.pos=130000;tick(s);check(s.snapshot().getJSONObject("queue").getString("currentId").equals("e1"),"paused transition does not advance");
  a.pos=129000;s.play();check(a.isPlaying()&&b.isPlaying(),"resume both decks");s.skip(1);check(a.released&&!b.released&&b.isPlaying(),"skip promotes ready deck without reload");check(s.snapshot().getJSONObject("queue").getString("currentId").equals("e2"),"individual song queue advances");s.onDestroy();check(b.released,"destroy releases active deck");
  s=service();a=MediaPlayer.all.get(0);tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=129000;tick(s);s.seek(60000);check(b.released&&a.pos==60000,"seek cancels overlap and keeps original");s.onDestroy();
@@ -83,9 +84,18 @@ public class DjServiceProbe {
  s=service();a=MediaPlayer.all.get(0);tick(s);a.pos=129000;tick(s);JSONObject e=s.snapshot().getJSONObject("queue").getJSONArray("entries").getJSONObject(0);check(e.optBoolean("djFull")&&a.isPlaying(),"late preload extends source instead of abrupt cut");check(a.pos==129000,"extension never seeks backwards");s.onDestroy();
  s=service();a=MediaPlayer.all.get(0);tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=129000;tick(s);q=queue().put("uiRevision",3);q.getJSONArray("entries").getJSONObject(0).put("djFull",true);s.setQueue(q);check(b.released&&a.isPlaying()&&a.pos==129000,"play full cancels overlap without restarting");s.onDestroy();
  s=service();a=MediaPlayer.all.get(0);tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=129000;tick(s);a.pos=130000;tick(s);check(a.released&&b.isPlaying()&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e2"),"automatic transition preserves next deck position");a.fireDone();check(s.snapshot().getJSONObject("queue").getString("currentId").equals("e2"),"stale completion cannot double-advance");s.onDestroy();
+ s=service();q=queue().put("uiRevision",4);q.getJSONArray("entries").getJSONObject(0).getJSONObject("dj").put("fade",.5).put("mix",3.2);s.setQueue(q);a=MediaPlayer.all.get(0);tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=127500;tick(s);a.pos=129200;tick(s);check(Math.abs(a.gain-.7)<.001&&b.gain>0,"outgoing word remains at full gain during early incoming fade");a.pos=129800;tick(s);check(a.gain<.7&&a.gain+b.gain<=.991,"late outgoing fade keeps peak headroom");s.onDestroy();
+ for(int i=0;i<=100;i++){double progress=i/100.0;float out=DjPlan.gain(progress,false,.2),in=DjPlan.gain(progress,true,.2);check(out>=0&&in>=0&&out+in<=.991,"asymmetric mix remains bounded");if(progress<.8)check(Math.abs(out-.7)<.001,"no early vocal fade");}
  check(MediaPlayer.remote==0,"all decks reuse downloaded originals without HTTP");
  System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline");
  }
 }''',
     }
     compile_probe(tmp_path,fixtures,['PlaybackService.java','PlaybackRange.java','PlaybackFade.java','DjPlan.java'],'DjServiceProbe')
+
+
+def test_dj_priority_follows_native_background_queue_without_redownloading_files(tmp_path):
+    from tests.native_inbox_probe import PROBE
+    fixtures={'android/content/Context.java':'package android.content;public class Context{public Context getApplicationContext(){return this;}}',
+              'com/aidj/music/InboxProbe.java':PROBE.replace('NATIVE_INBOX_POLICY_PASSED','PROBE_PASSED')}
+    compile_probe(tmp_path,fixtures,['NativeInbox.java'],'InboxProbe')

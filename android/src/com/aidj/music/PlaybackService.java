@@ -19,7 +19,7 @@ public final class PlaybackService extends Service {
     private String incomingId="",incomingSpec="",failedIncoming="";
     private JSONObject playingTrack;
     private float speed=1f,incomingSpeed=1f;
-    private long mixStart=0,mixSpan=1;
+    private long mixStart=0,mixSpan=1,mixFade=1;
     private int nextGeneration=0;
     private MediaSession session;
     private AudioManager audio;
@@ -116,9 +116,9 @@ public final class PlaybackService extends Service {
         long length=duration();float gain=PlaybackFade.gain(position(),PlaybackRange.start(current(),length),PlaybackRange.end(current(),length),queue.optLong("transitionMs",0))*duckGain;
         if(dj()){
             double progress=mixing?(double)(position()-mixStart)/mixSpan:0;
-            gain=(mixing?DjPlan.gain(progress,false):.70f)*duckGain;
+            gain=(mixing?DjPlan.gain(progress,false,(double)mixFade/mixSpan):.70f)*duckGain;
             if(!mixing&&nextEntry()==null){long window=DjPlan.overlap(source(entry()),entry(),true,speed);gain*=Math.min(1f,Math.max(0f,(PlaybackRange.end(current(),length)-position())/(window*speed)));}
-            if(mixing&&incomingReady&&incoming!=null){float g=DjPlan.gain(progress,true)*duckGain;try{incoming.setVolume(g,g);}catch(Exception ignored){}}
+            if(mixing&&incomingReady&&incoming!=null){float g=DjPlan.gain(progress,true,(double)mixFade/mixSpan)*duckGain;try{incoming.setVolume(g,g);}catch(Exception ignored){}}
         }
         if(Math.abs(gain-lastGain)<.001f)return;
         try{player.setVolume(gain,gain);lastGain=gain;}catch(Exception ignored){}
@@ -178,7 +178,7 @@ public final class PlaybackService extends Service {
                 playingTrack=source(entry());speed=1f;setSpeed(player,speed);cancelIncoming();savePosition();updateSession();return;
             }
             if(!mixing&&incomingReady&&remaining>30&&remaining<=window*speed){
-                try{mixStart=position();mixSpan=Math.max(1,remaining);incoming.setVolume(0,0);incoming.start();mixing=true;lastGain=-1;}catch(Exception ignored){failedIncoming=incomingSpec;cancelIncoming();}
+                try{mixStart=position();mixSpan=Math.max(1,remaining);mixFade=Math.min(mixSpan,DjPlan.safeFade(source(entry()),entry()));incoming.setVolume(0,0);incoming.start();mixing=true;lastGain=-1;}catch(Exception ignored){failedIncoming=incomingSpec;cancelIncoming();}
             }
             if(mixing&&remaining<=15){promote();return;}
         }

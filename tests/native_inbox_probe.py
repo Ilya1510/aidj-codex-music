@@ -18,17 +18,18 @@ final class State {
   JSONObject download(String md5){return downloads.contains(md5)?new JSONObject():null;}
 }
 final class NativeDownloads {
-  static int requests=0;
+  static int requests=0;static JSONObject diagnostics(Context c){return new JSONObject();}
   static void add(Context c,JSONArray tracks)throws Exception{for(int i=0;i<tracks.length();i++)if(State.instance.downloads.add(tracks.getJSONObject(i).getString("md5")))requests++;}
 }
 final class Api {
-  static boolean pending=true,failAck=false,connected=true;static int revision=1;static String checksum="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",lastStatus="";
+  static boolean pending=true,failAck=false,connected=true,failPriority=false;static int priorities=0;static JSONArray lastPriority;static int revision=1;static String checksum="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",lastStatus="";
   static String cookie(Context c){return connected?"local-test-session":"";}
   static JSONObject request(Context c,String path,JSONObject body)throws Exception{
     JSONObject result=new JSONObject();result.put("status",200);JSONObject content=new JSONObject();result.put("body",content);
     if(path.equals("/api/device-inbox")){
       content.put("revision","library-revision");JSONArray items=new JSONArray();content.put("items",items);
       if(pending){JSONObject item=new JSONObject();item.put("id","111111111111111111111111");item.put("revision",revision);JSONObject track=new JSONObject();track.put("md5",checksum);item.put("track",track);items.put(item);}
+    }else if(path.equals("/api/dj")){priorities++;lastPriority=body.getJSONArray("nextTrackIds");if(failPriority)result.put("status",503);
     }else{
       if(failAck){result.put("status",503);return result;}
       JSONArray acks=body.getJSONArray("items");for(int i=0;i<acks.length();i++){JSONObject ack=acks.getJSONObject(i);if(ack.getInt("revision")==revision){lastStatus=ack.getString("status");pending=false;}}
@@ -49,6 +50,12 @@ public final class InboxProbe {
     Api.failAck=false;check(NativeInbox.sync(c)&&NativeDownloads.requests==2,"retry deduplicates the file");
     state.downloads.remove(Api.checksum);check(NativeInbox.sync(c)&&Api.lastStatus.equals("cancelled"),"explicit local cancellation is respected");
     check(NativeInbox.sync(c)&&NativeDownloads.requests==2,"cancelled requests do not restart on polling");
+    JSONObject q=new JSONObject().put("djEnabled",true).put("currentId","e2");JSONArray queueEntries=new JSONArray();for(int i=0;i<10;i++)queueEntries.put(new JSONObject().put("id","e"+i).put("trackId",String.join("",Collections.nCopies(24,String.valueOf(i)))));q.put("entries",queueEntries);state.write("nativeQueue",q.toString());
+    check(NativeInbox.sync(c)&&Api.priorities==1&&Api.lastPriority.length()==6&&Api.lastPriority.getString(0).startsWith("2"),"current and next five tracks receive preparation priority");
+    check(NativeInbox.sync(c)&&Api.priorities==1,"unchanged background queue does not repeat preparation requests");
+    q.put("currentId","e3");state.write("nativeQueue",q.toString());check(NativeInbox.sync(c)&&Api.priorities==2&&Api.lastPriority.getString(0).startsWith("3"),"background song advancement updates priority without a WebView");
+    Api.failPriority=true;q.put("currentId","e4");state.write("nativeQueue",q.toString());check(NativeInbox.sync(c),"priority failure cannot break delivery sync");int attempts=Api.priorities;Api.failPriority=false;NativeInbox.sync(c);check(Api.priorities==attempts+1,"priority failure retries on the next sync");
+    check(NativeDownloads.requests==2,"DJ preparation does not download extra music to the phone");
     System.out.println("NATIVE_INBOX_POLICY_PASSED durable_queue no_fake_ready no_redownload ack_retry cancellation");
   }
 }

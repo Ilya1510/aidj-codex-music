@@ -43,12 +43,15 @@ def catalog(db):
     ratings,review,pool=snapshot(db)
     tracks=[]
     ranges={r['track_id']:r for r in db.execute('SELECT * FROM playback_ranges')}
-    from .dj import metadata
+    from .dj import metadata,legacy,service_state
     cues=metadata(db)
+    states={r['md5']:r['status'] for r in db.execute('SELECT md5,status FROM dj_analysis')}
     for row in db.execute('SELECT a.* FROM web_assets a LEFT JOIN library_added n ON n.track_key=a.track_key ORDER BY COALESCE(n.added,0) DESC,a.rowid DESC'):
         value={k:row[k] for k in ['id','title','artist','duration','md5','bytes']} | {'format':PurePosixPath(row['remote_path']).suffix[1:],
             'rating':ratings.get(row['md5'],empty_rating())}
-        if row['md5'] in cues:value['dj']=cues[row['md5']]
+        if row['md5'] in cues:
+            value['djV2']=cues[row['md5']];value['dj']=legacy(cues[row['md5']])
+        if row['md5'] in states:value['djStatus']=states[row['md5']]
         if row['id'] in ranges:value.update(rangeStart=ranges[row['id']]['start'],rangeEnd=ranges[row['id']]['end'])
         tracks.append(value)
     playlists=[]
@@ -56,7 +59,9 @@ def catalog(db):
         ids=[asset_id(r[0]) for r in db.execute("SELECT track_key FROM playlist_tracks WHERE playlist_id=? AND state='complete' ORDER BY position",(p['id'],))]
         playlists.append({'id':p['id'],'name':p['name'],'trackIds':ids,'revision':revision(db,p['id']),'diskUrl':web_url(p['path'])})
     review['poolTrackIds']=[t['id'] for t in tracks if t['md5'] in pool]
-    return {'tracks':tracks,'playlists':playlists,'review':review}
+    working=db.execute("SELECT j.asset_id,j.updated,a.title,a.artist FROM dj_analysis j JOIN web_assets a ON a.id=j.asset_id WHERE j.status='working' ORDER BY j.updated LIMIT 1").fetchone()
+    job={'trackId':working['asset_id'],'title':working['title'],'artist':working['artist'],'started':working['updated']} if working else None
+    return {'tracks':tracks,'playlists':playlists,'review':review,'djWork':job,'djService':service_state(db)}
 
 
 def result_for(row,db=None):

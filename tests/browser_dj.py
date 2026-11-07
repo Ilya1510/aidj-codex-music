@@ -7,8 +7,9 @@ from aidj.config import Settings
 
 def main():
     songs=[{'id':str(i)*24,'title':'DJ Song '+str(i),'artist':'QA','duration':240,'md5':str(i)*32,'bytes':100,'format':'mp3',
-            'dj':{'cues':[{'start':20,'end':130,'bpm':126+i,'fade':1.8},{'start':20,'end':100,'bpm':126+i,'fade':1.8}]}} for i in range(1,4)]
-    data={'tracks':songs,'playlists':[{'id':1,'name':'Volleyball','trackIds':[s['id'] for s in songs],'revision':'one'}, {'id':2,'name':'Предложка','trackIds':[songs[0]['id']],'revision':'two'}]}
+            'djStatus':'complete','dj':{'cues':[{'start':20,'end':130,'bpm':126+i,'fade':1.8},{'start':20,'end':100,'bpm':126+i,'fade':1.8}]}} for i in range(1,4)]
+    waiting={'id':'4'*24,'title':'Waiting Song','artist':'QA','duration':240,'md5':'4'*32,'bytes':100,'format':'mp3','djStatus':'working'}
+    data={'tracks':songs+[waiting],'playlists':[{'id':1,'name':'Volleyball','trackIds':[s['id'] for s in songs]+[waiting['id']],'revision':'one'}, {'id':2,'name':'Предложка','trackIds':[songs[0]['id']],'revision':'two'}],'djWork':{'trackId':waiting['id'],'title':waiting['title'],'artist':'QA'},'djService':{'state':'working'}}
     bridge=BRIDGE.replace('version:()=>8','version:()=>17').replace('files:[],downloads:', 'files:'+__import__('json').dumps(songs)+',downloads:')
     bridge=bridge.replace("else if(value.type==='pause')", "else if(value.type==='next'){const q=state.player.queue,at=q.entries.findIndex(e=>e.id===q.currentId);q.currentId=q.entries[at+1]?.id||q.currentId;}\n    else if(value.type==='pause')")
     stage='open';errors=[]
@@ -19,12 +20,17 @@ def main():
         page.route('**/api/**',api)
         try:
             page.goto('http://127.0.0.1:18782',wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball').click()
+            assert page.locator('main .dj-ready').count()==3
+            assert page.locator('main .dj-working').count()==1
+            assert 'DJ готовит: QA — Waiting Song' in page.locator('main').inner_text()
+            page.get_by_role('button',name='Только DJ',exact=True).click();assert page.locator('main .song-row').count()==3
             page.get_by_role('button',name='Воспроизведение · Обычное',exact=True).click();page.get_by_role('button',name='DJ',exact=True).click()
-            page.get_by_role('status').filter(has_text='Подготовлены DJ-фрагменты: 3 из 3').wait_for()
+            page.get_by_role('status').filter(has_text='Подготовлены DJ-фрагменты: 3 из 4').wait_for()
             page.wait_for_function('()=>window.__fadeCalls.some(x=>x.path==="/api/dj")')
             page.get_by_role('button',name='Покороче',exact=True).click();page.get_by_role('button',name='Закрыть',exact=True).click()
             page.get_by_role('button',name='Слушать',exact=True).click()
             page.wait_for_function('()=>window.__fadeCalls.some(x=>x.type==="play"&&x.queue.djEnabled&&x.queue.playlistId===1&&x.queue.entries[0].dj.end===100)')
+            page.wait_for_function('()=>window.__fadeCalls.some(x=>x.path==="/api/dj"&&x.body.nextTrackIds?.length===3)')
             stage='full';page.locator('#mini-title').click();page.get_by_role('button',name='Доиграть полностью',exact=True).click()
             page.wait_for_function('()=>window.__fadeCalls.some(x=>x.type==="queue"&&x.queue.entries[0].djFull)')
             assert 'DJ · песня целиком' in page.locator('#full-content').inner_text()
@@ -32,13 +38,13 @@ def main():
             page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="DJ Song 2"')
             assert 'Доиграть полностью' in page.locator('#full-content').inner_text()
             stage='queue';page.get_by_role('button',name='Очередь',exact=True).last.click()
-            assert page.get_by_text('DJ · 0:20–1:40',exact=True).count()>=1
+            assert page.get_by_text('DJ · 0:00–1:40',exact=True).count()>=1
             page.get_by_role('button',name='Убрать из очереди',exact=True).last.click()
             assert page.evaluate('window.__fadeCalls.filter(x=>x.type==="queue").at(-1).queue.entries.length')==2
             stage='other-playlist';page.get_by_role('button',name='Музыка',exact=True).click();page.locator('.playlist-card').filter(has_text='Предложка').click()
             assert page.get_by_role('button',name='Воспроизведение · Обычное',exact=True).count()==1
             page.get_by_role('button',name='Слушать',exact=True).click();page.wait_for_function('()=>window.__fadeCalls.filter(x=>x.type==="play").at(-1).queue.djEnabled===false')
-            stage='restore';page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball').click();page.get_by_role('button',name='Воспроизведение · DJ',exact=True).click()
+            stage='restore';page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball').click();assert page.get_by_role('button',name='Только DJ',exact=True).get_attribute('aria-pressed')=='true';page.get_by_role('button',name='Воспроизведение · DJ',exact=True).click()
             assert page.get_by_role('button',name='Покороче',exact=True).get_attribute('aria-pressed')=='true'
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             assert not any(word in page.locator('#sheet-content').inner_text().split() for word in ('null','undefined','true','false'))
