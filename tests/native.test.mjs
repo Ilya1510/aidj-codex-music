@@ -19,3 +19,14 @@ test('native downloads are delegated to Android and restored progress does not s
   assert.equal(downloads.active.id,'song');assert.equal(downloads.completed,4);assert.equal(calls.length,before);assert.equal(updates,1);
   downloads.accept({active:null,pending:[],completed:5,total:5,paused:false,error:null});assert.equal(downloads.completed,5);
 });
+
+test('background batch progress and automatic network waiting never restart downloads',async()=>{
+ const downloads=new NativeDownloads(()=>{}),track={id:'song',md5:'hash',bytes:100};
+ const before=calls.length;
+ downloads.accept({active:track,pending:[],completed:4,total:10,paused:false,error:null,phase:'Скачиваю',percent:45,bytesTotal:1000,bytesDownloaded:450});
+ assert.equal(downloads.percent,45);assert.equal(downloads.bytesTotal,1000);
+ downloads.accept({active:track,pending:[],completed:4,total:10,paused:false,error:null,phase:'Жду подключения к сети',percent:45,bytesTotal:1000});
+ assert.equal(downloads.paused,false);assert.equal(downloads.error,null);assert.equal(downloads.phase,'Жду подключения к сети');
+ downloads.accept({active:track,pending:[],completed:4,total:10,paused:false,error:null,phase:'Скачиваю',percent:46,bytesTotal:1000});
+ assert.equal(downloads.percent,46);assert.equal(calls.length,before);
+});

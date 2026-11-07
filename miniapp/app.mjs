@@ -714,11 +714,12 @@ function downloadPlaylist(p){
     button('Скачать на устройство','download',()=>download(missing),'button primary full'));
 }
 function renderDownloads(){
-  const panel=$('downloads-progress');panel.hidden=!downloads.active&&!downloads.pending.length;
+  const panel=$('downloads-progress');panel.hidden=!downloads.active&&!downloads.pending.length;document.body.classList.toggle('has-downloads',!panel.hidden);
   if(panel.hidden)return;
   const error=downloads.error?.name==='QuotaExceededError'?'Не хватает места на устройстве':downloads.error?.message;
-  panel.replaceChildren(el('div',{},el('strong',{},downloads.paused?'Загрузка приостановлена':`Скачивание · ${downloads.completed} / ${downloads.total}`),el('span',{},error||downloads.active?.title||'Готово к продолжению')),
-    button(downloads.paused?'Продолжить':'Пауза',null,()=>downloads.toggle(),'text-button'),button('Отменить загрузку','close',()=>downloads.cancel(),'icon-button small'));
+  panel.replaceChildren(...visibleChildren([el('div',{},el('strong',{},downloads.paused?'Загрузка приостановлена':`Скачивание · ${downloads.completed} / ${downloads.total}`),el('span',{},error||(downloads.phase&&downloads.phase!=='Скачиваю'?downloads.phase:downloads.active?.title)||'Готово к продолжению')),
+    downloads.bytesTotal>0?el('progress',{class:'batch-download-progress',max:100,value:downloads.percent||0,'aria-label':'Скачивание плейлиста'}):null,
+    button(downloads.paused?'Продолжить':'Пауза',null,()=>downloads.toggle(),'text-button'),button('Отменить загрузку','close',()=>downloads.cancel(),'icon-button small')]));
 }
 function openLink(url){if(native)native.open(url);else if(tg?.initData)tg.openLink(url);else window.open(url,'_blank','noopener,noreferrer');}
 function applyBrowserVolume(){

@@ -27,7 +27,7 @@ export class NativeAudio extends EventTarget {
   }
 }
 export class NativeDownloads {
-  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;}
+  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;this.phase='';this.percent=0;this.bytesTotal=0;}
   add(tracks){command('download',{tracks}).catch(error=>{this.error=error;this.changed();});}
   toggle(){command('downloadToggle').catch(()=>{});}
   cancel(){command('downloadCancel').catch(()=>{});}

@@ -50,6 +50,13 @@ def main():
             assert page.locator('#mini-title').inner_text()==second
             stage='download';row=page.locator('main .song-row').filter(has_text=second).first;row.get_by_role('button',name='Скачать',exact=True).click()
             page.locator('#downloads-progress:not([hidden])').wait_for()
+            page.evaluate('''()=>{const s=window.__nativeTestState;s.downloads.phase='Скачиваю';s.downloads.bytesTotal=100000;s.downloads.percent=61;window.__aidjNativeState(structuredClone(s));}''')
+            assert page.get_by_role('progressbar',name='Скачивание плейлиста').get_attribute('value')=='61'
+            before=page.evaluate('window.__nativeCalls.filter(x=>x.type==="download").length')
+            page.evaluate('''()=>{const s=window.__nativeTestState;s.downloads.phase='Жду подключения к сети';window.__aidjNativeState(structuredClone(s));}''')
+            assert 'Жду подключения к сети' in page.locator('#downloads-progress').inner_text()
+            assert page.evaluate('window.__nativeCalls.filter(x=>x.type==="download").length')==before
+            assert not any(x in page.locator('#downloads-progress').inner_text().split() for x in ['null','undefined','true','false'])
             page.evaluate('''()=>{const s=window.__nativeTestState;s.files.push(s.downloads.active);s.downloads={active:null,pending:[],completed:2,total:2,paused:false,error:null};window.__aidjNativeState(structuredClone(s));}''')
             row.get_by_role('button',name='Скачано на устройство',exact=True).wait_for()
             stage='settings';page.locator('#settings').click()

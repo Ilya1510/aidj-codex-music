@@ -21,8 +21,10 @@ public final class MainActivity extends Activity {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final ExecutorService executor=Executors.newFixedThreadPool(2);
     private final ExecutorService apiExecutor=Executors.newFixedThreadPool(2);
-    private boolean visible=false;
-    private long lastSync=0;
+    private boolean visible=false;private static volatile boolean foreground=false;
+    static boolean isVisible(){return foreground;}
+    private final java.util.concurrent.atomic.AtomicBoolean publishing=new java.util.concurrent.atomic.AtomicBoolean(false);
+    private long lastSync=0;private volatile String lastPlayer="";
     private static final String ORIGIN="https://app.aidj.local";
     private final Runnable poll=new Runnable(){public void run(){if(!visible)return;publish();if(SystemClock.elapsedRealtime()-lastSync>20000){lastSync=SystemClock.elapsedRealtime();NativeInbox.request(MainActivity.this);}main.postDelayed(this,1000);}};
 
@@ -84,20 +86,25 @@ public final class MainActivity extends Activity {
     void openExternal(String value){
         try{Uri uri=Uri.parse(value);if(!"https".equals(uri.getScheme()))return;startActivity(new Intent(Intent.ACTION_VIEW,uri));}catch(Exception e){Toast.makeText(this,"Не удалось открыть ссылку",Toast.LENGTH_SHORT).show();}
     }
-    @Override protected void onResume(){super.onResume();visible=true;lastSync=-20001;main.post(poll);executor.execute(()->NativeDownloads.reconcile(this));}
-    @Override protected void onPause(){visible=false;main.removeCallbacks(poll);super.onPause();}
-    @Override protected void onDestroy(){visible=false;main.removeCallbacks(poll);web.removeJavascriptInterface("AndroidMusic");web.destroy();web=null;executor.shutdown();apiExecutor.shutdown();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();visible=true;foreground=true;State.get(this).refreshFiles();lastSync=-20001;main.post(poll);executor.execute(()->NativeDownloads.reconcile(this));}
+    @Override protected void onPause(){visible=false;foreground=false;main.removeCallbacks(poll);super.onPause();}
+    @Override protected void onDestroy(){visible=false;foreground=false;main.removeCallbacks(poll);web.removeJavascriptInterface("AndroidMusic");web.destroy();web=null;executor.shutdown();apiExecutor.shutdown();super.onDestroy();}
     @Override public void onBackPressed(){web.evaluateJavascript("window.__aidjBack ? window.__aidjBack() : false",value->{if(!"true".equals(value))super.onBackPressed();});}
     private JSONObject state(){
         JSONObject value=new JSONObject();try{
-            PlaybackService service=PlaybackService.instance;
-            if(service!=null)value.put("player",service.snapshot());else{JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",q);p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);value.put("player",p);}
+            if(!lastPlayer.isEmpty())value.put("player",new JSONObject(lastPlayer));else{JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",q);p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);value.put("player",p);}
             value.put("downloads",NativeDownloads.snapshot(this));value.put("files",State.get(this).files());value.put("versionCode",BuildConfig.VERSION_CODE);value.put("server",Api.base(this));
             value.put("libraryRevision",State.get(this).read("libraryRevision",""));
             if(ImportService.instance!=null)value.put("transfer",ImportService.instance.snapshot());
         }catch(Exception ignored){}return value;
     }
-    private void publish(){if(web!=null&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeState && window.__aidjNativeState("+state().toString()+")",null);}
+    private void publish(){
+        if(!publishing.compareAndSet(false,true))return;
+        PlaybackService service=PlaybackService.instance;lastPlayer=service==null?"":service.snapshot().toString();
+        executor.execute(()->{try{
+            String value=state().toString();main.post(()->{if(web!=null&&visible&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeState && window.__aidjNativeState("+value+")",null);});
+        }finally{publishing.set(false);}});
+    }
     private void reply(String id,JSONObject result){main.post(()->{if(!isFinishing()&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeReply && window.__aidjNativeReply("+JSONObject.quote(id)+","+result.toString()+")",null);});}
     private class Bridge {
         @JavascriptInterface public String readMeta(String key){return key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")?State.get(MainActivity.this).read("web_"+key,"null"):"null";}
@@ -115,7 +122,7 @@ public final class MainActivity extends Activity {
                 try{
                     JSONObject data=new JSONObject(payload);String type=data.getString("type");
                     if("api".equals(type))result=Api.request(MainActivity.this,data.getString("path"),data.isNull("body")?null:data.getJSONObject("body"));
-                    else if("download".equals(type)){NativeDownloads.add(MainActivity.this,data.getJSONArray("tracks"));result.put("ok",true);}
+                    else if("download".equals(type)){NativeDownloads.addUser(MainActivity.this,data.getJSONArray("tracks"));result.put("ok",true);}
                     else if("downloadToggle".equals(type)){NativeDownloads.toggle(MainActivity.this);result.put("ok",true);}
                     else if("downloadCancel".equals(type)){NativeDownloads.cancel(MainActivity.this);result.put("ok",true);}
                     else if("removeFile".equals(type)){String md5=data.getString("md5");if(!md5.matches("[a-f0-9]{32}"))throw new Exception();State.get(MainActivity.this).remove(md5);result.put("ok",true);}
