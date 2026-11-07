@@ -205,3 +205,121 @@ def test_previously_validated_exit_can_pair_with_a_new_whole_word_entry():
     evidence={'words':words,'beats':[],'bpm':120,'duration':190,'coverage':[[40,68]],'safeExits':[[69.8,71.8]]}
     remix=selection(evidence)['remix']
     assert any(c['start']>50 and c['end']==71.8 for c in remix)
+
+
+def narrow_gap_evidence():
+    # Ordinary gaps are too short for an exit. Only these two deliberately
+    # wider observations leave 160ms / 400ms after BOTH 200ms word guards.
+    words=[[s,s+.5,True] for s in range(180)]
+    words[49][1]=49.44
+    words[124][1]=124.2
+    return {'version':3,'duration':180,'words':words,'beats':[],'bpm':120,'coverage':[[0,180]],'energy':[.8]*180,'analysisScope':'full'}
+
+
+def test_v4_shorter_exit_fades_stay_between_the_same_observed_whole_words():
+    from aidj.dj_worker import selection
+    evidence=narrow_gap_evidence();value=validate(selection(evidence),180)
+    assert value['version']==3 and value['cueSchema']==4
+    assert value['cues'] and all(.25<=c['fade']<.5 for c in value['cues'])
+    assert value['remix'] and any(.15<=c['fade']<.25 for c in value['remix'])
+    for cue in value['cues']+value['remix']:
+        assert cue['entryVerified'] is True and cue['wordGuarded'] is True and cue['mix']>=3
+        before=max(w[1] for w in evidence['words'] if w[1]<cue['end'])
+        after=min(w[0] for w in evidence['words'] if w[0]>cue['end'])
+        assert cue['end']-cue['fade']>=before+.2-1e-6
+        assert cue['end']<=after-.2+1e-6
+        assert not any(lo<cue['end'] and hi>cue['end']-cue['fade'] for lo,hi,_ in evidence['words'])
+        if cue['start']:
+            assert cue['start']>=max(w[1] for w in evidence['words'] if w[1]<cue['start'])+.2-1e-6
+            assert cue['start']<=min(w[0] for w in evidence['words'] if w[0]>cue['start'])-.2+1e-6
+
+
+@pytest.mark.parametrize('change',['uncertain','unobserved','occupied'])
+def test_narrow_fade_fallback_does_not_relax_word_confidence_or_observed_coverage(change):
+    from aidj.dj_worker import selection
+    evidence=narrow_gap_evidence()
+    if change=='uncertain':
+        evidence['words'][49][2]=False;evidence['words'][124][2]=False
+    elif change=='unobserved':evidence['coverage']=[[0,40],[60,110],[140,180]]
+    else:evidence['words'] += [[49.5,49.95,False],[124.25,124.95,False]]
+    value=selection(evidence)
+    assert value['cues']==[] and value['remix']==[]
+
+
+def test_regular_selection_prefers_an_available_wider_exit_to_a_shorter_fade():
+    from aidj.dj_worker import selection
+    evidence=narrow_gap_evidence()
+    evidence['words'][128][1]=128.2
+    evidence['words'][129][0]=129.8;evidence['words'][129][1]=130
+    value=selection(evidence)
+    assert value['cues'] and all(c['fade']>=.5 for c in value['cues'])
+    assert value['remix'][0]['fade']>=.5
+
+
+@pytest.mark.parametrize('change',[
+ {'cueSchema':3},{'cueSchema':4.0},{'entryVerified':False},{'entryVerified':1},
+ {'wordGuarded':False},{'wordGuarded':1},{'wordGuarded':'true'},
+])
+def test_narrow_fades_require_new_schema_and_boolean_guard_markers(change):
+    cue={'start':35,'end':125,'bpm':120,'fade':.4,'entryVerified':True,'wordGuarded':True,'mix':3.2}
+    body={'version':3,'cueSchema':4,'cues':[cue]}
+    for k,v in change.items():
+        if k=='cueSchema':body[k]=v
+        else:cue[k]=v
+    with pytest.raises(ValueError):validate(body,180)
+
+
+def test_unguarded_cues_keep_old_fade_minimum_and_guarded_regular_has_own_floor():
+    cue={'start':35,'end':125,'bpm':120,'fade':.2,'entryVerified':True,'wordGuarded':True,'mix':3.2}
+    with pytest.raises(ValueError):validate({'cueSchema':4,'cues':[cue]},180)
+    assert validate({'cueSchema':4,'remix':[{**cue,'end':49}]},180)['remix'][0]['fade']==.2
+    with pytest.raises(ValueError):validate({'cueSchema':4,'remix':[{**cue,'end':49,'fade':.14}]},180)
+    with pytest.raises(ValueError):validate({'cues':[{**cue,'fade':.4}]},180)
+
+
+def test_catalog_v4_pool_and_retained_broad_fades_are_compatible_with_older_apks(env):
+    settings,db,*_=env;aid='a'*24;digest='b'*32
+    db.execute('INSERT INTO web_assets VALUES (?,?,?,?,?,?,?,?)',(aid,'youtube:abcdefghijk','Song','Artist',180,digest,123,'/Музыка/song.mp3'))
+    oldcue={'start':0,'end':110,'bpm':120,'fade':1.2,'entryVerified':True}
+    oldclip={'start':55,'end':69,'bpm':120,'fade':.8,'entryVerified':True}
+    db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',(digest,aid,'pending',json.dumps({'version':3,'cues':[oldcue],'remix':[oldclip]}),0));db.commit()
+    fresh={'cueSchema':4,'cues':[{**oldcue,'start':20,'fade':.4,'wordGuarded':True}],
+           'remix':[{**oldclip,'start':35,'end':49,'fade':.16,'wordGuarded':True}]}
+    complete(db,digest,fresh,180)
+    complete(db,digest,fresh,180) # Duplicate completion never duplicates the alternatives.
+    track=next(t for t in catalog(db)['tracks'] if t['id']==aid)
+    assert len(track['djV4']['cues'])==2 and len(track['djV4']['remix'])==2
+    assert track['djV4']['cues'][0]['fade']==.4 and track['djV4']['remix'][0]['fade']==.16
+    assert track['djV3']['cues']==[oldcue] and track['djV3']['remix']==[oldclip]
+    assert track['djV2']['cues']==[oldcue] and track['dj']['cues']==[oldcue]
+    assert 'cueSchema' not in track['djV3']
+    # An old client finishing another broad-fade result cannot lose the v4
+    # discriminator for the narrow candidates retained from earlier output.
+    complete(db,digest,{'cues':[oldcue],'remix':[oldclip]},180)
+    saved=json.loads(db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(digest,)).fetchone()[0])
+    assert saved['cueSchema']==4 and validate(saved,180)['remix']
+
+
+def test_new_remix_pool_is_bounded_but_keeps_different_lengths_and_temporal_sections():
+    from aidj.dj_worker import selection
+    evidence={'words':[[s,s+2,True] for s in range(0,360,4)],'coverage':[[0,360]],'beats':[],
+              'bpm':120,'duration':360,'energy':[.8]*360,'analysisScope':'full'}
+    value=validate(selection(evidence),360);clips=value['remix']
+    assert 12<len(clips)<=32
+    assert len({int(8*c['start']/360) for c in clips})>=6
+    assert any(a['start']==b['start'] and abs(a['end']-b['end'])>=2 for a in clips for b in clips)
+    assert all(abs(a['start']-b['start'])>=2 or abs(a['end']-b['end'])>=2 for i,a in enumerate(clips) for b in clips[:i])
+    from aidj.dj import compatible_v3
+    assert len(compatible_v3(value)['remix'])<=6
+
+
+def test_full_new_pool_reserves_previous_broad_fades_for_old_players(env):
+    settings,db,*_=env
+    broad={'start':0,'end':14,'bpm':120,'fade':1,'entryVerified':True}
+    db.execute('INSERT INTO dj_analysis VALUES (?,?,?,?,?)',('a'*32,'b'*24,'pending',json.dumps({'version':3,'cues':[],'remix':[broad]}),0));db.commit()
+    clips=[{'start':10+i*5,'end':24+i*5,'bpm':120,'fade':.2,'entryVerified':True,'wordGuarded':True} for i in range(32)]
+    complete(db,'a'*32,{'cueSchema':4,'cues':[],'remix':clips},200)
+    saved=json.loads(db.execute('SELECT payload FROM dj_analysis WHERE md5=?',('a'*32,)).fetchone()[0])
+    assert len(saved['remix'])==32
+    from aidj.dj import compatible_v3
+    assert compatible_v3(saved)['remix']==[broad]

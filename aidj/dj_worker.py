@@ -80,7 +80,7 @@ def vocal_gaps(evidence,minimum=.9):
         # A missing transcription window must never look like an instrumental
         # gap. Both neighbours and the complete gap need observed coverage.
         observed=any(lo+.4<=end and start<=hi-.4 for lo,hi in coverage(evidence))
-        if confident and good and observed and minimum<=start-end<=5:result.append((end+.2,start-.2))
+        if confident and good and observed and minimum-1e-7<=start-end<=5:result.append((end+.2,start-.2))
         if stop>=end:end=stop;confident=good
     return result
 
@@ -93,52 +93,76 @@ def section_energy(evidence,start,end):
 
 
 def selection(evidence):
-    duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats'];gaps=vocal_gaps(evidence)
+    duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
     def cue(start,lo,end):
         result={'start':round(start,4),'end':round(end,4),'bpm':round(bpm,4),'fade':round(min(2,end-lo),4),
-                'mix':3.2,'entryVerified':True,'energy':round(section_energy(evidence,start,end),4)}
+                'mix':3.2,'entryVerified':True,'wordGuarded':True,'energy':round(section_energy(evidence,start,end),4)}
         if bpm and beats:result['grid']=round(beats[0]%(60/bpm),6)
         return result
-    exits=[(lo,hi) for lo,hi in gaps if hi-lo>=.5 and hi<=duration]
-    # Previously validated endpoints remain evidence even if a short new ASR
-    # observation has lower confidence. They are bound to this same source MD5.
-    for lo,hi in evidence.get('safeExits',[]):
-        if 0<=lo<hi<=duration and .5<=hi-lo<=8 and (lo,hi) not in exits:exits.append((lo,hi))
+    def exits(minimum,min_fade):
+        result=[(lo,hi) for lo,hi in vocal_gaps(evidence,minimum) if hi-lo>=min_fade-1e-7 and hi<=duration]
+        # Prior endpoints use the same MD5 and were already validated. Legacy
+        # evidence only stores broad fades, so a short new fade still requires
+        # the two confident words and observed coverage above.
+        for lo,hi in evidence.get('safeExits',[]):
+            if 0<=lo<hi<=duration and .5<=hi-lo<=8 and (lo,hi) not in result:result.append((lo,hi))
+        return result
+    strict_exits=exits(.9,.5)
+    regular_exits=exits(.65,.25)
+    remix_exits=exits(.55,.15)
     entry_gaps=vocal_gaps(evidence,.5)
     entry_limit=duration-35 if evidence.get('analysisScope')=='full' else min(130,duration-35)
     entries=[0]+[lo for lo,hi in entry_gaps if 12<=lo<=entry_limit]
     cues=[]
     for target in (80,110,140):
-        choices=[]
-        for start in entries:
-            for lo,end in exits:
-                length=end-start
-                if not max(35,target-28)<=length<=target+28:continue
-                # Prefer an active complete section over a quiet opening. The
-                # original start remains a safe fallback when no entry was found.
-                energy=section_energy(evidence,start,end)
-                cost=abs(length-target)/target+.6*(1-energy)+(.22 if start==0 else 0)+.12*max(0,1.2-min(2,end-lo))
-                choices.append((cost,cue(start,lo,end)))
-        if choices:
-            chosen=min(choices,key=lambda item:item[0])[1]
-            if chosen not in cues:cues.append(chosen)
-    remixes=[]
-    for start in [0]+[lo for lo,hi in entry_gaps]:
-        for lo,end in exits:
-            if 8<=end-start<=24:
-                c=cue(start,lo,end)
-                cost=abs(end-start-14)/20+.8*(1-c['energy'])+(.15 if start==0 else 0)
-                remixes.append((cost,c))
+        # Keep the wider, gentler exit when one fits. A shorter outgoing fade
+        # is a fallback, while the incoming deck still enters over ~3 seconds.
+        for available in (strict_exits,regular_exits):
+            choices=[]
+            for start in entries:
+                for lo,end in available:
+                    length=end-start
+                    if not max(35,target-28)<=length<=target+28:continue
+                    energy=section_energy(evidence,start,end)
+                    cost=abs(length-target)/target+.6*(1-energy)+(.22 if start==0 else 0)+.12*max(0,1.2-min(2,end-lo))
+                    choices.append((cost,cue(start,lo,end)))
+            if choices:
+                chosen=min(choices,key=lambda item:item[0])[1]
+                if chosen not in cues:cues.append(chosen)
+                break
+    candidates={}
+    for tier,available in enumerate((strict_exits,remix_exits)):
+        for start in [0]+[lo for lo,hi in entry_gaps]:
+            for lo,end in available:
+                if 8<=end-start<=24:
+                    c=cue(start,lo,end)
+                    cost=abs(end-start-14)/20+.8*(1-c['energy'])+(.15 if start==0 else 0)+.12*max(0,1.2-c['fade'])
+                    key=(c['start'],c['end'])
+                    rank=(tier,cost)
+                    if key not in candidates or rank<candidates[key][0]:candidates[key]=(rank,c)
+    # Keep a reusable pool across the whole song, not just three chosen cuts.
+    # Each boundary is an actual guarded word gap. At each start, different
+    # endings/lengths are useful choices for a later transition.
+    zones={}
+    for rank,c in sorted(candidates.values(),key=lambda item:item[0]):
+        time_zone=min(7,int(8*c['start']/max(1,duration)))
+        length=c['end']-c['start'];length_band=0 if length<12 else 1 if length<18 else 2
+        zones.setdefault((time_zone,length_band),[]).append((rank,c))
     remix=[]
-    for _,candidate in sorted(remixes,key=lambda item:item[0]):
-        # Return genuinely different excerpts, not twelve near-identical cuts.
-        distinct=all(abs(candidate['start']-old['start'])>=6 for old in remix)
-        if evidence.get('analysisScope')=='full':
-            distinct=distinct and all(max(0,min(candidate['end'],old['end'])-max(candidate['start'],old['start']))<=min(2,.25*min(candidate['end']-candidate['start'],old['end']-old['start'])) for old in remix)
-        if distinct:remix.append(candidate)
-        if len(remix)>=6:break
+    while zones and len(remix)<32:
+        # One candidate per time/length zone per pass prevents a loud chorus or
+        # one fixed duration from occupying every slot, while the best-ranked
+        # available section leads.
+        for zone in sorted(list(zones),key=lambda z:zones[z][0][0]):
+            pool=zones[zone]
+            while pool:
+                _,candidate=pool.pop(0)
+                if all(abs(candidate['start']-old['start'])>=2 or abs(candidate['end']-old['end'])>=2 for old in remix):
+                    remix.append(candidate);break
+            if not pool:del zones[zone]
+            if len(remix)>=32:break
     reason=('few-recognised-words' if len(evidence['words'])<8 else 'no-safe-gap') if not cues else None
-    return {'version':3,'cues':cues,'remix':remix,'method':'analysed','reason':reason}
+    return {'version':3,'cueSchema':4,'cues':cues,'remix':remix,'method':'analysed','reason':reason}
 
 
 def rhythm(y,sr):

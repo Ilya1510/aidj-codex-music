@@ -108,13 +108,14 @@ public final class MainActivity extends Activity {
     private void reply(String id,JSONObject result){main.post(()->{if(!isFinishing()&&!isDestroyed())web.evaluateJavascript("window.__aidjNativeReply && window.__aidjNativeReply("+JSONObject.quote(id)+","+result.toString()+")",null);});}
     private class Bridge {
         @JavascriptInterface public String readMeta(String key){return key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")?State.get(MainActivity.this).read("web_"+key,"null"):"null";}
-        @JavascriptInterface public void writeMeta(String key,String value){if(key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")&&value!=null&&value.length()<=2*1024*1024)State.get(MainActivity.this).write("web_"+key,value);}
+        @JavascriptInterface public void writeMeta(String key,String value){if(key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")&&value!=null&&value.length()<=("catalog".equals(key)?8:2)*1024*1024)State.get(MainActivity.this).write("web_"+key,value);}
         @JavascriptInterface public String files(){return State.get(MainActivity.this).files().toString();}
         @JavascriptInterface public String snapshot(){return state().toString();}
         @JavascriptInterface public int version(){return BuildConfig.VERSION_CODE;}
         @JavascriptInterface public void open(String value){main.post(()->openExternal(value));}
         @JavascriptInterface public void request(String id,String payload){
-            if(id==null||!id.matches("[0-9]{1,12}")||payload==null||payload.length()>1024*1024)return;
+            if(id==null||!id.matches("[0-9]{1,12}")||payload==null)return;
+            if(payload.length()>2*1024*1024){try{reply(id,new JSONObject().put("error","Слишком большая очередь. Выбери меньше песен."));}catch(Exception ignored){}return;}
             ExecutorService target=executor;
             try{if("api".equals(new JSONObject(payload).optString("type")))target=apiExecutor;}catch(Exception ignored){}
             target.execute(()->{

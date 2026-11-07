@@ -89,11 +89,12 @@ def test_full_selection_can_choose_an_active_section_later_than_old_prefix_limit
     base['energy']=[.05]*190+[1]*160+[.05]*10
     value=selection(base)
     assert value['cues'] and any(c['start']>180 for c in value['cues'])
-    assert 2<=len(value['remix'])<=6
+    assert 6<len(value['remix'])<=32
+    assert len({int(8*c['start']/360) for c in value['remix']})>=4
     for index,cue in enumerate(value['remix']):
+        assert cue['wordGuarded'] and 8<=cue['end']-cue['start']<=24
         for other in value['remix'][:index]:
-            overlap=max(0,min(cue['end'],other['end'])-max(cue['start'],other['start']))
-            assert overlap<=2
+            assert abs(cue['start']-other['start'])>=2 or abs(cue['end']-other['end'])>=2
 
 
 @pytest.mark.parametrize('duration',[0,-1,601,float('nan'),float('inf')])

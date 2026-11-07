@@ -10,20 +10,28 @@ ACTIVE_LIMIT=10
 
 def validate(value,duration):
     if not isinstance(value,dict):raise ValueError('Invalid DJ metadata')
+    schema=value.get('cueSchema',3)
+    if type(schema) is not int or schema not in (3,4):raise ValueError('Invalid cue schema')
     def clean_cues(items,minimum,maximum=600):
         if not isinstance(items,list):raise ValueError('Invalid cues')
         result=[]
-        for cue in items[:12]:
+        limit=32 if schema==4 and minimum==8 else 12
+        for cue in items[:limit]:
             if not isinstance(cue,dict):raise ValueError('Invalid cue')
             numbers=[cue.get(k) for k in ('start','end','bpm','fade')]
             if any(type(n) not in (int,float) or not math.isfinite(n) for n in numbers):raise ValueError('Invalid cue numbers')
             start,end,bpm,fade=numbers
-            if not (0<=start<end<=duration+.1 and minimum<=end-start<=maximum and (bpm==0 or 60<=bpm<=210) and .5<=fade<=8):raise ValueError('Invalid cue bounds')
+            for marker in ('entryVerified','wordGuarded'):
+                if marker in cue and type(cue[marker]) is not bool:raise ValueError('Invalid cue marker')
+            guarded=schema==4 and cue.get('entryVerified') is True and cue.get('wordGuarded') is True
+            min_fade=(.15 if minimum==8 else .25) if guarded else .5
+            if not (0<=start<end<=duration+.1 and minimum<=end-start<=maximum and (bpm==0 or 60<=bpm<=210) and min_fade<=fade<=8):raise ValueError('Invalid cue bounds')
             clean=dict(zip(('start','end','bpm','fade'),numbers))
             # Legacy entry timings were not checked against a whole vocal phrase.
             # Only the new explicit evidence marker enables nonzero automatic starts.
             clean['start']=start if cue.get('entryVerified') is True else 0
             if cue.get('entryVerified') is True:clean['entryVerified']=True
+            if guarded:clean['wordGuarded']=True
             if 'grid' in cue:
                 grid=cue['grid']
                 if bpm==0 or type(grid) not in (int,float) or not math.isfinite(grid) or not 0<=grid<60/bpm:raise ValueError('Invalid beat phase')
@@ -41,6 +49,7 @@ def validate(value,duration):
     remix=clean_cues(value.get('remix',[]),8,30)
     if any(c.get('entryVerified') is not True for c in remix):raise ValueError('Unverified remix entry')
     result={'version':VERSION,'cues':clean_cues(value.get('cues',[]),30),'remix':remix,'method':'listened' if value.get('method')=='listened' else 'analysed'}
+    if schema==4:result['cueSchema']=4
     if value.get('reason') in ('no-safe-gap','few-recognised-words','too-short','kept-previous'):result['reason']=value['reason']
     return result
 
@@ -92,8 +101,23 @@ def complete(db,md5,payload,duration,*,commit=True):
     previous=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()
     if previous and previous[0]:
         old=validate(json.loads(previous[0]),duration)
+        if old.get('cueSchema')==4:value['cueSchema']=4
         for field in ('cues','remix'):
-            if not value[field] and old[field]:value={**value,field:old[field],'reason':'kept-previous'}
+            if not value[field] and old[field]:value['reason']='kept-previous'
+            # A preferred narrow fade is visible only to APK 20+. Retain the
+            # previous broad-fade alternatives for older players as well.
+            def identity(cue):return tuple(round(cue.get(k,-1),6) for k in ('start','end','bpm','fade','grid'))
+            limit=32 if field=='remix' and value.get('cueSchema')==4 else 12
+            fresh=value[field];fresh_keys={identity(c) for c in fresh}
+            # Reserve room for broad fades previously usable by APK 19. A full
+            # new narrow-fade pool must not remove its last compatible variants.
+            protected=[c for c in old[field] if c['fade']>=.5 and identity(c) not in fresh_keys][:(6 if field=='remix' else 3)]
+            combined=[];seen=set()
+            for cue in fresh[:limit-len(protected)]+protected+old[field]:
+                key=identity(cue)
+                if key not in seen:combined.append(cue);seen.add(key)
+                if len(combined)>=limit:break
+            value[field]=combined
     db.execute("UPDATE dj_analysis SET status='complete',payload=?,updated=? WHERE md5=?",(json.dumps(value),time.time(),md5))
     if commit:db.commit()
 
@@ -106,9 +130,28 @@ def metadata(db):
     return out
 
 
+def compatible_v3(value):
+    """APK 19 supports whole-word entries but requires >=0.5s exit fades."""
+    result={**value}
+    result.pop('cueSchema',None)
+    for field in ('cues','remix'):
+        candidates=[{k:v for k,v in c.items() if k!='wordGuarded'} for c in value.get(field,[]) if c['fade']>=.5]
+        if field=='remix':
+            # APK 19 visits clips sequentially. Keep its old small, separated
+            # selection instead of handing it the new densely overlapping pool.
+            clips=[]
+            for c in candidates:
+                if all(abs(c['start']-other['start'])>=6 for other in clips):clips.append(c)
+                if len(clips)>=6:break
+            candidates=clips
+        result[field]=candidates[:12]
+    return result
+
+
 def compatible_v2(value):
     """APK 18 forces entry zero; never broaden a verified middle excerpt."""
-    return {**value,'cues':[c for c in value.get('cues',[]) if c['start']==0],'remix':[]}
+    result=compatible_v3(value)
+    return {**result,'cues':[c for c in result['cues'] if c['start']==0],'remix':[]}
 
 
 def legacy(value):

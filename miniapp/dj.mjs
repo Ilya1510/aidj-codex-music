@@ -1,9 +1,11 @@
 // Queue-only cues: originals, manual excerpts and playlist order stay independent.
 export const modeName=value=>({normal:'Обычное',smooth:'Плавное',dj:'DJ',remix:'DJ: ремикс'})[value?.mode]||'Обычное';
+const guarded=c=>c.entryVerified===true&&c.wordGuarded===true&&Number.isFinite(c.mix)&&c.mix>=1.5&&c.mix<=8;
+const minimumFade=(c,remix=false)=>guarded(c)?(remix?.15:.25):.5;
 export function djCue(track,length='normal'){
   if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return null;
   const target={short:80,normal:110,long:140}[length]||110;
-  const cues=((track.djV3||track.djV2||track.dj)?.cues||[]).filter(c=>[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=30&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=.5&&c.fade<=8);
+  const cues=((track.djV4||track.djV3||track.djV2||track.dj)?.cues||[]).filter(c=>[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=30&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=minimumFade(c)&&c.fade<=8);
   const cue=cues.sort((a,b)=>Math.abs(a.end-(a.entryVerified?a.start:0)-target)-Math.abs(b.end-(b.entryVerified?b.start:0)-target))[0];
   return cue?{...cue,start:cue.entryVerified?cue.start:0}:null;
 }
@@ -52,7 +54,7 @@ export function djProgress(ids,tracks){
 
 export function remixCues(track){
   if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return [];
-  return (track.djV3?.remix||[]).filter(c=>c&&[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=8&&c.end-c.start<=30&&(c.start===0||c.entryVerified===true)&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=.5&&c.fade<=8).slice(0,12).map(c=>({...c,rate:1}));
+  return ((track.djV4||track.djV3)?.remix||[]).filter(c=>c&&[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=8&&c.end-c.start<=30&&(c.start===0||c.entryVerified===true)&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=minimumFade(c,true)&&c.fade<=8).slice(0,32).map(c=>({...c,rate:1}));
 }
 export function planRemix(entries,tracks,{pin=null,nextPin=null}={}){
   return entries.map(entry=>{
@@ -64,5 +66,15 @@ export function planRemix(entries,tracks,{pin=null,nextPin=null}={}){
     const used=new Set(Array.isArray(entry.remixUsed)?entry.remixUsed:[]),remaining=cues.filter(c=>!used.has(Math.round(c.start*1000)+':'+Math.round(c.end*1000)));
     const cue=(entry.remixVisits||0)>=3?null:remaining[used.size?0:entry.remixVisits||0]||null;
     return {...entry,remixCues:cues,remix:!!cue,dj:entry.djFull?null:cue};
+  });
+}
+
+// Keep a full-song candidate pool small enough for the native bridge and its
+// persistent queue, including hundreds of tracks. Current .dj stays readable.
+export function packRemixEntries(entries){
+  return entries.map(entry=>{
+    const {remixCues,remixPool,...rest}=entry;
+    const pool=Array.isArray(remixCues)?remixCues.slice(0,32).map(c=>[c.start,c.end,c.bpm,c.fade,c.mix??3.2,c.grid??null,c.energy??.5,c.wordGuarded===true?1:0,c.entryVerified===true?1:0]):Array.isArray(remixPool)?remixPool.slice(0,32):[];
+    return pool.length?{...rest,remixPool:pool}:rest;
   });
 }

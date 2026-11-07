@@ -1,4 +1,4 @@
-import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,planRemix} from './dj.mjs';
+import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,planRemix,packRemixEntries} from './dj.mjs';
 import {Queue} from './player.mjs';
 import {sortablePeople} from './reorder.mjs';
 import {PlaylistChanges} from './playlist-changes.mjs';
@@ -78,7 +78,8 @@ async function syncLibrary(revision=null){
 }
 const audio=native?new NativeAudio():$('audio'), main=$('main');
 function nativeTrack(t){if(!t)return t;const {id,md5,title,artist,duration,bytes,format,rangeStart,rangeEnd}=t;return {id,md5,title,artist,duration,bytes,format,rangeStart,rangeEnd};}
-function nativeQueue(){const preferences=activePreferences();return {...queue.snapshot(),uiRevision:nativeRevision,djEnabled:djMode(preferences),djRemix:remixMode(preferences),djAudition:!!preferences.audition&&preferences.mode==='dj'&&djSupported&&native.version()>=19,transitionMs:preferences.mode==='smooth'?preferences.seconds*1000:0,tracks:Object.fromEntries([...new Set(queue.entries.map(x=>x.trackId))].map(id=>[id,nativeTrack(tracks.get(id))])),time:loadedEntry===queue.currentId?(audio.currentTime||0):0};}
+function playerSnapshot(){const snapshot=queue.snapshot();return native&&native.version()>=20?{...snapshot,entries:packRemixEntries(snapshot.entries)}:snapshot;}
+function nativeQueue(){const preferences=activePreferences();return {...playerSnapshot(),uiRevision:nativeRevision,djEnabled:djMode(preferences),djRemix:remixMode(preferences),djAudition:!!preferences.audition&&preferences.mode==='dj'&&djSupported&&native.version()>=19,transitionMs:preferences.mode==='smooth'?preferences.seconds*1000:0,tracks:Object.fromEntries([...new Set(queue.entries.map(x=>x.trackId))].map(id=>[id,nativeTrack(tracks.get(id))])),time:loadedEntry===queue.currentId?(audio.currentTime||0):0};}
 if(native)audio.queueFactory=nativeQueue;
 
 function toast(message) { clearTimeout(toastTimer); $('toast').textContent=message; $('toast').hidden=false; toastTimer=setTimeout(()=>$('toast').hidden=true,4200); }
@@ -390,14 +391,14 @@ function djWorkText(){
 async function persist() {
   try{
     requestDjPriority();
-    await storage.putMeta('player',{...queue.snapshot(),time:audio.currentTime||restoredTime||0});
-    if(native&&nativeReady){const key=JSON.stringify(queue.snapshot());if(key!==lastNativeQueue){lastNativeQueue=key;nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}}
+    await storage.putMeta('player',{...playerSnapshot(),time:audio.currentTime||restoredTime||0});
+    if(native&&nativeReady){const key=JSON.stringify(playerSnapshot());if(key!==lastNativeQueue){lastNativeQueue=key;nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}}
   }catch{}
 }
 async function loadCurrent(play) {
   const token=++generation, entry=queue.current, track=entry&&tracks.get(entry.trackId);
   if(!track){audio.pause();audio.removeAttribute('src');audio.load();loadedEntry=null;renderMini();return;}
-  if(native){nativeRevision=Math.max(Date.now(),nativeRevision+1);lastNativeQueue=JSON.stringify(queue.snapshot());await command(play?'play':'queue',{queue:nativeQueue()});loadedEntry=entry.id;renderMini();if($('full-player').open)renderFull();return;}
+  if(native){nativeRevision=Math.max(Date.now(),nativeRevision+1);lastNativeQueue=JSON.stringify(playerSnapshot());await command(play?'play':'queue',{queue:nativeQueue()});loadedEntry=entry.id;renderMini();if($('full-player').open)renderFull();return;}
   if(loadedEntry===entry.id&&audio.src){const part=segment(track);if(audio.currentTime<part.start||audio.currentTime>=part.end)audio.currentTime=part.start;applyBrowserVolume();if(play)await audio.play();return;}
   if(entry.id!==restoreEntry)restoredTime=0;
   const content=await storage.blob(track.md5);
@@ -975,7 +976,7 @@ if(native){
     const p=state.player, before=queue.currentId, beforeCue=JSON.stringify(queue.current);
     if(state.network?.connected!==undefined){nativeConnected=state.network.connected;online=nativeConnected;connection();}
     if(state.network?.known){serverUnavailable=!state.network.reachable;if(state.network.reachable&&nativeConnected!==false)online=true;connection();}
-    if(p?.queue?.entries&&p.queue.uiRevision>=nativeRevision){queue=new Queue(p.queue);nativeRevision=p.queue.uiRevision||0;lastNativeQueue=JSON.stringify(queue.snapshot());loadedEntry=queue.currentId;}
+    if(p?.queue?.entries&&p.queue.uiRevision>=nativeRevision){queue=new Queue(p.queue);nativeRevision=p.queue.uiRevision||0;lastNativeQueue=JSON.stringify(playerSnapshot());loadedEntry=queue.currentId;}
     if(p)audio.accept(p);
     if(state.downloads)downloads.accept(state.downloads);
     if(state.libraryRevision&&state.libraryRevision!==libraryRevision)syncLibrary(state.libraryRevision);

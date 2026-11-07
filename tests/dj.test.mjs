@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Queue} from '../miniapp/player.mjs';
-import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix} from '../miniapp/dj.mjs';
+import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix,packRemixEntries} from '../miniapp/dj.mjs';
 import {playbackSettings} from '../miniapp/playback.mjs';
 const song=(id,bpm)=>({id,duration:240,dj:{cues:[{start:0,end:110,bpm,fade:1.8},{start:0,end:80,bpm,fade:2}]}});
 
@@ -120,4 +120,26 @@ test('remix revisits cannot replay a used excerpt after a catalogue reorders its
   }
   const [exhausted]=planRemix([{...entry,remixVisits:3}],new Map([['a',track]]));
   assert.equal(exhausted.dj,null);
+});
+
+
+test('v4 word guards permit a short final fade while keeping a long incoming overlap',()=>{
+  const regular={start:35.52,end:125.56,bpm:110,fade:.42,mix:3.2,entryVerified:true,wordGuarded:true};
+  const short={...regular,end:50.3,fade:.16};
+  const track={duration:240,djV4:{cues:[regular],remix:[short]},djV3:{cues:[],remix:[]}};
+  assert.equal(djCue(track).fade,.42);assert.equal(remixCues(track)[0].fade,.16);
+  for(const change of [{wordGuarded:false},{entryVerified:false},{mix:.16}]){
+    assert.equal(djCue({...track,djV4:{cues:[{...regular,...change}]}}),null);
+    assert.deepEqual(remixCues({...track,djV4:{remix:[{...short,...change}]}}),[]);
+  }
+});
+
+test('all32 remix choices fit the persistent native queue for543songs',()=>{
+  const cues=Array.from({length:32},(_,k)=>({start:6*k,end:6*k+12,bpm:128,fade:.16,mix:3.2,grid:.12,energy:.8,entryVerified:true,wordGuarded:true}));
+  const track={duration:240,djV4:{remix:cues}};assert.equal(remixCues(track).length,32);
+  const entries=Array.from({length:543},(_,i)=>({id:String(i),trackId:'a'.repeat(24),remixCues:cues}));
+  const packed=packRemixEntries(entries);assert(JSON.stringify(packed).length<1.5*1024**2);
+  assert.equal(packed[0].remixPool.length,32);assert.equal(packed[0].remixCues,undefined);
+  assert.deepEqual(packed[0].remixPool[0],[0,12,128,.16,3.2,.12,.8,1,1]);
+  assert.deepEqual(packRemixEntries(packed),packed);assert.equal(entries[0].remixCues.length,32);
 });
