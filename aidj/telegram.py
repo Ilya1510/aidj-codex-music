@@ -45,7 +45,8 @@ class Telegram:
 
     def audio(self,chat_id,result,keyboard=None):
         track=result['track']
-        caption=(track['artist']+' — '+track['title'])[:1000]
+        custom=result.get('caption')
+        caption=(custom if isinstance(custom,str) else track['artist']+' — '+track['title'])[:1000]
         keyboard={'inline_keyboard':keyboard or [[{'text':'Открыть на Диске','url':result['disk_url']},
                                                   {'text':'Источник','url':track['url']}]]}
         fields={'chat_id':str(chat_id),'caption':caption,'performer':track['artist'][:64],

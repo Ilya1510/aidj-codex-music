@@ -94,6 +94,19 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS dj_priority(md5 TEXT PRIMARY KEY,rank INTEGER NOT NULL,requested REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_evidence(md5 TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_analysis(md5 TEXT PRIMARY KEY,asset_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT,updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_boundary_sources(md5 TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_boundary_points(id TEXT PRIMARY KEY,md5 TEXT NOT NULL,point_ms INTEGER NOT NULL,
+        roles TEXT NOT NULL,quality TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'unreviewed',created REAL NOT NULL,updated REAL NOT NULL,
+        UNIQUE(md5,point_ms));
+    CREATE TABLE IF NOT EXISTS dj_boundary_votes(point_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
+        value INTEGER NOT NULL CHECK(value IN (-1,1)),updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_boundary_comments(id INTEGER PRIMARY KEY,point_id TEXT NOT NULL,user_id INTEGER NOT NULL,
+        chat_id INTEGER NOT NULL,text TEXT NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_boundary_cards(id TEXT PRIMARY KEY,point_id TEXT NOT NULL,user_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,
+        state TEXT NOT NULL DEFAULT 'preparing',message_id INTEGER,telegram_file_id TEXT,comment_pending INTEGER NOT NULL DEFAULT 0,
+        created REAL NOT NULL,updated REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS dj_boundary_card_points ON dj_boundary_cards(point_id,updated);
+    CREATE UNIQUE INDEX IF NOT EXISTS dj_boundary_one_active ON dj_boundary_cards(user_id) WHERE state IN ('preparing','open');
     CREATE TABLE IF NOT EXISTS playback_ranges(track_id TEXT PRIMARY KEY,start REAL NOT NULL,end REAL NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS review_users(user_id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL,
         playlist_id INTEGER NOT NULL,mode TEXT NOT NULL DEFAULT 'menu',created REAL NOT NULL);

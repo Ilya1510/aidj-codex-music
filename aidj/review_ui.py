@@ -31,7 +31,8 @@ class ReviewUI:
             if self.db.execute('SELECT COUNT(*) FROM playlists').fetchone()[0]>1:
                 keyboard.append([{'text':'Выбрать плейлист','callback_data':'rv:choose'}])
             keyboard.extend([[{'text':'Оценки','callback_data':'rv:stats:0'},{'text':'Предложения','callback_data':'rv:proposals:0'}],
-                [{'text':'Ссылка друзьям','callback_data':'rv:share'}]])
+                [{'text':'Ссылка друзьям','callback_data':'rv:share'}],
+                [{'text':'Проверить DJ-точки','callback_data':'djrv:start'}]])
         self.bot.message(chat_id,f'Разметка · {name}\n\nСлушай песню и оцени, подходит ли она для этого плейлиста: 👍 / 👎 / «Всё равно». После оценки придёт следующая.\n\nТвоих оценок: {count}. Можно предложить свою песню — сначала послушаешь и подтвердишь запись.',keyboard)
 
     def prompt(self,user_id,chat_id):

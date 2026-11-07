@@ -83,6 +83,9 @@ def run(job_id):
         from .discover import process
         return process(settings,db,row)
     bot=Telegram(json.loads((settings.state/'telegram.json').read_text()))
+    if json.loads(row['payload']).get('client')=='dj-review':
+        from .dj_review_ui import process
+        return process(settings,db,row,bot)
     if json.loads(row['payload']).get('client')=='review':
         from .review_worker import process
         return process(settings,db,row,bot)

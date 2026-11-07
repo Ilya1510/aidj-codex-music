@@ -1,5 +1,6 @@
 """Small, content-addressed DJ metadata and an explicit owner's preparation queue."""
 import json
+from bisect import bisect_left
 import math
 import re
 import time
@@ -139,9 +140,60 @@ def _trim_queue(db,keep):
     return db.execute(f"DELETE FROM dj_analysis WHERE status='pending' AND payload IS NULL AND {outside}",keep).rowcount
 
 
+def filter_boundary_points(payload,rejected_ms):
+    """Remove owner-rejected physical boundaries from every playback route.
+
+    Entries/exits share a physical millisecond identity. Keep a 20 ms exclusion
+    window for recogniser/grid rounding; never move an accepted boundary or its
+    final-word fade budget to manufacture a replacement.
+    """
+    bad=sorted({value for value in rejected_ms if type(value) is int and value>=0})
+    if not bad:return payload
+    def rejected(seconds):
+        millis=seconds*1000
+        index=bisect_left(bad,millis-20-1e-6)
+        return index<len(bad) and bad[index]<=millis+20+1e-6
+    out={**payload};changed=False
+    for field in ('anchors','acousticAnchors'):
+        graph=payload.get(field)
+        if not graph:continue
+        clean={**graph}
+        for role in ('entries','exits'):
+            rows=graph.get(role,[]);clean[role]=[row for row in rows if not rejected(row[0])]
+            changed=changed or len(clean[role])!=len(rows)
+        out[field]=clean
+    for field in ('cues','remix'):
+        cues=payload.get(field,[])
+        out[field]=[cue for cue in cues if not rejected(cue['start']) and not rejected(cue['end'])]
+        changed=changed or len(out[field])!=len(cues)
+    if not changed:return payload
+    def usable(graph):
+        if not graph:return False
+        ends=sorted(row[0] for row in graph.get('exits',[]))
+        for start,*_ in graph.get('entries',[]):
+            at=bisect_left(ends,start+8-1e-7)
+            if at<len(ends) and ends[at]<=start+123+1e-7:return True
+        return False
+    primary=bool(out.get('cues') or out.get('remix') or usable(out.get('anchors')))
+    secondary=usable(out.get('acousticAnchors'))
+    if out.get('cueSchema')==4:
+        out['needsReview']=bool(out.get('needsReview') or not primary)
+        out['reviewRecommended']=True
+        out['fullFallback']=not primary and not secondary
+    return out
+
+
+def apply_boundary_feedback(db,md5,payload):
+    from .dj_review import rejected_points
+    return filter_boundary_points(payload,rejected_points(db,md5))
+
+
 def complete(db,md5,payload,duration,*,commit=True):
     value=validate(payload,duration)
-    previous=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()
+    # Keep the source before feedback so changing a vote can restore its exact
+    # observed points. New analysis still passes through the same rejection set.
+    previous=db.execute('SELECT payload FROM dj_boundary_sources WHERE md5=?',(md5,)).fetchone()
+    if previous is None:previous=db.execute('SELECT payload FROM dj_analysis WHERE md5=?',(md5,)).fetchone()
     if previous and previous[0]:
         old=validate(json.loads(previous[0]),duration)
         if old.get('cueSchema')==4:value['cueSchema']=4
@@ -162,6 +214,8 @@ def complete(db,md5,payload,duration,*,commit=True):
                 if key not in seen:combined.append(cue);seen.add(key)
                 if len(combined)>=limit:break
             value[field]=combined
+    db.execute('INSERT OR REPLACE INTO dj_boundary_sources(md5,payload,updated) VALUES (?,?,?)',(md5,json.dumps(value),time.time()))
+    value=apply_boundary_feedback(db,md5,value)
     db.execute("UPDATE dj_analysis SET status='complete',payload=?,updated=? WHERE md5=?",(json.dumps(value),time.time(),md5))
     if commit:db.commit()
 

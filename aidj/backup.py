@@ -20,7 +20,8 @@ ROOT='/Музыка/_aidj_state'
 MAX_BYTES=128*1024**2
 TABLES=('playlists','playlist_tracks','playlist_aliases','playlist_selections','playlist_clicks',
         'cache','web_assets','web_operations','app_deliveries','app_delivery_acks','app_keyboard_updates',
-        'library_added','audio_clips','playback_ranges','dj_analysis','dj_evidence','review_users','review_profiles','review_items',
+        'library_added','audio_clips','playback_ranges','dj_analysis','dj_evidence',
+        'dj_boundary_sources','dj_boundary_points','dj_boundary_votes','dj_boundary_comments','dj_boundary_cards','review_users','review_profiles','review_items',
         'review_cards','review_votes','review_proposals','review_saves','review_notices','review_removal_notices','review_web_ops')
 META=('owner_id','owner_chat_id','review_shared_playlist','review_suggestions_playlist','update_offset')
 
@@ -44,7 +45,7 @@ def snapshot(settings,work):
         src.execute('BEGIN')
         available={r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in TABLES:
-            if table in ('review_removal_notices','dj_analysis','dj_evidence') and table not in available:
+            if (table in ('review_removal_notices','dj_analysis','dj_evidence') or table.startswith('dj_boundary_')) and table not in available:
                 counts[table]=0;continue
             cursor=src.execute('SELECT * FROM '+table)
             columns=[col[0] for col in cursor.description]

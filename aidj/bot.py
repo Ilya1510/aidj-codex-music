@@ -20,6 +20,7 @@ from .webapp import public_url
 from .android_release import version as android_version,connection_url
 from .clip_ui import ClipUI
 from .review_ui import ReviewUI
+from .dj_review_ui import DjReviewUI
 
 HELP=('Пришли исполнителя и название песни или ссылку на один трек.\n\n'
       'Сначала ищу в Яндекс Музыке, затем — в YouTube Music. '
@@ -29,6 +30,7 @@ HELP=('Пришли исполнителя и название песни или
       'Если нашёл несколько версий — предложу выбрать.\n'
       '/app — плеер\n/playlists — мои плейлисты\n/newplaylist — создать плейлист\n/status — последние запросы.\n\n'
       '/review — слушать и оценивать песни\n/suggest — предложить песню\n'
+      '/djreview — проверить DJ-точки\n'
       '/reviewstats — сводка оценок\n/suggestions — предложенные песни\n/reviewlink — ссылка для друзей.')
 
 
@@ -69,6 +71,7 @@ def handle_update(db,config,bot,update,settings):
         message=callback.get('message') or {}
         chat=message.get('chat') or {}
         user=callback.get('from') or {}
+        if DjReviewUI(db,bot,settings).callback(update):return
         if meta_get(db,'owner_id') and ReviewUI(db,bot,settings).callback(update):return
         if chat.get('type')!='private' or not owner_matches(db,chat.get('id'),user.get('id')):
             bot.call('answerCallbackQuery',{'callback_query_id':callback['id'],'text':'Это личный бот.'})
@@ -115,6 +118,7 @@ def handle_update(db,config,bot,update,settings):
         atomic_json(settings.state/'telegram.json',config)
         bot.message(chat['id'],'Подключён к твоему аккаунту.\n\n'+HELP)
         return
+    if DjReviewUI(db,bot,settings).message(update):return
     if not owner_matches(db,chat['id'],user['id']):
         if meta_get(db,'owner_id'):
             ReviewUI(db,bot,settings).message(update,False)
@@ -135,7 +139,8 @@ def handle_update(db,config,bot,update,settings):
         else:
             bot.message(chat['id'],'Android-приложение ещё собирается.')
     elif command in ('/start','/help'):
-        bot.message(chat['id'],HELP,[[{'text':'Разметка и предложения','callback_data':'rv:menu'}]])
+        bot.message(chat['id'],HELP,[[{'text':'Разметка и предложения','callback_data':'rv:menu'}],
+                                   [{'text':'Проверить DJ-точки','callback_data':'djrv:start'}]])
     elif command=='/app':
         url=public_url(settings)
         if url:
@@ -204,6 +209,10 @@ def process_queue(settings,stop):
                 db.execute("UPDATE playlist_selections SET state='open' WHERE id=?",(payload['selection_id'],));db.commit()
             if payload.get('action') in ('playlist_add_one','playlist_device'):
                 db.execute('INSERT OR IGNORE INTO app_keyboard_updates VALUES (?)',(payload['selection_id'],));db.commit()
+            if payload.get('client')=='dj-review' and payload.get('card_id'):
+                from . import dj_review
+                try:dj_review.mark_failed(db,payload['card_id'],job['user_id'],job['chat_id'])
+                except dj_review.ReviewError:pass
             if payload.get('client')=='review' and payload.get('card_id'):
                 db.execute("UPDATE review_cards SET state='failed' WHERE id=? AND state='queued'",(payload['card_id'],));db.commit()
             try:
@@ -214,7 +223,7 @@ def process_queue(settings,stop):
 
 
 def configure_profile(db,bot):
-    if meta_get(db,'profile_version')=='6':return True
+    if meta_get(db,'profile_version')=='7':return True
     try:
         bot.call('setMyDescription',{'description':'Слушай песни из плейлиста и ставь оценки. Предлагай свои записи: сначала послушай, затем отправь на общую разметку.'})
         bot.call('setMyShortDescription',{'short_description':'Слушаем, оцениваем и предлагаем песни для общего плейлиста.'})
@@ -223,14 +232,15 @@ def configure_profile(db,bot):
         bot.call('setMyCommands',{'commands':review_commands})
         owner_chat=meta_get(db,'owner_chat_id')
         if owner_chat:bot.call('setMyCommands',{'scope':{'type':'chat','chat_id':int(owner_chat)},'commands':[
-            *review_commands,{'command':'reviewstats','description':'Сводка оценок'},
+            *review_commands,{'command':'djreview','description':'Проверить DJ-точки'},
+            {'command':'reviewstats','description':'Сводка оценок'},
             {'command':'suggestions','description':'Предложенные песни'},{'command':'reviewlink','description':'Ссылка для друзей'},
             {'command':'start','description':'Как пользоваться'},
             {'command':'app','description':'Музыка: плеер и плейлисты'},
             {'command':'android','description':'Android-приложение: установка и подключение'},
             {'command':'playlists','description':'Мои плейлисты'},{'command':'newplaylist','description':'Создать плейлист'},
             {'command':'cancel','description':'Отменить ввод названия'},{'command':'status','description':'Последние запросы'}]})
-        meta_set(db,'profile_version','6')
+        meta_set(db,'profile_version','7')
         return True
     except TelegramError:
         print('BOT_PROFILE_UPDATE_DEFERRED',flush=True)
@@ -266,6 +276,8 @@ def main():
     profile_retry=time.monotonic()+300
     stop=threading.Event()
     worker=threading.Thread(target=process_queue,args=(settings,stop),daemon=True);worker.start()
+    from .dj_review import recover_jobs
+    recover_jobs(db)
     from .review_delivery import maintenance
     delivery=threading.Thread(target=maintenance,args=(settings,stop),daemon=True);delivery.start()
     print('BOT_READY @'+me['username'],flush=True)
