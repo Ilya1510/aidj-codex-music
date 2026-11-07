@@ -33,7 +33,7 @@ from .review_web import request as review_request
 PORT=18782
 STATIC=Path(__file__).resolve().parent.parent/'miniapp'
 FILES={'/':'index.html','/index.html':'index.html','/app.css':'app.css','/app.mjs':'app.mjs',
-       '/native.mjs':'native.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/ratings.mjs':'ratings.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
+       '/native.mjs':'native.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
        '/player.mjs':'player.mjs','/storage.mjs':'storage.mjs','/sw.js':'sw.js',
        '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/telegram-web-app.js':'telegram-web-app.js'}
 STREAMS=threading.BoundedSemaphore(2)

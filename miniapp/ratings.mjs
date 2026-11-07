@@ -10,7 +10,9 @@ export function listSettings(value){
     const votes=voteKinds.filter(kind=>rule.votes.includes(kind));
     if(votes.length)people.set(rule.id,{id:rule.id,votes});
   }
-  return {people:[...people.values()],peopleMode:value?.peopleMode==='any'?'any':'all',sort:sorts.has(value?.sort)?value.sort:'default',state:states.has(value?.state)?value.state:'all',
+  const priorityOrder=Array.isArray(value?.priorityOrder)?[...new Set(value.priorityOrder.filter(id=>typeof id==='string'&&/^[a-zA-Z0-9_-]{1,40}$/.test(id)))]:null;
+  const priorityOutcomes=Array.isArray(value?.priorityOutcomes)?['like','dislike','unrated'].filter(v=>value.priorityOutcomes.includes(v)):['like'];
+  return {ratingMode:value?.ratingMode==='priority'?'priority':'people',priorityOrder,priorityOutcomes,people:[...people.values()],peopleMode:value?.peopleMode==='any'?'any':'all',sort:sorts.has(value?.sort)?value.sort:'default',state:states.has(value?.state)?value.state:'all',
     noDislikes:value?.noDislikes===true,minScore:Number.isFinite(minimum)?Math.min(10000,Math.max(-10000,Math.floor(minimum))):null};
 }
 export function rating(track,pending=null){
@@ -43,11 +45,32 @@ export function matchesPeople(track,options,review={},pending={}){
   };
   return options.peopleMode==='any'?options.people.some(matches):options.people.every(matches);
 }
+export function priorityRating(track,order,review={},pending={}){
+  for(const id of order||[]){
+    const value=personVote(track,id,review,pending);
+    // An unavailable higher-priority vote cannot safely be skipped.
+    if(value===undefined)return {value:null,personId:null,known:false};
+    if(value===1||value===-1)return {value,personId:id,known:true};
+  }
+  return {value:null,personId:null,known:true};
+}
+export function movePerson(order,from,to){
+  const result=[...order];
+  if(!Number.isInteger(from)||!Number.isInteger(to)||from<0||to<0||from>=result.length||to>=result.length)return result;
+  const [id]=result.splice(from,1);result.splice(to,0,id);return result;
+}
+function matchesRating(track,r,options,pending,review){
+  if(options.ratingMode==='priority'){
+    const decision=priorityRating(track,options.priorityOrder,review,pending);
+    return decision.known&&options.priorityOutcomes.includes(decision.value===1?'like':decision.value===-1?'dislike':'unrated');
+  }
+  return matchesPeople(track,options,review,pending)&&(!options.noDislikes||r.dislikes===0)&&
+    (options.minScore===null||r.likes-r.dislikes>=options.minScore)&&
+    (options.state==='all'||options.state==='rated'&&r.total>0||options.state==='unrated'&&r.total===0||options.state==='mine-missing'&&r.mine===null);
+}
 export function selectRated(list,settings={},pending={},review={}){
   const options=listSettings(settings);
-  return list.map((track,index)=>({track,index,r:rating(track,pending[track.md5])})).filter(({track,r})=>
-    matchesPeople(track,options,review,pending)&&(!options.noDislikes||r.dislikes===0)&&(options.minScore===null||r.likes-r.dislikes>=options.minScore)&&
-    (options.state==='all'||options.state==='rated'&&r.total>0||options.state==='unrated'&&r.total===0||options.state==='mine-missing'&&r.mine===null)
+  return list.map((track,index)=>({track,index,r:rating(track,pending[track.md5])})).filter(({track,r})=>matchesRating(track,r,options,pending,review)
   ).sort((a,b)=>{
     if(options.sort==='default')return a.index-b.index;
     const score=r=>options.sort==='score'?r.likes-r.dislikes:options.sort==='votes'?r.total:r[options.sort];

@@ -1,14 +1,16 @@
 import {Queue} from './player.mjs';
+import {sortablePeople} from './reorder.mjs';
 import * as storage from './storage.mjs';
 import {native,command,nativeFetch,NativeAudio,NativeDownloads} from './native.mjs';
 import {LocalTransfer} from './transfer.mjs';
 import {segment,moveSegment,changeBoundary,parseTime,formatTime} from './segments.mjs';
 import {playbackSettings as normalisePlayback,fadeGain} from './playback.mjs';
-import {rating as reviewRating,selectRated,listSettings,reviewOrder,voteKinds} from './ratings.mjs';
+import {rating as reviewRating,selectRated,listSettings,reviewOrder,voteKinds,priorityRating,movePerson} from './ratings.mjs';
 
 const $ = id => document.getElementById(id);
 const tg = window.Telegram?.WebApp;
 const paths = {
+  grip:'<path d="M8 5h1m6 0h1M8 12h1m6 0h1M8 19h1m6 0h1"/>',
   play:'<path class="filled" d="M8 4.8v14.4L19 12Z"/>', pause:'<path class="filled" d="M6 5h4v14H6zm8 0h4v14h-4z"/>',
   next:'<path class="filled" d="M5 5v14l11-7Z"/><path d="M19 5v14"/>', previous:'<path class="filled" d="M19 5v14L8 12Z"/><path d="M5 5v14"/>',
   shuffle:'<path d="m17 3 4 4-4 4M3 17l4-5 4-5h10M3 7h4l4 5 4 5h6m-4-4 4 4-4 4"/>',
@@ -435,22 +437,65 @@ const voteFilterSymbols={like:'👍',dislike:'👎',neutral:'😐',unrated:'○'
 function voterLabel(id){return data.review?.voters?.find(p=>p.id===id)?.label||'Участник недоступен';}
 function listTools(ids){
   const value=optionsForView(),names={default:'По порядку плейлиста',likes:'Больше лайков',dislikes:'Больше дизлайков',score:'По балансу оценок',votes:'Больше оценок'};
-  const filters=value.noDislikes||value.state!=='all'||value.minScore!==null||value.people.length>0;
+  const filters=value.ratingMode==='priority'||value.noDislikes||value.state!=='all'||value.minScore!==null||value.people.length>0;
   const people=el('div',{class:'active-people-filters'});
-  for(const rule of value.people)people.append(button(voterLabel(rule.id)+' · '+rule.votes.map(v=>voteFilterSymbols[v]).join(' / '),'close',async()=>{
+  if(value.ratingMode==='priority')people.append(button('По важности · '+value.priorityOutcomes.map(v=>voteFilterSymbols[v]).join(' / '),'settings',()=>listOptionsSheet(ids),'person-filter-chip'));
+  for(const rule of value.ratingMode==='priority'?[]:value.people)people.append(button(voterLabel(rule.id)+' · '+rule.votes.map(v=>voteFilterSymbols[v]).join(' / '),'close',async()=>{
     const next=optionsForView();next.people=next.people.filter(p=>p.id!==rule.id);listOptions[optionsKey()]=next;shown=70;render();await storage.putMeta('review-list-options',listOptions);
   },'person-filter-chip',{'aria-label':'Убрать условие: '+voterLabel(rule.id)}));
   return el('div',{class:'list-tools'},button(names[value.sort]+(filters?' · фильтры включены':''),'settings',()=>listOptionsSheet(ids),'button list-options-button'),
-    value.people.length>1?el('p',{class:'people-filter-caption'},value.peopleMode==='all'?'Совпадают все условия по людям':'Достаточно одного условия по людям'):null,
+    value.ratingMode!=='priority'&&value.people.length>1?el('p',{class:'people-filter-caption'},value.peopleMode==='all'?'Совпадают все условия по людям':'Достаточно одного условия по людям'):null,
     people,el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids)));
+}
+function priorityEditor(value,roster,save){
+  const outcomes=el('div',{class:'priority-outcomes',role:'group','aria-label':'Какие итоговые оценки оставить'});
+  const list=el('div',{class:'priority-list','aria-label':'Люди по важности'});
+  const status=el('p',{class:'visually-hidden',role:'status','aria-live':'polite'});
+  const search=el('input',{type:'search',placeholder:'Имя или @ник',autocapitalize:'none',autocomplete:'off','aria-label':'Добавить участника по важности'});
+  const additions=el('div',{class:'priority-additions'});
+  const person=id=>roster.find(p=>p.id===id)||{id,label:'Участник недоступен'};
+  for(const [kind,label] of [['like','Лайк'],['dislike','Дизлайк'],['unrated','Без итоговой']])outcomes.append(el('button',{type:'button',class:'voter-choice '+kind,'data-priority-outcome':kind,'aria-label':'Итог: '+label,onclick:()=>{
+    value.priorityOutcomes=value.priorityOutcomes.includes(kind)?value.priorityOutcomes.filter(v=>v!==kind):[...value.priorityOutcomes,kind];save().catch(showError);
+  }},el('span',{'aria-hidden':'true'},voteFilterSymbols[kind]),el('small',{},label)));
+  const paintAdditions=()=>{
+    const wanted=normalize(search.value).trim(),available=roster.filter(p=>!p.missing&&!(value.priorityOrder||[]).includes(p.id)&&(!wanted||normalize(p.label+' '+(p.username||'')).includes(wanted)));
+    additions.replaceChildren(...available.map(p=>button(p.label+(p.username?' · @'+p.username:''),'plus',()=>{value.priorityOrder=[...(value.priorityOrder||[]),p.id];save().catch(showError);},'button full priority-add-person',{'aria-label':'Добавить по важности: '+p.label})));
+    if(!available.length)additions.append(el('p',{class:'subtitle'},wanted?'Никого не нашлось':'Все участники уже в списке'));
+  };
+  search.addEventListener('input',paintAdditions);
+  const update=()=>{
+    for(const node of outcomes.children)node.setAttribute('aria-pressed',String(value.priorityOutcomes.includes(node.dataset.priorityOutcome)));
+    list.replaceChildren(...(value.priorityOrder||[]).map((id,index)=>{
+      const p=person(id);
+      return el('div',{class:'priority-row','data-priority-id':id},
+        button('Переместить: '+p.label,'grip',()=>{},'icon-button priority-handle',{'aria-describedby':'priority-drag-help'}),
+        el('span',{class:'priority-rank','aria-label':'Приоритет '+(index+1)},index+1),
+        el('span',{class:'voter-filter-name'},el('strong',{},p.label),p.username?el('small',{},'@'+p.username):null),
+        button('Убрать из приоритета: '+p.label,'close',()=>{value.priorityOrder=value.priorityOrder.filter(v=>v!==id);save().catch(showError);},'icon-button small'));
+    }));
+    if(!list.children.length)list.append(el('p',{class:'subtitle'},'Добавь людей ниже, чтобы определять итоговую оценку.'));
+    paintAdditions();
+  };
+  const section=el('section',{class:'priority-editor'},el('h3',{},'Оставить по итоговой оценке'),outcomes,
+    el('p',{class:'subtitle'},'Первая оценка 👍 или 👎 сверху определяет итог. «Всё равно» и отсутствие оценки пропускаются.'),
+    el('h3',{},'Порядок важности'),el('p',{id:'priority-drag-help',class:'subtitle'},'Сверху — самый важный. Перетаскивай за точки. С клавиатуры — стрелками вверх и вниз.'),list,
+    el('details',{class:'priority-add'},el('summary',{},'Добавить человека'),el('label',{class:'voter-search'},icon('search'),search),additions),status);
+  sortablePeople(list,{scrollElement:$('sheet'),onMove:(from,to)=>{value.priorityOrder=movePerson(value.priorityOrder||[],from,to);save().catch(showError);},onAnnounce:(id,to)=>{status.textContent=person(id).label+': позиция '+(to+1);}});
+  return {section,update};
 }
 function listOptionsSheet(ids){
   const key=optionsKey(),value=optionsForView();
+  let priority=null,normalSection=null,general=null;
+  const filterModes=el('div',{class:'people-filter-modes rating-mode-toggle',role:'group','aria-label':'Режим фильтрации'});
   const counter=el('p',{class:'filter-count',role:'status','aria-live':'polite'},filterCount(ids));
   const roster=[...(data.review?.voters||[])];
   for(const rule of value.people)if(!roster.some(p=>p.id===rule.id))roster.push({id:rule.id,label:'Участник недоступен',missing:true});
   const peopleList=el('div',{class:'voter-filter-list'}),modes=el('div',{class:'people-filter-modes',role:'group','aria-label':'Как сочетать условия по людям'});
   const updateControls=()=>{
+    for(const node of filterModes.children)node.setAttribute('aria-pressed',String(node.dataset.ratingMode===value.ratingMode));
+    if(normalSection)normalSection.hidden=value.ratingMode==='priority';
+    if(general)general.hidden=value.ratingMode==='priority';
+    if(priority){priority.section.hidden=value.ratingMode!=='priority';priority.update();}
     for(const node of modes.querySelectorAll('button'))node.setAttribute('aria-pressed',String(node.dataset.mode===value.peopleMode));
     for(const card of peopleList.querySelectorAll('.voter-filter-card')){
       const votes=value.people.find(p=>p.id===card.dataset.voterId)?.votes||[];
@@ -461,6 +506,9 @@ function listOptionsSheet(ids){
   };
   const save=async()=>{listOptions[key]=listSettings(value);counter.textContent=filterCount(ids);updateControls();shown=70;render();await storage.putMeta('review-list-options',listOptions);};
   for(const [id,label] of [['all','Все условия'],['any','Любое условие']])modes.append(el('button',{type:'button','data-mode':id,'aria-pressed':String(value.peopleMode===id),onclick:()=>{value.peopleMode=id;save().catch(showError);}},label));
+  for(const [id,label] of [['people','По условиям'],['priority','По важности']])filterModes.append(el('button',{type:'button','data-rating-mode':id,onclick:()=>{
+    value.ratingMode=id;if(id==='priority'&&value.priorityOrder===null)value.priorityOrder=roster.filter(p=>!p.missing).map(p=>p.id);save().catch(showError);
+  }},label));
   const search=el('input',{type:'search',placeholder:'Имя или @ник',autocapitalize:'none',autocorrect:'off',autocomplete:'off',spellcheck:'false','aria-label':'Найти участника'});
   const paintPeople=()=>{
     const wanted=normalize(search.value).trim();peopleList.replaceChildren();
@@ -487,20 +535,28 @@ function listOptionsSheet(ids){
   state.addEventListener('change',()=>{value.state=state.value;save().catch(showError);});
   const no=el('input',{type:'checkbox',checked:value.noDislikes,'aria-label':'Без дизлайков',onchange:e=>{value.noDislikes=e.target.checked;save().catch(showError);}});
   const minimum=el('input',{type:'number',min:-10000,max:10000,step:1,value:value.minScore??'',placeholder:'Без ограничения','aria-label':'Минимум: лайки минус дизлайки',onchange:e=>{value.minScore=e.target.value===''?null:Number(e.target.value);save().catch(showError);}});
-  showSheet('Фильтры песен',el('label',{class:'review-field'},'Сортировать',sorting),
-    el('section',{class:'people-filters'},el('div',{class:'people-filters-title'},el('h3',{},'Кто как оценил'),button('Сбросить людей',null,()=>{value.people=[];save().catch(showError);},'text-button')),modes,
+  normalSection=el('section',{class:'people-filters'},el('div',{class:'people-filters-title'},el('h3',{},'Кто как оценил'),button('Сбросить людей',null,()=>{value.people=[];save().catch(showError);},'text-button')),modes,
       el('p',{class:'subtitle'},'У одного человека можно выбрать несколько оценок.'),
       !online?el('p',{class:'subtitle'},'Без сети — по последним сохранённым оценкам.'):null,
       !data.review?.votes?el('p',{class:'subtitle'},'Подключись к сети, чтобы загрузить оценки участников.'):null,
-      el('label',{class:'voter-search'},icon('search'),search),peopleList),
-    el('details',{class:'general-filters',open:value.noDislikes||value.state!=='all'||value.minScore!==null},el('summary',{},'Общие фильтры'),
-      el('label',{class:'review-field'},'Оценки',state),el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум: лайки − дизлайки',minimum)),
+      el('label',{class:'voter-search'},icon('search'),search),peopleList);
+  general=el('details',{class:'general-filters',open:value.noDislikes||value.state!=='all'||value.minScore!==null},el('summary',{},'Общие фильтры'),
+      el('label',{class:'review-field'},'Оценки',state),el('label',{class:'review-check'},no,'Без дизлайков'),el('label',{class:'review-field'},'Минимум: лайки − дизлайки',minimum));
+  priority=priorityEditor(value,roster,save);
+  showSheet('Фильтры песен',filterModes,el('label',{class:'review-field'},'Сортировать',sorting),normalSection,priority.section,general,
     button('Сбросить фильтры и сортировку',null,async()=>{listOptions[key]=listSettings(null);await storage.putMeta('review-list-options',listOptions);render();listOptionsSheet(ids);},'button full'),
     el('div',{class:'filter-result'},counter,el('small',{},'Фильтры сохраняются сразу'),button('К песням',null,()=>$('sheet').close(),'button primary full')));
   paintPeople();
 }
 
+function priorityBadge(track){
+  const options=optionsForView();if(options.ratingMode!=='priority')return null;
+  const decision=priorityRating(track,options.priorityOrder,data.review||{},voteOverrides);
+  const text=!decision.known?'Нет данных об оценках':decision.value===null?'○ Без итоговой оценки':(decision.value===1?'👍':'👎')+' · '+voterLabel(decision.personId);
+  return el('span',{class:'rating-badges priority-decision','aria-label':'Итог по важности: '+text},text);
+}
 function ratingBadges(track){
+  if(optionsForView().ratingMode==='priority')return priorityBadge(track);
   const r=ratingOf(track);
   return r.total||r.proposals?el('span',{class:'rating-badges','aria-label':`Оценки: ${r.likes} лайков, ${r.dislikes} дизлайков, ${r.neutral} нейтральных`},`👍 ${r.likes}   👎 ${r.dislikes}   😐 ${r.neutral}`):null;
 }
@@ -551,7 +607,7 @@ function paintReviewDetails(track){
     const name=p.username?el('button',{class:'text-button',onclick:()=>openLink('https://t.me/'+p.username)},label):el('span',{},label);
     group.append(el('div',{class:'review-person'},name,el('span',{},(p.vote===1?'👍':p.vote===-1?'👎':p.vote===0?'😐':'Без оценки')+(p.proposed?' · предложил(а)':''))));
   }
-  const children=[el('p',{},track.artist),el('p',{class:'subtitle'},'Для плейлиста «'+(data.review?.playlistName||'Volleyball')+'»'),ratingControls(track,false),
+  const children=[el('p',{},track.artist),priorityBadge(track),el('p',{class:'subtitle'},'Для плейлиста «'+(data.review?.playlistName||'Volleyball')+'»'),ratingControls(track,false),
     el('p',{class:'subtitle'},votesCount(r.total)+(!online?' · сохранённые данные':'')),group];
   if(!people.length)children.push(el('p',{},detail?'Эту песню пока никто не оценил.':'Загружаю участников…'));
   if(detail?.similar?.some(x=>!x.exact))children.push(el('p',{class:'subtitle'},'Похожие в общем плейлисте: '+detail.similar.filter(x=>!x.exact).map(x=>x.label).join('; ')));

@@ -45,7 +45,7 @@ def main():
             payload=request.post_data_json;edits.append(payload);p=next(p for p in data['playlists'] if p['id']==payload['playlistId'])
             assert payload['action']=='add';p['trackIds'].append(payload['trackId']);p['revision']='changed';body=data
         elif path=='library-version':body={'revision':'qa-'+str(len(votes))}
-        elif path=='android-version':body={'versionCode':12,'versionName':'0.9.0','url':'https://example.invalid/AI-DJ.apk'}
+        elif path=='android-version':body={'versionCode':13,'versionName':'0.10.0','url':'https://example.invalid/AI-DJ.apk'}
         else:body={'ok':True}
         route.fulfill(status=200,content_type='application/json',body=json.dumps(body,ensure_ascii=False))
     script=r'''(()=>{
@@ -121,6 +121,83 @@ def main():
                 page.get_by_role('button',name='Сбросить фильтры и сортировку',exact=True).click()
                 assert page.get_by_role('button',name='Саша: Дизлайк',exact=True).get_attribute('aria-pressed')=='false'
                 page.get_by_role('button',name='К песням',exact=True).click()
+                stage='priority-default';page.get_by_role('button',name='По порядку плейлиста',exact=True).click()
+                page.get_by_role('button',name='По важности',exact=True).click()
+                assert page.get_by_role('button',name='Итог: Лайк',exact=True).get_attribute('aria-pressed')=='true'
+                assert page.locator('main .song-row strong').all_text_contents()==['Первый трек','Второй трек']
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['owner','masha','sasha']
+                cdp=context.new_cdp_session(page)
+                def touch_drag(person,target,cancel=False):
+                    sheet.locator('.priority-list').evaluate('(e)=>e.scrollIntoView({block:"center"})')
+                    source=page.get_by_role('button',name='Переместить: '+person,exact=True).bounding_box()
+                    destination=page.get_by_role('button',name='Переместить: '+target,exact=True).bounding_box()
+                    x=source['x']+source['width']/2;y=source['y']+source['height']/2;end=destination['y']+destination['height']/2
+                    cdp.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[{'x':x,'y':y}]})
+                    for step in range(1,9):
+                        cdp.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[{'x':x,'y':y+(end-y)*step/8}]});page.wait_for_timeout(20)
+                    cdp.send('Input.dispatchTouchEvent',{'type':'touchCancel' if cancel else 'touchEnd','touchPoints':[]})
+                stage='priority-touch';touch_drag('Саша','Маша')
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['owner','sasha','masha']
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 1 из 3'
+                assert page.locator('main .song-row strong').all_text_contents()==['Первый трек']
+                assert page.locator('main .priority-decision').inner_text()=='👍 · Маша'
+                stage='priority-cancel';touch_drag('Маша','Саша',cancel=True)
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['owner','sasha','masha']
+                stage='priority-outcomes';page.get_by_role('button',name='Итог: Дизлайк',exact=True).click();page.get_by_role('button',name='Итог: Лайк',exact=True).click()
+                assert page.locator('main .song-row strong').all_text_contents()==['Второй трек']
+                assert page.locator('main .priority-decision').inner_text()=='👎 · Саша'
+                page.get_by_role('button',name='Итог: Без итоговой',exact=True).click();page.get_by_role('button',name='Итог: Дизлайк',exact=True).click()
+                assert page.locator('main .song-row strong').all_text_contents()==['Без оценок']
+                page.get_by_role('button',name='Итог: Без итоговой',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 0 из 3'
+                page.get_by_role('button',name='Итог: Лайк',exact=True).click()
+                stage='priority-modes';page.get_by_role('button',name='По условиям',exact=True).click()
+                page.get_by_role('button',name='Маша: Дизлайк',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 0 из 3'
+                page.get_by_role('button',name='По важности',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 1 из 3'
+                assert not page.get_by_text('Общие фильтры',exact=True).is_visible()
+                stage='priority-keyboard';page.get_by_role('button',name='Переместить: Маша',exact=True).press('Home')
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['masha','owner','sasha']
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 2 из 3'
+                page.get_by_role('button',name='Убрать из приоритета: Маша',exact=True).click()
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 0 из 3'
+                page.get_by_text('Добавить человека',exact=True).click();page.get_by_label('Добавить участника по важности').fill('маша')
+                page.get_by_role('button',name='Добавить по важности: Маша',exact=True).click()
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['owner','sasha','masha']
+                page.get_by_role('button',name='К песням',exact=True).click()
+                stage='priority-persistence';page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                assert page.locator('main .song-row strong').all_text_contents()==['Первый трек']
+                context.set_offline(True);page.wait_for_function('()=>!navigator.onLine')
+                page.get_by_role('button',name='По порядку плейлиста · фильтры включены',exact=True).click()
+                assert sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')==['owner','sasha','masha']
+                page.get_by_role('button',name='Переместить: Маша',exact=True).press('Home')
+                assert sheet.locator('.filter-count').inner_text()=='После фильтров: 2 из 3'
+                context.set_offline(False);page.wait_for_function('()=>navigator.onLine')
+                sheet.locator('.priority-list').evaluate('(e)=>e.scrollIntoView({block:"center"})');page.screenshot(path=str(output/'priority-filters.png'))
+                page.get_by_role('button',name='К песням',exact=True).click()
+                page.get_by_role('button',name='Слушать',exact=True).click();page.locator('#mini-play[aria-label="Пауза"]').wait_for()
+                assert page.evaluate('window.__state.player.queue.entries.map(e=>e.trackId)')==[songs[0]['id'],songs[1]['id']]
+                # A long priority list must scroll while a real touch remains held near its edge.
+                stage='priority-autoscroll'
+                original_roster=copy.deepcopy(data['review']['voters'])
+                for n in range(10):data['review']['voters'].append({'id':'extra'+str(n),'label':'Друг '+str(n),'isMine':False})
+                page.evaluate("(ids)=>{const k='qa-meta-review-list-options',v=JSON.parse(localStorage.getItem(k));v['playlist:1'].priorityOrder=ids;localStorage.setItem(k,JSON.stringify(v));}",[p['id'] for p in data['review']['voters']])
+                page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
+                page.get_by_role('button',name='По порядку плейлиста · фильтры включены',exact=True).click()
+                last=page.get_by_role('button',name='Переместить: Друг 9',exact=True)
+                last.evaluate('(e)=>e.scrollIntoView({block:"center"})');box=last.bounding_box();bounds=sheet.bounding_box();before=sheet.evaluate('(e)=>e.scrollTop')
+                x=box['x']+box['width']/2;y=box['y']+box['height']/2;end=bounds['y']+55
+                cdp.send('Input.dispatchTouchEvent',{'type':'touchStart','touchPoints':[{'x':x,'y':y}]})
+                for step in range(1,9):cdp.send('Input.dispatchTouchEvent',{'type':'touchMove','touchPoints':[{'x':x,'y':y+(end-y)*step/8}]});page.wait_for_timeout(20)
+                page.wait_for_timeout(600)
+                assert sheet.evaluate('(e)=>e.scrollTop')<before-50
+                cdp.send('Input.dispatchTouchEvent',{'type':'touchEnd','touchPoints':[]})
+                order=sheet.locator('.priority-row').evaluate_all('(rows)=>rows.map(r=>r.dataset.priorityId)')
+                assert order.index('extra9')<12 and len(set(order))==13
+                page.get_by_role('button',name='Сбросить фильтры и сортировку',exact=True).click();page.get_by_role('button',name='К песням',exact=True).click()
+                data['review']['voters']=original_roster
+                page.reload(wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball QA').click()
                 stage='sort';page.get_by_role('button',name='По порядку плейлиста',exact=True).click();page.get_by_label('Сортировка песен').select_option('likes')
                 page.locator('#sheet').get_by_role('button',name='Закрыть',exact=True).click()
                 assert page.locator('main .song-row strong').all_text_contents()==['Второй трек','Первый трек','Без оценок']
@@ -184,8 +261,10 @@ def main():
                 assert page.locator('main .filter-count').inner_text()=='После фильтров: 80 из 84'
                 assert not errors,errors
                 browser.close()
-            print('REVIEW_UI_PASSED people_and_or multi_vote people_search people_offline people_persistence playlist_isolation sort net_score live_counts pagination_counts full_player_no_null filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
+            print('REVIEW_UI_PASSED priority_touch priority_cancel priority_autoscroll priority_outcomes priority_modes priority_keyboard priority_offline priority_persistence people_and_or multi_vote people_search people_offline people_persistence playlist_isolation sort net_score live_counts pagination_counts full_player_no_null filters filtered_play names offline_vote sync persistence proposal_accept archive no_auto_download',flush=True)
         except Exception as exc:
+            try:page.screenshot(path=str(output/'review-failure.png'))
+            except Exception:pass
             print('REVIEW_UI_FAILED',stage,type(exc).__name__,str(exc)[:1600],flush=True);raise SystemExit(1)
         finally:server.shutdown();server.server_close();thread.join()
 

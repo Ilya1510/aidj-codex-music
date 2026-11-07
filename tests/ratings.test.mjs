@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {rating,selectRated,listSettings,reviewOrder,personVote} from '../miniapp/ratings.mjs';
+import {rating,selectRated,listSettings,reviewOrder,personVote,priorityRating,movePerson} from '../miniapp/ratings.mjs';
 const songs=[
  {id:'a',md5:'a',rating:{likes:2,dislikes:0,neutral:1,total:3,mine:0}},
  {id:'b',md5:'b',rating:{likes:5,dislikes:3,neutral:0,total:8,mine:null}},
@@ -26,7 +26,7 @@ test('offline vote replacement and reset do not count one person twice',()=>{
  assert.equal(selectRated(songs,{state:'mine-missing'},{c:{value:1}}).some(t=>t.id==='c'),false);
 });
 test('saved list options tolerate older or malformed state',()=>{
- assert.deepEqual(listSettings({sort:'oops',state:'oops',minLikes:-3,noDislikes:'true'}),{people:[],peopleMode:'all',sort:'default',state:'all',noDislikes:false,minScore:null});
+ assert.deepEqual(listSettings({sort:'oops',state:'oops',minLikes:-3,noDislikes:'true'}),{ratingMode:'people',priorityOrder:null,priorityOutcomes:['like'],people:[],peopleMode:'all',sort:'default',state:'all',noDislikes:false,minScore:null});
 });
 
 test('net-score threshold supports zero, negatives, clearing and pending votes',()=>{
@@ -80,4 +80,45 @@ test('people rules survive serialization, reject malformed fields and do not cha
  assert.deepEqual(listSettings(JSON.parse(JSON.stringify(result))),result);
  assert.deepEqual(ids(result.people,{peopleMode:result.peopleMode}),['a','b']);
  assert.deepEqual(songs.map(t=>t.id),['a','b','c','d']);
+});
+
+test('priority takes the first decisive vote and skips neutral and absent votes',()=>{
+ assert.deepEqual(priorityRating(songs[0],['masha','sasha'],review),{value:1,personId:'masha',known:true});
+ assert.deepEqual(priorityRating(songs[0],['sasha','masha'],review),{value:-1,personId:'sasha',known:true});
+ assert.deepEqual(priorityRating(songs[1],['sasha','masha'],review),{value:1,personId:'masha',known:true});
+ assert.deepEqual(priorityRating(songs[2],['masha','sasha'],review),{value:1,personId:'sasha',known:true});
+ assert.deepEqual(priorityRating(songs[2],['self','masha'],review),{value:null,personId:null,known:true});
+ assert.deepEqual(priorityRating(songs[0],[],review),{value:null,personId:null,known:true});
+});
+test('priority defaults to liked songs and replaces standard filters without erasing them',()=>{
+ const settings={ratingMode:'priority',priorityOrder:['masha','sasha'],people:[rule('masha','unrated')],noDislikes:true,minScore:100,state:'unrated'};
+ assert.deepEqual(selectRated(songs,settings,{},review).map(t=>t.id),['a','b','c']);
+ assert.deepEqual(selectRated(songs,{...settings,priorityOrder:['sasha','masha']},{},review).map(t=>t.id),['b','c']);
+ assert.deepEqual(selectRated(songs,{...settings,priorityOutcomes:['dislike']},{},review).map(t=>t.id),['d']);
+ assert.deepEqual(selectRated(songs,{...settings,priorityOrder:['self'],priorityOutcomes:['unrated']},{},review).map(t=>t.id),['a','b','c']);
+ assert.deepEqual(selectRated(songs,{...settings,priorityOutcomes:[]},{},review),[]);
+ assert.equal(listSettings(settings).minScore,100);
+ assert.deepEqual(selectRated(songs,{...settings,ratingMode:'people'},{},review),[]);
+});
+test('priority uses local pending corrections and never treats unavailable votes as neutral',()=>{
+ assert.equal(priorityRating(songs[0],['self','sasha'],review).value,-1);
+ assert.equal(priorityRating(songs[0],['self','sasha'],review,{a:{value:1}}).value,1);
+ assert.equal(priorityRating(songs[0],['self','sasha'],review,{a:{value:null}}).value,-1);
+ assert.deepEqual(priorityRating(songs[0],['unknown','masha'],review),{value:null,personId:null,known:false});
+ assert.deepEqual(priorityRating(songs[0],['masha','sasha'],{voters:review.voters}),{value:null,personId:null,known:false});
+ assert.deepEqual(selectRated(songs,{ratingMode:'priority',priorityOrder:['unknown'],priorityOutcomes:['unrated']},{},review),[]);
+});
+test('priority order survives reopening, removes duplicate IDs and leaves source order intact',()=>{
+ const original=['self','masha','sasha'];
+ assert.deepEqual(movePerson(original,2,0),['sasha','self','masha']);
+ assert.deepEqual(movePerson(original,0,2),['masha','sasha','self']);
+ assert.deepEqual(movePerson(original,0,0),original);
+ assert.deepEqual(movePerson(original,-1,1),original);
+ assert.deepEqual(movePerson(original,1,3),original);
+ assert.deepEqual(original,['self','masha','sasha']);
+ const value=listSettings({ratingMode:'priority',priorityOrder:['masha','masha',null,'bad id','self'],priorityOutcomes:['dislike','junk']});
+ assert.deepEqual(value.priorityOrder,['masha','self']);
+ assert.deepEqual(value.priorityOutcomes,['dislike']);
+ assert.deepEqual(listSettings(JSON.parse(JSON.stringify(value))),value);
+ assert.deepEqual(listSettings({ratingMode:'priority',priorityOrder:[]}).priorityOrder,[]);
 });
