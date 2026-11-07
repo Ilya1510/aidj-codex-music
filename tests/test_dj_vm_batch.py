@@ -117,7 +117,8 @@ def test_explicit_refine_stamps_rich_cache_and_requeues_deficient_completed_sour
     monkeypatch.setattr('aidj.dj_worker.needs_rescue',lambda value:value['bpm']==120,raising=False)
     refined=refine_completed(db,run)
     assert refined['queuedForRefinement']==1 and refined['stampedFromCache']==1
-    poor=claim(db,run)['job'];assert poor is not None and poor['cached']['bpm']==120
+    assert dispatch(db,{'op':'claim','runId':run})['job'] is None
+    poor=dispatch(db,{'op':'claim','runId':run,'boundaryPass':1})['job'];assert poor is not None and poor['cached']['bpm']==120
     value={**evidence(),'boundaryPass':1}
     dispatch(db,{'op':'finish','runId':run,'md5':poor['md5'],'token':poor['token'],'result':{'evidence':value}})
     assert refine_completed(db,run)['queuedForRefinement']==0

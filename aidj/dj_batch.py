@@ -102,7 +102,7 @@ def owned(db,body):
     return row
 
 
-def claim(db,run):
+def claim(db,run,allow_refinement=True):
     ident(run,24);now=time.time();db.execute('BEGIN IMMEDIATE')
     db.execute("UPDATE dj_batch_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,token=NULL,lease=0 WHERE run_id=? AND state='running' AND lease<=?",(run,now))
     db.execute("""UPDATE dj_batch_jobs SET state='done' WHERE run_id=? AND state='pending' AND EXISTS
@@ -112,7 +112,8 @@ def claim(db,run):
     row=db.execute("""SELECT b.* FROM dj_batch_jobs b LEFT JOIN dj_analysis a ON a.md5=b.md5
         WHERE b.run_id=? AND b.state='pending' AND (a.status IS NULL OR a.status!='working')
         AND NOT EXISTS (SELECT 1 FROM dj_batch_jobs other WHERE other.md5=b.md5 AND other.state='running' AND other.lease>?)
-        ORDER BY b.updated,b.md5 LIMIT 1""",(run,now)).fetchone()
+        AND (? OR COALESCE(b.error,'')!='REFINE_BOUNDARIES')
+        ORDER BY b.updated,b.md5 LIMIT 1""",(run,now,allow_refinement)).fetchone()
     if row is None:db.commit();return {'job':None,'stats':stats(db,run)}
     token=secrets.token_hex(16)
     db.execute("UPDATE dj_batch_jobs SET state='running',token=?,lease=?,attempts=attempts+1,updated=? WHERE run_id=? AND md5=?",(token,now+LEASE_SECONDS,now,run,row['md5']))
@@ -179,7 +180,7 @@ def dispatch(db,body):
     if op=='start':return start(db,body.get('playlist'))
     if op in ('claim','status'):
         run=ident(body.get('runId'),24)
-        return claim(db,run) if op=='claim' else {'stats':stats(db,run)}
+        return claim(db,run,body.get('boundaryPass')==1) if op=='claim' else {'stats':stats(db,run)}
     db.execute('BEGIN IMMEDIATE')
     if op in ('finish','release','fail'):
         run=ident(body.get('runId'),24);md5=ident(body.get('md5'),32);token=ident(body.get('token'),32)

@@ -301,7 +301,7 @@ class ClaimBudget:
     def claim(self,transport,run):
         with self.lock:
             if self.remaining==0:return None
-            reply=transport.rpc({'op':'claim','runId':run})
+            reply=transport.rpc({'op':'claim','runId':run,'boundaryPass':1})
             if reply.get('job') is not None and self.remaining is not None:self.remaining-=1
             return reply
 
