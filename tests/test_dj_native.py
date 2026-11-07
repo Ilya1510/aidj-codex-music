@@ -211,3 +211,22 @@ public class AnchorProbe {
  }
 }'''}
     compile_probe(tmp_path,fixtures,['RemixPlan.java','DjPlan.java','PlaybackRange.java'],'AnchorProbe')
+
+
+def test_native_regular_graph_fallback_cues_preserve_word_and_acoustic_entries(tmp_path):
+    fixtures={'com/aidj/music/RegularGraphProbe.java':r'''package com.aidj.music;
+import org.json.*;
+public class RegularGraphProbe {
+ static void check(boolean value,String message){if(!value)throw new AssertionError(message);}
+ public static void main(String[] ignored){
+ JSONObject track=new JSONObject().put("duration",330);
+ JSONObject word=new JSONObject().put("start",180).put("end",290).put("bpm",128).put("fade",.3).put("mix",3.2).put("entryVerified",true).put("wordGuarded",true).put("energy",1),entry=new JSONObject().put("remix",false).put("dj",word);
+ check(DjPlan.cue(track,entry,true)!=null,"regular runtime graph pair is accepted without a static server cue");JSONObject play=DjPlan.track(track,entry,true);check(play.getDouble("rangeStart")==180&&play.getDouble("rangeEnd")==290,"verified middle passage retains exact graph boundaries");check(DjPlan.overlap(track,entry,true,1)>=1500,"regular graph pair retains the pleasant long incoming blend");
+ JSONObject sound=new JSONObject().put("start",35).put("end",145).put("bpm",0).put("fade",.7).put("mix",3.2).put("entryVerified",false).put("wordGuarded",false).put("acoustic",true).put("quality","acoustic").put("needsReview",true);entry.put("dj",sound);play=DjPlan.track(track,entry,true);check(play.getDouble("rangeStart")==35&&play.getDouble("rangeEnd")==145,"explicit acoustic regular candidate keeps its measured positive start");check(!sound.getBoolean("wordGuarded")&&!sound.getBoolean("entryVerified")&&sound.getBoolean("needsReview"),"acoustic fallback remains provisional");
+ sound.put("fade",.49);check(DjPlan.cue(track,entry,true)==null,"regular acoustic candidate cannot use a remix-only short fade");sound.put("fade",.7);word.put("fade",.249);entry.put("dj",word);check(DjPlan.cue(track,entry,true)==null,"regular word candidate keeps the .25s guarded lower bound");word.put("fade",.3);
+ JSONObject manual=new JSONObject().put("duration",330).put("rangeStart",55).put("rangeEnd",120);check(DjPlan.track(manual,entry,true)==manual,"manual selection overrides a generated regular cue");entry.put("djFull",true);check(DjPlan.track(track,entry,true)==track,"explicit full-source override remains intact");entry.remove("djFull");
+ JSONObject legacy=new JSONObject().put("start",17).put("end",136).put("bpm",128).put("fade",.7);entry.put("dj",legacy);check(DjPlan.track(track,entry,true).getDouble("rangeStart")==0,"unmarked legacy positive starts are still never trusted");
+ System.out.println("PROBE_PASSED regular_graph word_entry acoustic_entry guards manual full legacy");
+ }
+}'''}
+    compile_probe(tmp_path,fixtures,['DjPlan.java','PlaybackRange.java'],'RegularGraphProbe')

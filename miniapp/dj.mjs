@@ -7,8 +7,18 @@ export function djCue(track,length='normal'){
   if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return null;
   const target={short:80,normal:110,long:140}[length]||110;
   const cues=((track.djV4||track.djV3||track.djV2||track.dj)?.cues||[]).filter(c=>[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=30&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=minimumFade(c)&&c.fade<=8);
-  const cue=cues.sort((a,b)=>Math.abs(a.end-(a.entryVerified?a.start:0)-target)-Math.abs(b.end-(b.entryVerified?b.start:0)-target))[0];
-  return cue?{...cue,start:cue.entryVerified?cue.start:0}:null;
+  const cue=cues.sort((a,b)=>Math.abs(a.end-(a.entryVerified||acoustic(a)?a.start:0)-target)-Math.abs(b.end-(b.entryVerified||acoustic(b)?b.start:0)-target))[0];
+  if(cue)return {...cue,start:cue.entryVerified||acoustic(cue)?cue.start:0};
+  if(!Number.isFinite(track.duration)||track.duration<30)return null;
+  // A reusable graph can contain valid long passages even when the original
+  // static pool had no preselected match. Pair its exact observed boundaries.
+  for(const provisional of [false,true]){
+    const candidates=anchorCandidates(track,target,provisional,{minimum:30,maximum:track.duration,minimumFade:provisional?.5:.25});
+    const cost=c=>Math.abs(c.end-c.start-target)/target+.35*(1-c.energy)+(c.start===0?.1:0)+.12*Math.max(0,1.2-c.fade);
+    const best=candidates.sort((a,b)=>cost(a)-cost(b))[0];
+    if(best)return best;
+  }
+  return null;
 }
 export function planDj(entries,tracks,length,{reorder=false,pin=null}={}){
   const result=entries.map(e=>({...e,dj:null,remix:false}));
@@ -68,13 +78,14 @@ function remixGraph(track,isAcoustic=false){
 }
 export const remixAnchors=track=>remixGraph(track,false);
 export const remixAcousticAnchors=track=>remixGraph(track,true);
-function anchorCandidates(track,desired,isAcoustic=false){
-  const a=remixGraph(track,isAcoustic);if(!a)return [];
+function anchorCandidates(track,desired,isAcoustic=false,{minimum=8,maximum=123,minimumFade=isAcoustic?.5:.15}={}){
+  const graph=remixGraph(track,isAcoustic);if(!graph)return [];
+  const a={...graph,exits:graph.exits.filter(row=>row[1]>=minimumFade)};
   const result=[],seen=new Set();
   for(const [start,entryEnergy] of a.entries){
     let lo=0,hi=a.exits.length;while(lo<hi){const mid=(lo+hi)>>1;if(a.exits[mid][0]<start+desired)lo=mid+1;else hi=mid;}
     for(let i=Math.max(0,lo-1);i<Math.min(a.exits.length,lo+1);i++){
-      const [end,fade,exitEnergy]=a.exits[i],span=end-start,key=Math.round(start*1000)+':'+Math.round(end*1000);if(span<8||span>123||seen.has(key))continue;
+      const [end,fade,exitEnergy]=a.exits[i],span=end-start,key=Math.round(start*1000)+':'+Math.round(end*1000);if(span<minimum||span>maximum||seen.has(key))continue;
       seen.add(key);result.push({start,end,bpm:a.bpm,fade,mix:3.2,energy:(entryEnergy+exitEnergy)/2,entryVerified:!isAcoustic,wordGuarded:!isAcoustic,...(isAcoustic?{acoustic:true,quality:'acoustic',needsReview:true}:{}),...(a.grid!=null?{grid:a.grid}:{}),rate:1});
     }
   }

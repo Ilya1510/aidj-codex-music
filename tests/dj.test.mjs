@@ -180,3 +180,45 @@ test('missing requested duration retains a clearly marked full-source review fal
   const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120});assert.equal(entry.dj,null);assert.equal(entry.remix,false);assert.equal(entry.remixNeedsReview,true);assert.equal(entry.remixFallback,'full-source');assert.equal(playbackTrack(track,entry,true),track);
   const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:100}]]),{remixDurationSeconds:120});assert.equal(manual.remixFallback,null);assert.equal(manual.remixNeedsReview,false);
 });
+
+test('regular DJ can pair primary graph boundaries when no static cue was preselected',()=>{
+  const anchors={version:1,wordGuarded:true,bpm:128,grid:.12,entries:[[0,.1],[60,.8],[180,1]],exits:[[45,.3,.1],[140,.3,.8],[290,.4,1]]};
+  const track={id:'a',duration:330,djV4:{cues:[],remix:[],anchors}};
+  const cue=djCue(track);assert.equal(cue.start,180);assert.equal(cue.end,290);assert.equal(cue.end-cue.start,110);assert.equal(cue.wordGuarded,true);assert.equal(cue.entryVerified,true);assert.equal(cue.mix,3.2);
+  assert.equal(djCue(track,'short').end-djCue(track,'short').start,80);
+  const [entry]=planDj([{id:'e',trackId:'a'}],new Map([['a',track]]),'normal');assert.equal(entry.dj.start,180);assert.equal(entry.dj.end,290);assert.equal(playbackTrack(track,entry,true).rangeStart,180);
+  assert.deepEqual(djProgress(['a'],new Map([['a',track]])),{ready:1,processed:0,pending:0,working:0,failed:0,total:1});
+});
+
+test('regular graph fallback keeps acoustic provenance and obeys the safer fade bound',()=>{
+  const acousticAnchors={version:1,quality:'acoustic',wordGuarded:false,needsReview:true,bpm:0,entries:[[35,1]],exits:[[145,.7,1]]};
+  const track={id:'a',duration:240,djV4:{cues:[],acousticAnchors}};
+  const cue=djCue(track);assert.equal(cue.start,35);assert.equal(cue.end,145);assert.equal(cue.entryVerified,false);assert.equal(cue.wordGuarded,false);assert.equal(cue.acoustic,true);assert.equal(cue.quality,'acoustic');assert.equal(cue.needsReview,true);assert.equal(cue.fade,.7);assert.equal(cue.mix,3.2);
+  assert.equal(playbackTrack(track,{dj:cue},true).rangeStart,35);
+  assert.equal(djCue({...track,djV4:{acousticAnchors:{...acousticAnchors,exits:[[145,.49,1]]}}}),null);
+  assert.equal(djCue({...track,djV4:{acousticAnchors:{...acousticAnchors,needsReview:false}}}),null);
+});
+
+test('regular graph fallback prefers whole-word evidence and never borrows a remix-only fade',()=>{
+  const anchors={version:1,wordGuarded:true,bpm:120,entries:[[40,.8]],exits:[[150,.16,1],[155,.3,.8]]};
+  const acousticAnchors={version:1,quality:'acoustic',wordGuarded:false,needsReview:true,bpm:120,entries:[[30,1]],exits:[[140,.7,1]]};
+  const track={duration:240,djV4:{cues:[],anchors,acousticAnchors}};
+  const cue=djCue(track);assert.equal(cue.start,40);assert.equal(cue.end,155);assert.equal(cue.wordGuarded,true);assert.equal(cue.acoustic,undefined);assert.equal(cue.fade,.3);
+  const onlyNarrow={...track,djV4:{anchors:{...anchors,exits:[[150,.16,1]]}}};assert.equal(djCue(onlyNarrow),null);
+  assert.equal(djCue({...track,rangeStart:40,rangeEnd:100}),null);
+  assert.equal(djCue({...track,rangeEnd:90}),null);
+  assert.equal(playbackTrack(track,{dj:cue,djFull:true},true),track);
+  assert.equal(planDj([{id:'e',trackId:'a',djFull:true}],new Map([['a',{...track,id:'a'}]]),'normal')[0].dj,null);
+});
+
+test('regular valid static cues remain unchanged and malformed graph boundaries cannot reach playback',()=>{
+  const cue={start:0,end:80,bpm:128,fade:1.8};
+  const anchors={version:1,wordGuarded:true,bpm:128,entries:[[30,1]],exits:[[140,.3,1]]};
+  const track={duration:240,djV4:{cues:[cue],anchors}};
+  assert.deepEqual(djCue(track),cue);
+  for(const change of [{entries:[[NaN,1]]},{entries:[[-1,1]]},{exits:[[250,.3,1]]},{exits:[[140,Infinity,1]]},{exits:[[140,.249,1]]},{exits:[[50,.3,1]]},{bpm:NaN}])assert.equal(djCue({...track,djV4:{cues:[],anchors:{...anchors,...change}}}),null);
+  assert.equal(djCue({...track,duration:NaN,djV4:{cues:[],anchors}}),null);
+  // A graph containing only rejected/removed ends cannot recover that end from
+  // static or another unfiltered source: it has no usable regular cue.
+  assert.equal(djCue({...track,djV4:{cues:[],anchors:{...anchors,exits:[]}}}),null);
+});
