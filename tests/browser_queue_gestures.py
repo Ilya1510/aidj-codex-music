@@ -12,7 +12,10 @@ def main():
     tracks[0].update(rangeStart=0,rangeEnd=114.832)
     tracks[0]['loudness']={'integratedLufs':-26.12,'truePeakDbtp':-12.08,'method':'ebu-r128-v1'}
     data={'tracks':tracks,'playlists':[{'id':1,'name':'Volleyball','trackIds':[t['id'] for t in tracks],'revision':'queue-qa'}]}
-    bridge=BRIDGE.replace('version:()=>8','version:()=>30').replace('window.__fadeCalls=[];','window.__fadeCalls=[];window.__queueState=state;')
+    bridge=BRIDGE.replace('version:()=>8','version:()=>32').replace('window.__fadeCalls=[];','''window.__fadeCalls=[];window.__queueState=state;
+    window.__qaForecast=()=>{const q=state.player.queue,at=q.entries.findIndex(e=>e.id===q.currentId);
+      state.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,segments:q.entries.slice(at+1,at+11).map((e,i)=>({position:i+1,entryId:e.id,trackId:e.trackId,start:e.dj?.start??0,end:e.dj?.end??q.tracks[e.trackId].duration}))};};''')
+    bridge=bridge.replace('window.__aidjNativeReply(id,result);', 'if(value.type==="queue"||value.type==="play")window.__qaForecast();window.__aidjNativeReply(id,result);')
     bridge+=';localStorage.setItem("fade_playback-preferences",JSON.stringify({mode:"remix",remixDurationSeconds:12,remixMaxVisits:3}));'
     with sync_playwright() as p:
         browser=launch(p);context=browser.new_context(viewport={'width':390,'height':844},is_mobile=True,has_touch=True,service_workers='block')
@@ -45,12 +48,27 @@ def main():
             page.locator('#now-playing').click();assert page.locator('#full-shuffle').count()==0
             page.get_by_role('button',name='Свернуть плеер',exact=True).click();page.locator('.bottom-nav [data-view="queue"]').click()
             # Two occurrences of the same audio must remain independently movable.
-            page.evaluate('''()=>{const s=window.__queueState;s.player.queue.entries[2].trackId=s.player.queue.entries[1].trackId;s.player.queue.uiRevision=Date.now()+100000;window.__aidjNativeState(structuredClone(s));}''')
+            page.evaluate('''()=>{const s=window.__queueState;s.player.queue.entries[2].trackId=s.player.queue.entries[1].trackId;s.player.queue.uiRevision=Date.now()+100000;window.__qaForecast();window.__aidjNativeState(structuredClone(s));}''')
             rows=page.locator('.queue-sortable [data-queue-entry]')
             assert rows.locator('.rating-badges').count()==0
-            assert all(__import__('re').fullmatch(r'\d+ · (?:\d+:\d+–\d+:\d+|—)',text) for text in rows.locator('.queue-status').all_text_contents())
+            assert all(__import__('re').fullmatch(r'(?:\d+ · \d+:\d+–\d+:\d+|—)',text) for text in rows.locator('.queue-step').all_text_contents())
             assert not page.get_by_role('button',name='Выше в очереди',exact=True).count()
             assert not page.get_by_role('button',name='Ниже в очереди',exact=True).count()
+            # Rows retain priority order, while labels display the supplied
+            # execution forecast, including a second visit to one entry.
+            page.evaluate('''()=>{const s=window.__queueState,q=s.player.queue,e=q.entries.slice(1);
+              const step=(position,entry,start)=>({position,entryId:entry.id,trackId:entry.trackId,start,end:start+10});
+              s.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,segments:[step(1,e[0],20),step(2,e[2],70),step(3,e[1],40),step(4,e[2],100),step(5,q.entries[0],60)]};
+              window.__aidjNativeState(structuredClone(s));}''')
+            assert rows.nth(0).locator('.queue-step').all_text_contents()==['1 · 0:20–0:30']
+            assert rows.nth(1).locator('.queue-step').all_text_contents()==['3 · 0:40–0:50']
+            assert rows.nth(2).locator('.queue-step').all_text_contents()==['2 · 1:10–1:20','4 · 1:40–1:50']
+            # An older asynchronous queue snapshot must not erase the accepted plan.
+            page.evaluate('''()=>{const stale=structuredClone(window.__queueState);stale.player.queue.uiRevision--;delete stale.player.remixPreview;window.__aidjNativeState(stale);}''')
+            assert rows.nth(2).locator('.queue-step').all_text_contents()==['2 · 1:10–1:20','4 · 1:40–1:50']
+            page.evaluate('window.__queueState.player.remixPreview.uiRevision--;window.__aidjNativeState(structuredClone(window.__queueState))')
+            assert all(text=='—' for text in rows.locator('.queue-step').all_text_contents())
+            page.evaluate('window.__qaForecast();window.__aidjNativeState(structuredClone(window.__queueState))')
             original=rows.evaluate_all('(rows)=>rows.map(r=>r.dataset.queueEntry)')
             rows.nth(2).get_by_role('button',name='Поставить следующей',exact=True).click()
             page.wait_for_function('window.__fadeCalls.some(c=>c.type==="queue"&&c.queue.manualNextId)')

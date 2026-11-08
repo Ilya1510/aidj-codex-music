@@ -43,7 +43,7 @@ public final class PlaybackService extends Service {
         audio=(AudioManager)getSystemService(AUDIO_SERVICE);
         focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()).setOnAudioFocusChangeListener(change->{
             if(change==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK){duckGain=.2f;applyVolume();}
-            else if(change<0){resumeAfterFocus=change==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT&&isPlaying();pause();}
+            else if(change<0){resumeAfterFocus=change==AudioManager.AUDIOFOCUS_LOSS_TRANSIENT&&wantPlay&&isPlaying();pause();}
             else{duckGain=1f;applyVolume();if(resumeAfterFocus){resumeAfterFocus=false;play();}}
         },handler).build();
         session=new MediaSession(this,"AI DJ");
@@ -90,9 +90,9 @@ public final class PlaybackService extends Service {
         State.get(this).write("nativeQueue",queue.toString());
         String id=queue.optString("currentId");
         if(current()==null){releasePlayer();stopSelf();return;}
-        if(!loaded.equals(id)&&player!=null){boolean playing=isPlaying();releasePlayer();if(playing)prepare(true);}
+        if(!loaded.equals(id)&&player!=null){boolean playing=wantPlay;releasePlayer();if(playing)prepare(true);}
         else if(ready){
-            playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=DjPlan.rate(source(entry()),entry(),dj());setSpeed(player,speed);
+            playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=DjPlan.rate(source(entry()),entry(),dj());if(oldSpeed!=speed)setSpeed(player,speed);
             if(!waitingNext&&(position()<PlaybackRange.start(current(),duration())-100||position()>=PlaybackRange.end(current(),duration())))seek(PlaybackRange.start(current(),duration()));
         }
         if(wasDj!=dj()||!incomingSpec.equals(nextSpec())||oldStart!=PlaybackRange.start(current(),duration())||oldEnd!=PlaybackRange.end(current(),duration())||oldSpeed!=speed)cancelIncoming();
@@ -116,9 +116,25 @@ public final class PlaybackService extends Service {
         if(audio.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){wantPlay=false;error="Не удалось получить аудиофокус.";updateSession();return;}
         try{applyVolume();player.start();if(mixing&&incomingReady)incoming.start();updateSession();}catch(Exception e){wantPlay=false;error="Не удалось включить песню.";updateSession();}
     }
-    void pause(){wantPlay=false;try{if(ready&&player!=null)player.pause();if(incomingReady&&incoming!=null&&mixing)incoming.pause();}catch(Exception ignored){}savePosition();updateSession();}
+    void pause(){
+        wantPlay=false;
+        try{if(player!=null)player.setVolume(0,0);}catch(Exception ignored){}
+        try{if(incoming!=null)incoming.setVolume(0,0);}catch(Exception ignored){}
+        lastGain=0;
+        try{if(ready&&player!=null)player.pause();}catch(Exception ignored){}
+        try{if(incomingReady&&incoming!=null)incoming.pause();}catch(Exception ignored){}
+        savePosition();updateSession();
+    }
     void seek(long value){cancelIncoming();pendingSeek=PlaybackRange.clamp(current(),duration(),value);if(ready&&player!=null){rangeSeeking=true;player.seekTo(pendingSeek,MediaPlayer.SEEK_CLOSEST);pendingSeek=0;}savePosition();updateSession();}
     private void applyVolume(){
+        if(!wantPlay){
+            if(lastGain!=0){
+                try{if(player!=null)player.setVolume(0,0);}catch(Exception ignored){}
+                try{if(incoming!=null)incoming.setVolume(0,0);}catch(Exception ignored){}
+                lastGain=0;
+            }
+            return;
+        }
         if(player==null||!ready)return;
         long length=duration();float gain=PlaybackFade.gain(position(),PlaybackRange.start(current(),length),PlaybackRange.end(current(),length),queue.optLong("transitionMs",0))*duckGain;
         if(dj()){
@@ -151,9 +167,18 @@ public final class PlaybackService extends Service {
         else{String id=track.getString("id");if(!id.matches("[a-f0-9]{24}"))throw new Exception();Map<String,String> headers=new HashMap<>();headers.put("Cookie",Api.cookie(this));deck.setDataSource(this,android.net.Uri.parse(Api.base(this)+"/api/audio/"+id),headers);}
     }
     private void setSpeed(MediaPlayer deck,float value){
-        if(deck==null)return;boolean playing=false,assigned=false;try{playing=deck.isPlaying();deck.setPlaybackParams(new PlaybackParams().setSpeed(value).setPitch(1f).setAudioFallbackMode(PlaybackParams.AUDIO_FALLBACK_MODE_DEFAULT));assigned=true;}catch(Exception ignored){}
-        // Android may start a prepared deck when playback parameters are assigned.
-        try{if(assigned&&(!playing||deck==incoming))deck.pause();}catch(Exception ignored){}
+        if(deck==null)return;boolean playing=false;
+        try{
+            playing=deck.isPlaying();
+            // Parameter assignment may start a paused player before pause() can
+            // run. Silence it first, including its first prepared callback.
+            deck.setVolume(0,0);
+            deck.setPlaybackParams(new PlaybackParams().setSpeed(value).setPitch(1f).setAudioFallbackMode(PlaybackParams.AUDIO_FALLBACK_MODE_DEFAULT));
+        }catch(Exception ignored){}
+        try{if(!wantPlay||!playing||deck==incoming)deck.pause();}catch(Exception ignored){}
+        // applyVolume() must restore the real current-deck gain even when its
+        // envelope has not changed. Preloaded incoming audio stays muted.
+        if(deck==player)lastGain=-1;
     }
     void skip(int direction){if(direction<0&&position()-PlaybackRange.start(current(),duration())>3000)seek(0);else advance(direction,false);}
     private void cancelIncoming(){
@@ -192,11 +217,13 @@ public final class PlaybackService extends Service {
         long target=DjPlan.previewTail(current(),duration(),speed);rangeSeeking=true;player.seekTo(target,MediaPlayer.SEEK_CLOSEST);savePosition();
     }
     private void completed(){
+        if(!wantPlay){savePosition();updateSession();return;}
         if(dj()&&nextEntry()!=null){if(incomingReady){promote();if(wantPlay)play();}else waitForNext();return;}
         advance(1,true);
     }
     private void incomingPrepared(){incomingReady=true;if(waitingNext&&wantPlay){promote();play();}}
     private void tick(){
+        if(!wantPlay){applyVolume();return;}
         if(waitingNext){if(incomingReady&&wantPlay){promote();play();}return;}
         if(dj()&&isPlaying()){
             long end=PlaybackRange.end(current(),duration());
@@ -264,9 +291,9 @@ public final class PlaybackService extends Service {
         PendingIntent open=PendingIntent.getActivity(this,10,new Intent(this,MainActivity.class),PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this,CHANNEL).setSmallIcon(R.drawable.ic_music).setContentTitle(title).setContentText(artist).setLargeIcon(artwork()).setContentIntent(open)
             .setDeleteIntent(action("stop",4))
-            .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true).setShowWhen(false).setOngoing(isPlaying()).setCategory(Notification.CATEGORY_TRANSPORT)
+            .setVisibility(Notification.VISIBILITY_PUBLIC).setOnlyAlertOnce(true).setShowWhen(false).setOngoing(wantPlay&&isPlaying()).setCategory(Notification.CATEGORY_TRANSPORT)
             .addAction(new Notification.Action.Builder(android.R.drawable.ic_media_previous,"Предыдущая",action("previous",1)).build())
-            .addAction(new Notification.Action.Builder(isPlaying()?android.R.drawable.ic_media_pause:android.R.drawable.ic_media_play,isPlaying()?"Пауза":"Играть",action(isPlaying()?"pause":"play",2)).build())
+            .addAction(new Notification.Action.Builder(wantPlay&&isPlaying()?android.R.drawable.ic_media_pause:android.R.drawable.ic_media_play,wantPlay&&isPlaying()?"Пауза":"Играть",action(wantPlay&&isPlaying()?"pause":"play",2)).build())
             .addAction(new Notification.Action.Builder(android.R.drawable.ic_media_next,"Следующая",action("next",3)).build())
             .setStyle(new Notification.MediaStyle().setMediaSession(session.getSessionToken()).setShowActionsInCompactView(0,1,2)).build();
     }
@@ -277,7 +304,7 @@ public final class PlaybackService extends Service {
             .putString(MediaMetadata.METADATA_KEY_ARTIST,track==null?"":track.optString("artist")).putString(MediaMetadata.METADATA_KEY_ALBUM,"AI DJ")
             .putLong(MediaMetadata.METADATA_KEY_DURATION,length).putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART,artwork()).build());
         long actions=PlaybackState.ACTION_PLAY|PlaybackState.ACTION_PAUSE|PlaybackState.ACTION_PLAY_PAUSE|PlaybackState.ACTION_SKIP_TO_NEXT|PlaybackState.ACTION_SKIP_TO_PREVIOUS|PlaybackState.ACTION_SEEK_TO|PlaybackState.ACTION_STOP;
-        PlaybackState.Builder state=new PlaybackState.Builder().setActions(actions).setState(isPlaying()?PlaybackState.STATE_PLAYING:wantPlay?PlaybackState.STATE_BUFFERING:PlaybackState.STATE_PAUSED,position(),isPlaying()?speed:0);
+        PlaybackState.Builder state=new PlaybackState.Builder().setActions(actions).setState(!wantPlay?PlaybackState.STATE_PAUSED:isPlaying()?PlaybackState.STATE_PLAYING:PlaybackState.STATE_BUFFERING,position(),wantPlay&&isPlaying()?speed:0);
         if(!error.isEmpty())state.setErrorMessage(error);session.setPlaybackState(state.build());
         ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION,notification());
     }
@@ -298,7 +325,7 @@ public final class PlaybackService extends Service {
     JSONObject snapshot(){return snapshot(false);}
     JSONObject snapshot(boolean light){
         JSONObject visibleQueue=light?lightQueue(queue):queue;
-        JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!wantPlay);state.put("playing",isPlaying());state.put("buffering",wantPlay&&!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
+        JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!wantPlay);state.put("playing",wantPlay&&isPlaying());state.put("buffering",wantPlay&&!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
     }
     @Override public void onDestroy(){handler.removeCallbacks(librarySync);handler.removeCallbacks(rangeTick);savePosition();releasePlayer();audio.abandonAudioFocusRequest(focus);if(noisy!=null)unregisterReceiver(noisy);if(session!=null)session.release();instance=null;super.onDestroy();}
 }

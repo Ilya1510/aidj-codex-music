@@ -25,6 +25,7 @@ public final class MainActivity extends Activity {
     static boolean isVisible(){return foreground;}
     private final java.util.concurrent.atomic.AtomicBoolean publishing=new java.util.concurrent.atomic.AtomicBoolean(false);
     private long lastSync=0;private volatile String lastPlayer="";private volatile boolean playerServiceSeen=false;
+    private final RemixPreview remixPreview=new RemixPreview();
     private static final String ORIGIN="https://app.aidj.local";
     private final Runnable poll=new Runnable(){public void run(){if(!visible)return;publish();if(SystemClock.elapsedRealtime()-lastSync>20000){lastSync=SystemClock.elapsedRealtime();NativeInbox.request(MainActivity.this);}main.postDelayed(this,1000);}};
 
@@ -90,9 +91,13 @@ public final class MainActivity extends Activity {
     @Override protected void onPause(){visible=false;foreground=false;main.removeCallbacks(poll);super.onPause();}
     @Override protected void onDestroy(){visible=false;foreground=false;main.removeCallbacks(poll);web.removeJavascriptInterface("AndroidMusic");web.destroy();web=null;executor.shutdown();apiExecutor.shutdown();super.onDestroy();}
     @Override public void onBackPressed(){web.evaluateJavascript("window.__aidjBack ? window.__aidjBack() : false",value->{if(!"true".equals(value))super.onBackPressed();});}
-    private JSONObject state(){
+    private JSONObject state(){return state(true);}
+    private JSONObject state(boolean includePreview){
         JSONObject value=new JSONObject();try{
-            if(lastPlayer.isEmpty()){JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",PlaybackService.lightQueue(q));p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);lastPlayer=p.toString();}value.put("player",new JSONObject(lastPlayer));
+            if(lastPlayer.isEmpty()){JSONObject p=new JSONObject();JSONObject q=new JSONObject(State.get(this).read("nativeQueue","{}"));p.put("queue",PlaybackService.lightQueue(q));p.put("paused",true);p.put("time",q.optDouble("time",0));p.put("duration",0);lastPlayer=p.toString();}
+            JSONObject player=new JSONObject(lastPlayer);
+            if(includePreview){JSONObject preview=remixPreview.plan(State.get(this),player.optJSONObject("queue"));if(preview!=null)player.put("remixPreview",preview);}
+            value.put("player",player);
             value.put("downloads",NativeDownloads.snapshot(this));value.put("files",State.get(this).files());value.put("versionCode",BuildConfig.VERSION_CODE);value.put("server",Api.base(this));
             value.put("libraryRevision",State.get(this).read("libraryRevision",""));value.put("network",NetworkStatus.snapshot().put("connected",DownloadRunner.network(this)));
             if(ImportService.instance!=null)value.put("transfer",ImportService.instance.snapshot());
@@ -110,7 +115,7 @@ public final class MainActivity extends Activity {
         @JavascriptInterface public String readMeta(String key){return key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")?State.get(MainActivity.this).read("web_"+key,"null"):"null";}
         @JavascriptInterface public void writeMeta(String key,String value){if(key!=null&&key.matches("[A-Za-z0-9_-]{1,100}")&&value!=null&&value.length()<=(("catalog".equals(key)||"player".equals(key))?8:2)*1024*1024)State.get(MainActivity.this).write("web_"+key,value);}
         @JavascriptInterface public String files(){return State.get(MainActivity.this).files().toString();}
-        @JavascriptInterface public String snapshot(){return state().toString();}
+        @JavascriptInterface public String snapshot(){return state(false).toString();}
         @JavascriptInterface public int version(){return BuildConfig.VERSION_CODE;}
         @JavascriptInterface public void open(String value){main.post(()->openExternal(value));}
         @JavascriptInterface public void request(String id,String payload){
