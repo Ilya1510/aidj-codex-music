@@ -44,6 +44,9 @@ LINK_LOCK=threading.Lock()
 def client_catalog(db,version):
     """Do not send modern pools to old APKs or duplicate them in a new APK."""
     value=catalog(db)
+    if version and (not re.fullmatch(r'[0-9]{1,6}',version) or int(version)<27):
+        value['playlists']=[p for p in value['playlists'] if not p.get('combined')]
+        value['combinedSupported']=False
     modern=bool(re.fullmatch(r'[0-9]{1,6}',version or '')) and int(version)>=20
     hidden=('djV3','djV2','dj') if modern else ('djV4',)
     for track in value['tracks']:
@@ -229,8 +232,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not origin:raise Conflict('Ссылка пока недоступна.')
                 return self.output(200,{'url':connection_url(db,origin)})
             if path=='/api/edit' and self.command=='POST':
+                from .playlist_combined import ACTIONS as combined_actions
                 with editing(settings),tempfile.TemporaryDirectory(prefix='web-edit-',dir=settings.state/'work') as work:
-                    mutate(settings,db,Disk(settings),body,Path(work))
+                    mutate(settings,db,None if body.get('action') in combined_actions else Disk(settings),body,Path(work))
                 return self.output(200,client_catalog(db,self.headers.get('X-AIDJ-Version')))
             if self.command in ('GET','HEAD') and re.fullmatch(r'/api/audio/[a-f0-9]{24}',path):
                 asset=db.execute('SELECT * FROM web_assets WHERE id=?',(path.rsplit('/',1)[1],)).fetchone()

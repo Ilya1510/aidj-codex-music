@@ -252,7 +252,7 @@ function home() {
   fragment.append(button('Оценки и предложения',null,()=>navigate('reviews'),'button reviews-entry'));
   if(!query) {
     const grid=el('div',{class:'playlist-grid'});
-    for(const p of data.playlists)grid.append(el('button',{class:'playlist-card',onclick:()=>navigate('playlist',p.id)},cover(p.name,p.id-1),el('strong',{},p.name),el('span',{class:'subtitle'},count(p.trackIds.length))));
+    for(const p of data.playlists)grid.append(el('button',{class:'playlist-card',onclick:()=>navigate('playlist',p.id)},cover(p.name,p.id-1),el('strong',{},p.name),el('span',{class:'subtitle'},(p.combined?'Объединение · ':'')+count(p.trackIds.length))));
     grid.append(el('button',{class:'playlist-add',onclick:()=>newPlaylist()},icon('plus'),el('span',{},'Новый плейлист')));fragment.append(grid);
     fragment.append(el('div',{class:'section-heading'},el('h2',{},'Все треки'),el('span',{},count(data.tracks.length))));
   }
@@ -265,6 +265,7 @@ function playlistPage() {
   const fragment=document.createDocumentFragment();fragment.append(button('Плейлисты','back',()=>navigate('home'),'back'));
   const actions=el('div',{class:'featured-actions'},button('Слушать','play',()=>startPlaylist(visible),'button primary'),button('Шафл','shuffle',()=>startPlaylist(visible,0,true),'button'),button('Скачать','download',()=>downloadPlaylist(p),'icon-button'),button('Действия с плейлистом','more',()=>playlistMenu(p),'icon-button'));
   fragment.append(el('section',{class:'featured'},cover(p.name,p.id-1),el('div',{class:'featured-info'},el('span',{class:'eyebrow'},'ПЛЕЙЛИСТ'),el('h1',{},p.name),el('div',{class:'subtitle'},`${count(ids.length)} · ${duration(total)}`)),actions));
+  if(p.combined)fragment.append(el('p',{class:'subtitle combined-sources'},'Источники: '+(p.sourcePlaylistIds||[]).map(id=>data.playlists.find(s=>s.id===id)?.name||'Недоступный плейлист').join(' + ')+'. Список обновляется автоматически.'));
   if(p.djReview)fragment.append(el('p',{class:'subtitle'},'Сложные песни после дополнительного анализа. «По звуку, проверить» — границы менее уверенные. Открой «Выбрать фрагмент», чтобы проверить и поправить конкретную песню.'));
   if(editing) {
     fragment.append(el('div',{class:'toolbar'},el('span',{class:'subtitle'},'Порядок песен'),button('Отмена',null,()=>{editing=null;render();},'button'),button('Сохранить',null,async()=>{
@@ -782,9 +783,16 @@ function songMenu(track,context={}){
     sheetAction('Слушать следующей','next',()=>appendQueue(track,true)),
     sheetAction('В конец очереди','queue',()=>appendQueue(track,false)),
     sheetAction('Добавить в плейлисты','plus',()=>choosePlaylists(track)),
-    ...(context.playlist?[context.playlist]:data.playlists.filter(p=>p.trackIds.includes(track.id))).filter(p=>!p.djReview).map(p=>sheetAction(context.playlist?'Убрать из этого плейлиста':'Убрать из «'+p.name+'»','trash',()=>removeFromPlaylist(track,p),true)));
+    ...(context.playlist?[context.playlist]:data.playlists.filter(p=>p.trackIds.includes(track.id))).filter(p=>!p.djReview&&!p.combined).map(p=>sheetAction(context.playlist?'Убрать из этого плейлиста':'Убрать из «'+p.name+'»','trash',()=>removeFromPlaylist(track,p),true)));
 }
 function playlistMenu(p){
+  if(p.combined){
+    showSheet(p.name,el('p',{},'Песни автоматически собираются из выбранных плейлистов. Одинаковые записи показаны один раз.'),
+      sheetAction('Воспроизведение · '+modeName(preferencesFor(p.id)),'music',()=>playbackOptions(p.id)),
+      sheetAction('Скачать плейлист','download',()=>downloadPlaylist(p)),
+      sheetAction('Переименовать','edit',()=>nameForm('Название объединения',p.name,async name=>{await edit('rename-combined',{playlistId:p.id,name});$('sheet').close();toast('Название сохранено');})),
+      sheetAction('Удалить объединение','trash',()=>showSheet('Удалить объединение?',el('p',{},p.name),el('p',{},'Исходные плейлисты и песни останутся.'),button('Удалить объединение',null,async()=>{await edit('delete-combined',{playlistId:p.id});$('sheet').close();navigate('home');toast('Объединение удалено');},'button full danger')),true));return;
+  }
   if(p.djReview){showSheet(p.name,el('p',{},'Подборка сложных песен для прослушивания. Варианты по звуку помечены: проверь, не обрезались ли слова на входе и выходе. Состав обновляется по мере анализа.'),sheetAction('Воспроизведение · '+modeName(preferencesFor(p.id)),'music',()=>playbackOptions(p.id)),sheetAction('Скачать для проверки','download',()=>downloadPlaylist(p)));return;}
   showSheet(p.name,
     sheetAction('Скачать плейлист','download',()=>downloadPlaylist(p)),
@@ -800,10 +808,34 @@ function nameForm(title,value,submit){
   const action=button('Сохранить',null,async()=>{action.disabled=true;try{await submit(input.value.trim());}finally{action.disabled=false;}},'button primary full');
   input.addEventListener('keydown',e=>{if(e.key==='Enter')action.click();});showSheet(title,input,action);setTimeout(()=>input.focus(),100);
 }
-function newPlaylist(after=null){nameForm('Новый плейлист','',async name=>{await edit('create',{name});$('sheet').close();toast('Плейлист создан');if(after)after();});}
+function newPlaylist(after=null){
+  const sources=data.playlists.filter(p=>!p.djReview&&!p.combined);
+  if(after||sources.length<2||data.combinedSupported!==true){nameForm('Новый плейлист','',async name=>{await edit('create',{name});$('sheet').close();toast('Плейлист создан');if(after)after();});return;}
+  const selected=new Set(),input=el('input',{type:'text',maxlength:64,placeholder:'Например, Volleyball + Предложка','aria-label':'Название плейлиста',autocomplete:'off'});
+  let requestDraft=null;
+  const summary=el('p',{class:'subtitle',role:'status'},'Без выбранных источников получится пустой плейлист.'),checks=el('div',{class:'combined-source-list'});
+  const update=()=>{
+    const seen=new Set();for(const p of sources.filter(p=>selected.has(p.id)))for(const id of p.trackIds){const track=tracks.get(id);if(track)seen.add(track.md5||id);}
+    summary.textContent=selected.size===1?'Выбери ещё один источник для объединения.':selected.size?count(seen.size)+' · без дублей. Новые песни появятся автоматически.':'Без выбранных источников получится пустой плейлист.';
+    const label=selected.size?'Создать объединение':'Создать плейлист';submit.textContent=label;submit.setAttribute('aria-label',label);submit.disabled=selected.size===1;
+  };
+  for(const p of sources)checks.append(el('label',{class:'check'},el('input',{type:'checkbox','aria-label':'Источник: '+p.name,onchange:e=>{e.target.checked?selected.add(p.id):selected.delete(p.id);update();}}),el('span',{},p.name+' · '+count(p.trackIds.length))));
+  const submit=button('Создать плейлист',null,async()=>{
+    if(selected.size===1)throw new Error('Для объединения выбери минимум два плейлиста.');
+    const name=input.value.trim();if(!name)throw new Error('Введи название плейлиста.');submit.disabled=true;
+    try{
+      const action=selected.size?'combine':'create',payload={name,...(selected.size?{sourcePlaylistIds:sources.filter(p=>selected.has(p.id)).map(p=>p.id)}:{})};
+      const signature=JSON.stringify({action,...payload});if(requestDraft?.signature!==signature)requestDraft={signature,opId:crypto.randomUUID()};
+      await edit(action,{...payload,opId:requestDraft.opId});
+      const created=data.playlists.find(p=>p.name===name);$('sheet').close();toast(selected.size?'Объединение создано':'Плейлист создан');if(created)navigate('playlist',created.id);
+    }finally{update();}
+  },'button primary full');
+  input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!submit.disabled)submit.click();});
+  showSheet('Новый плейлист',input,el('p',{class:'subtitle'},'Можно объединить несколько плейлистов для прослушивания.'),checks,summary,submit);setTimeout(()=>input.focus(),100);
+}
 function choosePlaylists(track){
   const selected=new Set();const checks=[];
-  for(const p of data.playlists.filter(p=>!p.djReview)){
+  for(const p of data.playlists.filter(p=>!p.djReview&&!p.combined)){
     const present=p.trackIds.includes(track.id),input=el('input',{type:'checkbox',checked:present,disabled:present,onchange:e=>e.target.checked?selected.add(p.id):selected.delete(p.id)});
     checks.push(el('label',{class:'check'},input,el('span',{},p.name+(present?' · уже добавлена':''))));
   }

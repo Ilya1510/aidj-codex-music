@@ -64,10 +64,12 @@ def catalog(db):
     for p in db.execute('SELECT * FROM playlists ORDER BY id').fetchall():
         ids=[asset_id(r[0]) for r in db.execute("SELECT track_key FROM playlist_tracks WHERE playlist_id=? AND state='complete' ORDER BY position",(p['id'],))]
         playlists.append({'id':p['id'],'name':p['name'],'trackIds':ids,'revision':revision(db,p['id']),'diskUrl':web_url(p['path'])})
+    from .playlist_combined import records as combined_playlists
+    playlists.extend(combined_playlists(db))
     review['poolTrackIds']=[t['id'] for t in tracks if t['md5'] in pool]
     working=db.execute("SELECT j.asset_id,j.updated,a.title,a.artist FROM dj_analysis j JOIN web_assets a ON a.id=j.asset_id WHERE j.status='working' ORDER BY j.updated LIMIT 1").fetchone()
     job={'trackId':working['asset_id'],'title':working['title'],'artist':working['artist'],'started':working['updated']} if working else None
-    return {'tracks':tracks,'playlists':playlists,'review':review,'djWork':job,'djService':service_state(db)}
+    return {'tracks':tracks,'playlists':playlists,'combinedSupported':True,'review':review,'djWork':job,'djService':service_state(db)}
 
 
 def result_for(row,db=None):
@@ -91,6 +93,10 @@ def mutate(settings,db,disk,body,work):
     op_id=body.get('opId','')
     if not isinstance(op_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{8,100}',op_id):
         raise PlaylistError('Некорректный запрос.')
+    from .playlist_combined import ACTIONS,CombinedConflict,mutate as combined_mutate,name_exists
+    if body.get('action') in ACTIONS:
+        try:return combined_mutate(db,body)
+        except CombinedConflict as exc:raise Conflict(str(exc)) from None
     previous=db.execute('SELECT * FROM web_operations WHERE id=?',(op_id,)).fetchone()
     if previous and previous['kind']!=body.get('action'):raise PlaylistError('Некорректный запрос.')
     if previous and previous['state']=='complete':return
@@ -144,7 +150,7 @@ def mutate(settings,db,disk,body,work):
             else:
                 name=playlist_name(body.get('name',''))
                 other=db.execute('SELECT id FROM playlists WHERE name_key=? AND id!=?',(name.casefold(),playlist['id'])).fetchone()
-                if other:raise PlaylistError('Такое название уже есть.')
+                if other or name_exists(db,name.casefold()):raise PlaylistError('Такое название уже есть.')
                 target='/Музыка/'+name
                 if target!=playlist['path'] and disk.metadata(target):raise PlaylistError('На Диске уже есть такая папка.')
                 plan={'source':playlist['path'],'target':target,'name':name}

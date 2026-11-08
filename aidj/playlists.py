@@ -48,6 +48,8 @@ class Playlists:
     def create(self, value):
         name = playlist_name(value)
         key = name.casefold()
+        from .playlist_combined import name_exists
+        if name_exists(self.db,key):raise PlaylistError('Такое название уже есть.')
         existing = self.db.execute('SELECT * FROM playlists WHERE name_key=?',(key,)).fetchone()
         if existing:
             return existing

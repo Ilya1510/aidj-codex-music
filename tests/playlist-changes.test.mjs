@@ -16,6 +16,23 @@ function setup(t,options={}) {
 const ids=c=>c.project().playlists[0].trackIds;
 const enqueue=(c,action,trackId)=>c.enqueue(action,{playlistId:1,trackId});
 
+test('combined playlists follow offline source changes with shared metadata and MD5 deduplication',async t=>{
+  const {changes:c}=setup(t,{canSend:()=>false});
+  const base=catalog();base.tracks[0].rating={likes:4};base.tracks[0].djV4={anchors:{version:1}};
+  base.tracks.push({id:'alias-a',md5:'a',title:'Alias'});
+  base.playlists.push({id:2,trackIds:['alias-a','c'],revision:'s1'},
+    {id:900001001,combined:true,sourcePlaylistIds:[1,2],trackIds:[],revision:'mix1'});
+  c.restore(base);
+  const combined=()=>c.project().playlists.find(p=>p.combined).trackIds;
+  assert.deepEqual(combined(),['a','b','c']);
+  assert.strictEqual(c.project().tracks[0],base.tracks[0]);
+  await enqueue(c,'remove','a');assert.deepEqual(combined(),['b','alias-a','c']);
+  await c.enqueue('remove',{playlistId:2,trackId:'alias-a'});assert.deepEqual(combined(),['b','c']);
+  await enqueue(c,'add','a');assert.deepEqual(combined(),['a','b','c']);
+  assert.deepEqual(base.playlists[0].trackIds,['a','b']);
+  await assert.rejects(c.enqueue('remove',{playlistId:900001001,trackId:'a'}),/исходных плейлистов/);
+});
+
 test('add/remove update the UI before a slow Disk response; requests stay serial',async t=>{
   const first=deferred(),calls=[];
   const {changes:c}=setup(t,{send:async body=>{calls.push(body);return calls.length===1?first.promise:catalog(['c','b'],'r3');}});

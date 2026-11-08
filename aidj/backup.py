@@ -18,7 +18,7 @@ from .store import connect
 
 ROOT='/Музыка/_aidj_state'
 MAX_BYTES=128*1024**2
-TABLES=('playlists','playlist_tracks','playlist_aliases','playlist_selections','playlist_clicks',
+TABLES=('playlists','playlist_combined','playlist_tracks','playlist_aliases','playlist_selections','playlist_clicks',
         'cache','web_assets','web_operations','app_deliveries','app_delivery_acks','app_keyboard_updates',
         'library_added','audio_clips','playback_ranges','dj_analysis','dj_evidence',
         'dj_boundary_sources','dj_boundary_points','dj_boundary_observations','dj_boundary_votes','dj_boundary_comments','dj_boundary_cards','review_users','review_profiles','review_items',
@@ -45,7 +45,7 @@ def snapshot(settings,work):
         src.execute('BEGIN')
         available={r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in TABLES:
-            if (table in ('review_removal_notices','dj_analysis','dj_evidence') or table.startswith('dj_boundary_')) and table not in available:
+            if (table in ('playlist_combined','review_removal_notices','dj_analysis','dj_evidence') or table.startswith('dj_boundary_')) and table not in available:
                 counts[table]=0;continue
             cursor=src.execute('SELECT * FROM '+table)
             columns=[col[0] for col in cursor.description]
@@ -53,6 +53,13 @@ def snapshot(settings,work):
             total=0
             while rows:=cursor.fetchmany(100):out.executemany(statement,rows);total+=len(rows)
             counts[table]=total
+        # Deleted aggregate IDs must not reappear after restore: cached phones
+        # and durable operation receipts can still refer to those identities.
+        if 'sqlite_sequence' in available:
+            sequence=src.execute("SELECT seq FROM sqlite_sequence WHERE name='playlist_combined'").fetchone()
+            if sequence:
+                out.execute("DELETE FROM sqlite_sequence WHERE name='playlist_combined'")
+                out.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('playlist_combined',?)",(sequence[0],))
         placeholders=','.join('?' for _ in META)
         out.executemany('INSERT INTO meta VALUES (?,?)',src.execute('SELECT key,value FROM meta WHERE key IN ('+placeholders+')',META))
         out.commit();out.execute('PRAGMA wal_checkpoint(TRUNCATE)');out.execute('PRAGMA journal_mode=DELETE')

@@ -58,6 +58,9 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS playlists(
         id INTEGER PRIMARY KEY,name TEXT NOT NULL,name_key TEXT UNIQUE NOT NULL,
         path TEXT UNIQUE NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS playlist_combined(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,name_key TEXT UNIQUE NOT NULL,
+        sources TEXT NOT NULL,created REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS playlist_tracks(
         playlist_id INTEGER NOT NULL,track_key TEXT NOT NULL,position INTEGER NOT NULL,
         remote_path TEXT NOT NULL,md5 TEXT NOT NULL,bytes INTEGER NOT NULL,

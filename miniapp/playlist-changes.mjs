@@ -18,6 +18,13 @@ export class PlaylistChanges {
       if(item.action==='remove')p.trackIds=p.trackIds.filter(id=>!same(id));
       else if(!p.trackIds.some(same))p.trackIds.unshift(track.id);
     }
+    for(const p of playlists.filter(p=>p.combined)){
+      const seen=new Set();p.trackIds=[];
+      for(const sourceId of p.sourcePlaylistIds||[]){
+        const source=playlists.find(s=>s.id===sourceId&&!s.combined);if(!source)continue;
+        for(const id of source.trackIds){const track=byId.get(id);if(!track)continue;const key=track.md5||id;if(!seen.has(key)){seen.add(key);p.trackIds.push(id);}}
+      }
+    }
     return {...this.base,playlists};
   }
   // Serialize metadata writes too: an older asynchronous write must never
@@ -30,6 +37,7 @@ export class PlaylistChanges {
   }
   async enqueue(action,{playlistId,trackId}) {
     if(!['add','remove'].includes(action))throw new Error('Неизвестное действие.');
+    if(this.base.playlists.find(p=>p.id===playlistId)?.combined)throw new Error('Состав объединения обновляется из исходных плейлистов.');
     const item={action,playlistId,trackId,opId:crypto.randomUUID()};
     await this.update(async()=>{
       const previous=this.pending.findLast(p=>p.playlistId===playlistId&&p.trackId===trackId);
