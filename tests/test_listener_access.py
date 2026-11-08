@@ -92,13 +92,15 @@ class Bot:
 
 
 def test_public_apk_command_sends_latest_file_and_listener_only_identity(gateway):
+    from aidj.bot import handle_update
     db,settings,base=gateway;bot=Bot();ui=AppInstallUI(db,bot,settings)
     release=settings.state/'android-release';(release/'releases/99').mkdir(parents=True)
     (release/'version.json').write_text(json.dumps({'versionCode':99,'versionName':'test'}))
     (release/'releases/99/AI-DJ.apk').write_bytes(b'test apk')
     message=lambda text:{'message':{'text':text,'chat':{'type':'private','id':22},'from':{'id':22}}}
-    assert ui.message(message('/apk'),False) and bot.messages[-1][2][0][0]['callback_data']=='appinstall:android'
-    assert ui.message(message('/android'),False)
+    handle_update(db,{},bot,{'update_id':1,**message('/apk')},settings)
+    assert bot.messages[-1][2][0][0]['callback_data']=='appinstall:android'
+    handle_update(db,{},bot,{'update_id':2,'callback_query':{'id':'qa-callback','data':'appinstall:android','message':{'chat':{'type':'private','id':22}},'from':{'id':22}}},settings)
     file=bot.documents[-1];assert file[1].read_bytes()==b'test apk'
     code=parse_qs(urlsplit(file[3][0][0]['url']).fragment)['code'][0]
     assert session_access(db,redeem_code(db,code))=={'role':'listener','userId':22,'editLibrary':False,'rateSongs':False,'discoverSongs':False,'personalPlaylists':True}
