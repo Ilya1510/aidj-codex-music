@@ -1,4 +1,4 @@
-import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,planRemix,packRemixEntries,timedCue} from './dj.mjs';
+import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,remixAnchors,remixAcousticAnchors,planRemix,packRemixEntries,timedCue} from './dj.mjs';
 import {Queue} from './player.mjs';
 import {sortablePeople} from './reorder.mjs';
 import {PlaylistChanges} from './playlist-changes.mjs';
@@ -216,12 +216,15 @@ function entryCaption(track,entry){
 }
 function songRow(track,index,ids,context={}) {
   const playing=queue.current?.trackId===track.id;
+  const preferences=preferencesFor(view==='playlist'?selectedPlaylist:queue.playlistId);
+  const graphs=remixMode(preferences)?[remixAnchors(track),remixAcousticAnchors(track)].filter(Boolean):[];
+  const remixLabel=graphs.length?`Ремикс · входы: ${new Set(graphs.flatMap(g=>g.entries.map(row=>Math.round(row[0]*1000)))).size} · выходы: ${new Set(graphs.flatMap(g=>g.exits.map(row=>Math.round(row[0]*1000)))).size}`:track.djStatus==='complete'?'Ремикс · примерный переход':null;
   const lead=context.number?el('span',{class:'song-number'},playing?'♪':index+1):art(track);
   const row=el('div',{class:'song-row'+(playing?' playing':'')},
     el('button',{class:'song-main','aria-label':track.artist+' — '+track.title,onclick:()=>{
       if(context.entry){queue.select(context.entry.id);loadCurrent(true).catch(showError);render();persist();}
       else startPlaylist(ids,index).catch(showError);
-    }},lead,el('span',{class:'song-text'},el('strong',{},track.title),el('span',{},track.artist),ratingBadges(track),!context.entry&&hasDj(track)?el('span',{class:'dj-ready','aria-label':'DJ-фрагмент готов'},remixMode(activePreferences())?'Ремикс · '+remixCues(track,activePreferences().remixDurationSeconds).length+' фрагм.':'DJ · '+time(djCue(track).end-djCue(track).start)):null,!context.entry&&track.djStatus==='working'?el('span',{class:'dj-working'},'DJ · готовится'):null,context.entry&&djMode(activePreferences())&&entryCaption(track,context.entry)?el('span',{class:'dj-queue-cue'},entryCaption(track,context.entry)):null)),
+    }},lead,el('span',{class:'song-text'},el('strong',{},track.title),el('span',{},track.artist),ratingBadges(track),!context.entry&&remixMode(preferences)?remixLabel&&el('span',{class:'dj-ready'},remixLabel):!context.entry&&hasDj(track)?el('span',{class:'dj-ready','aria-label':'DJ-фрагмент готов'},'DJ · '+time(djCue(track).end-djCue(track).start)):null,!context.entry&&track.djStatus==='working'?el('span',{class:'dj-working'},'DJ · готовится'):null,context.entry&&djMode(activePreferences())&&entryCaption(track,context.entry)?el('span',{class:'dj-queue-cue'},entryCaption(track,context.entry)):null)),
     el('span',{class:'duration'},time(track.duration)));
   if(editing&&context.playlist) {
     for(const [direction,delta] of [['up',-1],['down',1]]) row.append(button(delta<0?'Выше':'Ниже',direction,()=>{
@@ -983,13 +986,18 @@ async function initialize(){
   try{tg?.ready();tg?.expand();tg?.setHeaderColor('#141514');tg?.setBackgroundColor('#141514');}catch{}
   catalogError=null;render();
   try{
+    // Player controls must keep receiving native state even if a cache read
+    // fails. A catalog retry must not leave a playing service uncontrollable.
+    if(native){nativeReady=true;globalThis.__aidjNativeState(JSON.parse(native.snapshot()));}
     saved=new Map((await storage.files()).map(x=>[x.md5,x]));
     playbackPreferences=normalisePlayback(await storage.meta('playback-preferences'));playlistPlayback=await storage.meta('playlist-playback')||{};
     djOnlyViews=await storage.meta('dj-list-filters')||{};listOptions=await storage.meta('review-list-options')||{};voteOverrides=await storage.meta('review-votes')||{};reviewPeople=await storage.meta('review-people')||{};
     rangeOverrides=await storage.meta('playback-ranges')||{};
     const lastSearch=await storage.meta('discovery');if(lastSearch){discovery.query=lastSearch.query||'';if(lastSearch.id)discovery.job={id:lastSearch.id};}
-    const cached=await storage.meta('catalog');playlistChanges.restore(cached,await storage.meta('playlist-changes'));if(cached)displayCatalog(playlistChanges.project());
-    const state=await storage.meta('player');if(state){queue=new Queue(state);queue.entries=restoreRemixMetadata(queue.entries.filter(x=>tracks.has(x.trackId)));restoredTime=state.time||0;restoreEntry=queue.currentId;renderMini();}
+    let cached=null;try{cached=await storage.meta('catalog');}catch{}
+    playlistChanges.restore(cached,await storage.meta('playlist-changes'));if(cached)displayCatalog(playlistChanges.project());
+    let state=null;try{state=await storage.meta('player');}catch{}
+    if(state){queue=new Queue(state);queue.entries=restoreRemixMetadata(queue.entries.filter(x=>tracks.has(x.trackId)));restoredTime=state.time||0;restoreEntry=queue.currentId;renderMini();}
     if(native){nativeReady=true;globalThis.__aidjNativeState(JSON.parse(native.snapshot()));}
     const params=new URLSearchParams(location.hash.slice(1));const loginCode=params.get('login');
     if(loginCode){history.replaceState(null,'',location.pathname);await api('auth',{loginCode});}

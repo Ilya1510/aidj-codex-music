@@ -20,7 +20,18 @@ final class State extends SQLiteOpenHelper {
         if(old<2){db.execSQL("ALTER TABLE downloads ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0");db.execSQL("ALTER TABLE downloads ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0");}
     }
     synchronized String read(String key,String fallback){
-        try(Cursor c=getReadableDatabase().rawQuery("SELECT v FROM meta WHERE k=?",new String[]{key})){return c.moveToFirst()?c.getString(0):fallback;}
+        // A DJ catalog/queue can exceed Android's CursorWindow row limit.
+        // Keep the existing SQLite values, reading bounded Unicode slices.
+        SQLiteDatabase db=getReadableDatabase();StringBuilder value=new StringBuilder();
+        int offset=1,total;
+        do{
+            try(Cursor c=db.rawQuery("SELECT substr(v,?,65536),length(v) FROM meta WHERE k=?",new String[]{String.valueOf(offset),key})){
+                if(!c.moveToFirst())return fallback;
+                value.append(c.getString(0));total=c.getInt(1);
+            }
+            offset+=65536;
+        }while(offset<=total);
+        return value.toString();
     }
     synchronized void write(String key,String value){if(key.startsWith("download"))generation++;ContentValues v=new ContentValues();v.put("k",key);v.put("v",value);getWritableDatabase().insertWithOnConflict("meta",null,v,SQLiteDatabase.CONFLICT_REPLACE);}
     synchronized JSONObject download(String md5){

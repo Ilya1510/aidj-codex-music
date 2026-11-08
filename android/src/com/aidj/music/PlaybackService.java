@@ -110,8 +110,8 @@ public final class PlaybackService extends Service {
         if(waitingNext){if(incomingReady){promote();play();}else{if(incoming==null){failedIncoming="";preload();}updateSession();}return;}
         if(rangeSeeking)return;
         if(position()<PlaybackRange.start(current(),duration())-100||position()>=PlaybackRange.end(current(),duration())-15){seek(0);return;}
-        if(audio.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){error="Не удалось получить аудиофокус.";updateSession();return;}
-        try{applyVolume();player.start();if(mixing&&incomingReady)incoming.start();updateSession();}catch(Exception e){error="Не удалось включить песню.";updateSession();}
+        if(audio.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){wantPlay=false;error="Не удалось получить аудиофокус.";updateSession();return;}
+        try{applyVolume();player.start();if(mixing&&incomingReady)incoming.start();updateSession();}catch(Exception e){wantPlay=false;error="Не удалось включить песню.";updateSession();}
     }
     void pause(){wantPlay=false;try{if(ready&&player!=null)player.pause();if(incomingReady&&incoming!=null&&mixing)incoming.pause();}catch(Exception ignored){}savePosition();updateSession();}
     void seek(long value){cancelIncoming();pendingSeek=PlaybackRange.clamp(current(),duration(),value);if(ready&&player!=null){rangeSeeking=true;player.seekTo(pendingSeek,MediaPlayer.SEEK_CLOSEST);pendingSeek=0;}savePosition();updateSession();}
@@ -294,7 +294,7 @@ public final class PlaybackService extends Service {
     JSONObject snapshot(){return snapshot(false);}
     JSONObject snapshot(boolean light){
         JSONObject visibleQueue=light?lightQueue(queue):queue;
-        JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
+        JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!wantPlay);state.put("playing",isPlaying());state.put("buffering",wantPlay&&!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
     }
     @Override public void onDestroy(){handler.removeCallbacks(librarySync);handler.removeCallbacks(rangeTick);savePosition();releasePlayer();audio.abandonAudioFocusRequest(focus);if(noisy!=null)unregisterReceiver(noisy);if(session!=null)session.release();instance=null;super.onDestroy();}
 }

@@ -199,9 +199,15 @@ def _acoustic_options(evidence):
     """
     graph=_strict_acoustic_graph(evidence)
     duration=evidence['duration']
-    if duration<10 or min(len(graph['entries']),len(graph['exits']))>=10:return graph,False
-    target=min(12,int(duration/3))
+    if duration<10:return graph,False
+    target=min(64,max(min(12,int(duration/3)),math.ceil(duration/8)))
     if target<2:return graph,False
+    def zone(kind,t):
+        span=duration-8 if kind=='entries' else duration
+        return min(target-1,int(target*t/max(.001,span)))
+    def occupied(kind,rows):
+        return {zone(kind,row[0]) for row in rows if kind!='entries' or row[0]<=duration-8}
+    if all(len(occupied(kind,graph[kind]))>=target for kind in ('entries','exits')):return graph,False
     original_counts=(len(graph['entries']),len(graph['exits']))
     words=sorted((float(w[0]),float(w[1]),bool(w[2]) if len(w)>2 else True) for w in evidence.get('words',[]))
     starts=[w[0] for w in words]
@@ -217,6 +223,7 @@ def _acoustic_options(evidence):
     def offer(kind,t,base,energy=None,fallback=False):
         t=round(float(t),4)
         if not .02<t<duration-.02 or kind=='exits' and t<.5:return
+        if kind=='entries' and t>duration-8:return
         energy=section_energy(evidence,max(0,t-.5),min(duration,t+.5)) if energy is None else energy
         energy=round(max(0,min(1,float(energy))),4)
         lo,hi=(t,min(duration,t+.08)) if kind=='entries' else (t-.5,t)
@@ -254,25 +261,23 @@ def _acoustic_options(evidence):
     spacing=min(2.,duration/(target*2))
     def supplement(kind):
         existing={row[0]:row for row in graph[kind]}
-        if len(existing)>=10:return
-        def zone(t):return min(target-1,int(target*t/duration))
         def available(pool,only_empty):
-            occupied={zone(t) for t in existing}
+            covered=occupied(kind,existing.values())
             return [(score,row) for score,row in pool.values() if row[0] not in existing
-                    and (not only_empty or zone(row[0]) not in occupied)
+                    and (not only_empty or zone(kind,row[0]) not in covered)
                     and all(abs(row[0]-t)>=spacing for t in existing)]
         # First spread measured events across the song; then fill uncovered
         # zones from weak RMS evidence. Never evict or move a precise point.
         for pool,only_empty in ((event[kind],True),(weak[kind],True),(event[kind],False),(weak[kind],False)):
-            while len(existing)<target:
+            while len(existing)<256 and (len(occupied(kind,existing.values()))<target if only_empty else len(existing)<target):
                 candidates=available(pool,only_empty)
                 if not candidates:break
                 counts={i:0 for i in range(target)}
-                for t in existing:counts[zone(t)]+=1
+                for t in existing:counts[zone(kind,t)]+=1
                 def priority(item):
-                    score,row=item;center=(zone(row[0])+.5)*duration/target
+                    score,row=item;center=(zone(kind,row[0])+.5)*(duration-8 if kind=='entries' else duration)/target
                     distance=min((abs(center-t) for t in existing),default=duration)
-                    return (counts[zone(row[0])],-distance,
+                    return (counts[zone(kind,row[0])],-distance,
                             -score+.12*abs(row[0]-center)/(duration/target),row[0])
                 _,row=min(candidates,key=priority)
                 existing[row[0]]=row

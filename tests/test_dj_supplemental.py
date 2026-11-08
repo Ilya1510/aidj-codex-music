@@ -58,13 +58,23 @@ def test_rich_strict_graph_is_identical_and_supplementation_is_per_role():
 
 def test_uniform_measured_energy_gets_weak_distributed_choices_instead_of_fake_words():
     e=evidence(duration=180,energy=[.6]*180);graph=acoustic_graph(e)
-    assert len(graph['entries'])==12 and len(graph['exits'])==12
+    assert len(graph['entries'])>=12 and len(graph['exits'])>=12
     assert_review_graph(graph,180)
     for kind in ('entries','exits'):
         times=[0]+[row[0] for row in graph[kind]]+[180]
-        assert max(b-a for a,b in zip(times,times[1:]))<=180/4
+        assert max(b-a for a,b in zip(times,times[1:]))<=16
         assert graph[kind][-1][0]>150
     assert anchor_graph(e)['entries']==[[0,.6]]
+
+
+def test_many_clustered_points_still_fill_observed_middle_of_song():
+    e=evidence(duration=180,regions=[[s,s+.8,.02] for s in range(2,28,2)])
+    strict=_strict_acoustic_graph(e);graph=acoustic_graph(e)
+    assert min(len(strict['entries']),len(strict['exits']))>=10
+    for kind in ('entries','exits'):
+        assert all(row in graph[kind] for row in strict[kind])
+        assert sum(40<row[0]<150 for row in graph[kind])>=10
+    assert_review_graph(graph,180)
 
 
 def test_no_observations_and_tiny_inputs_do_not_get_a_manufactured_twelve_point_grid():

@@ -13,10 +13,14 @@ def main():
     with sync_playwright() as p:
         browser=launch(p)
         try:
-            for mode in ('cold','error','unauthorized','cached','empty'):
+            for mode in ('cold','error','unauthorized','cached','empty','cache-failure','remix-label'):
                 if mode!='cold':browser=launch(p)
                 context=browser.new_context(viewport={'width':390,'height':844},service_workers='block')
                 context.add_init_script(bridge)
+                if mode=='cache-failure':context.add_init_script('''const read=AndroidMusic.readMeta;AndroidMusic.readMeta=key=>{if(key==='catalog'||key==='player')throw new Error('Row too big to fit into CursorWindow');return read(key);};''')
+                if mode=='remix-label':
+                    context.add_init_script('localStorage.setItem("fade_playback-preferences",JSON.stringify({mode:"remix",remixDurationSeconds:10}));')
+                    song['djStatus']='complete';song['djV4']={'acousticAnchors':{'version':1,'bpm':120,'wordGuarded':False,'quality':'acoustic','needsReview':True,'entries':[[0,.5],[40,.5],[80,.5]],'exits':[[10,.5,.5],[100,.5,.5]]}}
                 if mode=='cached':context.add_init_script('localStorage.setItem("fade_catalog",'+json.dumps(json.dumps(data))+');')
                 page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
                 response={'status':503 if mode in ('error','cached') else 401 if mode=='unauthorized' else 200}
@@ -46,6 +50,15 @@ def main():
                     assert not page.locator('.playlist-add').count()
                 elif mode=='empty':page.locator('.playlist-add').wait_for();assert '0 песен' in page.locator('main').inner_text()
                 else:page.locator('main .song-row').first.wait_for()
+                if mode=='cache-failure':
+                    page.evaluate('''()=>{const state=JSON.parse(AndroidMusic.snapshot());state.player={queue:{entries:[{id:'playing',trackId:'111111111111111111111111'}],currentId:'playing',uiRevision:Date.now()+100000},paused:false,time:30,duration:180};window.__aidjNativeState(state);}''')
+                    page.locator('#mini-play[aria-label="Пауза"]').wait_for()
+                    page.locator('#mini-play').click()
+                    page.wait_for_function('window.__fadeCalls.some(c=>c.type==="pause")')
+                    assert not page.evaluate('window.__fadeCalls.some(c=>c.type==="play")')
+                if mode=='remix-label':
+                    assert 'Ремикс · входы: 3 · выходы: 2' in page.locator('main .song-row').inner_text()
+                    assert 'фрагм.' not in page.locator('main .song-row').inner_text()
                 assert not errors,errors
                 context.close();browser.close()
             print('CATALOG_LOADING_PASSED pending snapshots retry auth cached empty')
