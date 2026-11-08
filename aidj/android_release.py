@@ -11,5 +11,5 @@ def version(settings,origin):
     return value
 
 
-def connection_url(db,origin):
-    return origin+'/android-connect#'+urlencode({'server':origin,'code':browser_code(db)})
+def connection_url(db,origin,*,role='admin',user_id=None):
+    return origin+'/android-connect#'+urlencode({'server':origin,'code':browser_code(db,role=role,user_id=user_id)})

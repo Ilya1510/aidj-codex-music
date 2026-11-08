@@ -52,7 +52,7 @@ public final class MainActivity extends Activity {
                 Uri uri=request.getUrl();String path=uri.getPath();
                 if(!"app.aidj.local".equals(uri.getHost())||!"https".equals(uri.getScheme())||!"GET".equals(request.getMethod()))return blocked();
                 if(path==null||path.equals("/"))path="/index.html";
-                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/playlist-changes.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/dj.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
+                Set<String> allowed=new HashSet<>(Arrays.asList("/index.html","/app.css","/app.mjs","/native.mjs","/personal-playlists.mjs","/web-remix.mjs","/playlist-changes.mjs","/transfer.mjs","/segments.mjs","/playback.mjs","/dj.mjs","/ratings.mjs","/reorder.mjs","/player.mjs","/storage.mjs","/icon.svg","/manifest.webmanifest","/telegram-web-app.js"));
                 if(!allowed.contains(path))return blocked();
                 try{
                     String mime=path.endsWith(".mjs")||path.endsWith(".js")?"text/javascript":path.endsWith(".css")?"text/css":path.endsWith(".svg")?"image/svg+xml":path.endsWith(".webmanifest")?"application/manifest+json":"text/html";
@@ -98,6 +98,7 @@ public final class MainActivity extends Activity {
             JSONObject player=new JSONObject(lastPlayer);
             if(includePreview){JSONObject preview=remixPreview.plan(State.get(this),player.optJSONObject("queue"));if(preview!=null)player.put("remixPreview",preview);}
             value.put("player",player);
+            value.put("access",new JSONObject(State.get(this).read("access","{}")));
             value.put("downloads",NativeDownloads.snapshot(this));value.put("files",State.get(this).files());value.put("versionCode",BuildConfig.VERSION_CODE);value.put("server",Api.base(this));
             value.put("libraryRevision",State.get(this).read("libraryRevision",""));value.put("network",NetworkStatus.snapshot().put("connected",DownloadRunner.network(this)));
             if(ImportService.instance!=null)value.put("transfer",ImportService.instance.snapshot());

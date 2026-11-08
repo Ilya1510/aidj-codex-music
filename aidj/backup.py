@@ -39,6 +39,7 @@ def snapshot(settings,work):
     if source.stat().st_size>MAX_BYTES:raise BackupError('База больше лимита резервного копирования.')
     if shutil.disk_usage(settings.state).free<max(256*1024**2,source.stat().st_size*3):raise BackupError('Недостаточно места для снимка.')
     destination=replace(settings,state=Path(work)/'snapshot');out=connect(destination,dj_enrol=False)
+    out.execute("DELETE FROM meta WHERE key='web_access_version'")
     src=sqlite3.connect(source.resolve().as_uri()+'?mode=ro',uri=True,timeout=15)
     counts={}
     try:
@@ -126,7 +127,8 @@ def restore(settings,disk=None,day=None):
         db=sqlite3.connect(local)
         try:
             if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise BackupError('База не прошла проверку целостности.')
-            for table in ('web_sessions','web_login_codes','native_transfer','jobs','choices','review_choices'):
+            for table in ('web_sessions','web_login_codes','web_access','native_transfer','jobs','choices','review_choices'):
+                if table=='web_access' and not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():continue
                 if db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]:raise BackupError('В снимке есть временные сессии или задания.')
             if any(key not in META for key, in db.execute('SELECT key FROM meta')):raise BackupError('В снимке есть служебные секреты.')
         finally:db.close()

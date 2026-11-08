@@ -18,12 +18,14 @@ def test_snapshot_copies_votes_and_playlists_but_never_auth_sessions_or_hidden_p
     canary='BACKUP_TEST_SECRET_MUST_STAY_LOCAL'
     meta_set(db,'private_prompt',canary)
     db.execute('INSERT INTO native_transfer VALUES (1,?,9999999999)',(canary,))
-    db.execute('INSERT INTO web_sessions VALUES (?,9999999999)',(canary,));db.commit()
+    db.execute('INSERT INTO web_sessions VALUES (?,9999999999)',(canary,))
+    db.execute('INSERT INTO web_access VALUES (?,?,?,?)',('session',canary,'admin',11));db.commit()
     work=tmp_path/'copy';work.mkdir();file,counts=snapshot(settings,work)
     copy=sqlite3.connect(file)
     assert copy.execute('SELECT COUNT(*) FROM playlist_tracks').fetchone()[0]==1
     assert copy.execute('SELECT COUNT(*) FROM native_transfer').fetchone()[0]==0
     assert copy.execute('SELECT COUNT(*) FROM web_sessions').fetchone()[0]==0
+    assert copy.execute('SELECT COUNT(*) FROM web_access').fetchone()[0]==0
     assert all(r[0] in META for r in copy.execute('SELECT key FROM meta'))
     copy.close();assert canary.encode() not in file.read_bytes()
     other=tmp_path/'copy-again';other.mkdir();second,_=snapshot(settings,other)

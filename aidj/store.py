@@ -76,6 +76,8 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS playlist_clicks(callback_id TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS web_sessions(digest TEXT PRIMARY KEY,expires REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS web_login_codes(digest TEXT PRIMARY KEY,expires REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS web_access(kind TEXT NOT NULL,digest TEXT NOT NULL,
+        role TEXT NOT NULL,user_id INTEGER,PRIMARY KEY(kind,digest));
     CREATE TABLE IF NOT EXISTS web_assets(
         id TEXT PRIMARY KEY,track_key TEXT UNIQUE NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,
         duration REAL NOT NULL,md5 TEXT NOT NULL,bytes INTEGER NOT NULL,remote_path TEXT NOT NULL);
@@ -160,6 +162,19 @@ def connect(settings,*,dj_enrol=True):
             columns={row[1] for row in db.execute('PRAGMA table_info(dj_boundary_comments)')}
             if 'event_id' not in columns:db.execute('ALTER TABLE dj_boundary_comments ADD COLUMN event_id TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS dj_boundary_comment_event ON dj_boundary_comments(event_id,user_id,chat_id)')
+            db.commit()
+        except BaseException:db.rollback();raise
+    if not db.execute("SELECT 1 FROM meta WHERE key='web_access_version'").fetchone():
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            if not db.execute("SELECT 1 FROM meta WHERE key='web_access_version'").fetchone():
+                owner=db.execute("SELECT value FROM meta WHERE key='owner_id'").fetchone()
+                owner_id=int(owner[0]) if owner and str(owner[0]).isdigit() else None
+                # Prior releases could issue credentials only to the owner.
+                # Migrate once; a missing role on any later credential fails closed.
+                for kind,table in [('session','web_sessions'),('code','web_login_codes')]:
+                    db.execute("INSERT OR IGNORE INTO web_access(kind,digest,role,user_id) SELECT ?,digest,'admin',? FROM "+table,(kind,owner_id))
+                db.execute("INSERT INTO meta VALUES ('web_access_version','1')")
             db.commit()
         except BaseException:db.rollback();raise
     if dj_enrol:install_dj_asset_triggers(db)

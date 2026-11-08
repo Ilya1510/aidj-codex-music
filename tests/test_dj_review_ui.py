@@ -142,7 +142,7 @@ def test_dj_commands_and_menu_are_visible_only_in_owner_scope(setup):
     assert all(c['command']!='djreview' for data in registrations if not data.get('scope') for c in data['commands'])
     scoped=next(data for data in registrations if data.get('scope'))
     assert scoped['scope']['chat_id']==22 and any(c['command']=='djreview' for c in scoped['commands'])
-    assert meta_get(db,'profile_version')=='7'
+    assert meta_get(db,'profile_version')=='8'
     handle_update(db,{},bot,update(text='/help'),settings)
     assert 'Проверить DJ-точки' in str(bot.sent[-1])
     handle_update(db,{},bot,update(text='/djreview',uid=101,n=2),settings)

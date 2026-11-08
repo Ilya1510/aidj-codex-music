@@ -1,5 +1,6 @@
 """Native snapshots cannot turn a pending/failed catalog into an empty library."""
 import json
+import os
 from playwright.sync_api import sync_playwright
 from tests.browser_playback import BRIDGE,launch
 
@@ -28,7 +29,7 @@ def main():
                     if route.request.url.endswith('/catalog'):
                         route.fulfill(status=response['status'],json=({'tracks':[],'playlists':[]} if mode=='empty' else data) if response['status']==200 else {'error':'QA unavailable'})
                     else:route.fulfill(json={'ok':True,'revision':'qa'})
-                page.route('**/api/**',api);page.goto('http://127.0.0.1:18782',wait_until='networkidle')
+                page.route('**/api/**',api);page.goto(os.environ.get('AIDJ_QA_ORIGIN','http://127.0.0.1:18782'),wait_until='networkidle')
                 def snapshot():
                     page.evaluate('''()=>{const state=JSON.parse(AndroidMusic.snapshot());state.files=[{md5:'q'+Math.random()}];window.__aidjNativeState(state);}''')
                 snapshot()

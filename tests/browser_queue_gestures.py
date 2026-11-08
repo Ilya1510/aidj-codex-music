@@ -1,4 +1,5 @@
 """Real mobile touch gestures, explicit successor, scoped remix and settings."""
+import os
 from playwright.sync_api import sync_playwright
 from tests.browser_playback import BRIDGE,launch
 
@@ -34,7 +35,7 @@ def main():
         context.add_init_script(bridge);page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
         page.route('**/api/**',lambda r:r.fulfill(json=data if r.request.url.endswith('/catalog') else {'ok':True,'revision':'qa'}))
         try:
-            page.goto('http://127.0.0.1:18782',wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball').click()
+            page.goto(os.environ.get('AIDJ_QA_ORIGIN','http://127.0.0.1:18782'),wait_until='networkidle');page.locator('.playlist-card').filter(has_text='Volleyball').click()
             options=page.get_by_role('button',name='Воспроизведение · DJ: ремикс',exact=True);options.click()
             duration=page.get_by_label('Длительность фрагмента ремикса');visits=page.get_by_label('Фрагментов из одной песни')
             duration.fill('60');duration.dispatch_event('input');duration.dispatch_event('change')

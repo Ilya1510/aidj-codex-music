@@ -21,6 +21,7 @@ from .android_release import version as android_version,connection_url
 from .clip_ui import ClipUI
 from .review_ui import ReviewUI
 from .dj_review_ui import DjReviewUI
+from .app_install import AppInstallUI
 
 HELP=('Пришли исполнителя и название песни или ссылку на один трек.\n\n'
       'Сначала ищу в Яндекс Музыке, затем — в YouTube Music. '
@@ -28,7 +29,7 @@ HELP=('Пришли исполнителя и название песни или
       'Под аудио нажми на плейлист или «Скачать в приложение» — одного нажатия достаточно.\n\n'
       '«Обрезать» — сохранить отдельный фрагмент по интервалу, например 0:00–1:30.\n\n'
       'Если нашёл несколько версий — предложу выбрать.\n'
-      '/app — плеер\n/playlists — мои плейлисты\n/newplaylist — создать плейлист\n/status — последние запросы.\n\n'
+      '/app — плеер\n/apk — плеер для друзей: Android / iPhone\n/playlists — мои плейлисты\n/newplaylist — создать плейлист\n/status — последние запросы.\n\n'
       '/review — слушать и оценивать песни\n/suggest — предложить песню\n'
       '/djreview — проверить DJ-точки\n'
       '/reviewstats — сводка оценок\n/suggestions — предложенные песни\n/reviewlink — ссылка для друзей.')
@@ -71,6 +72,7 @@ def handle_update(db,config,bot,update,settings):
         message=callback.get('message') or {}
         chat=message.get('chat') or {}
         user=callback.get('from') or {}
+        if AppInstallUI(db,bot,settings).callback(update):return
         if DjReviewUI(db,bot,settings).callback(update):return
         if meta_get(db,'owner_id') and ReviewUI(db,bot,settings).callback(update):return
         if chat.get('type')!='private' or not owner_matches(db,chat.get('id'),user.get('id')):
@@ -119,6 +121,7 @@ def handle_update(db,config,bot,update,settings):
         bot.message(chat['id'],'Подключён к твоему аккаунту.\n\n'+HELP)
         return
     if DjReviewUI(db,bot,settings).message(update):return
+    if AppInstallUI(db,bot,settings).message(update,owner_matches(db,chat['id'],user['id'])):return
     if not owner_matches(db,chat['id'],user['id']):
         if meta_get(db,'owner_id'):
             ReviewUI(db,bot,settings).message(update,False)
@@ -223,11 +226,11 @@ def process_queue(settings,stop):
 
 
 def configure_profile(db,bot):
-    if meta_get(db,'profile_version')=='7':return True
+    if meta_get(db,'profile_version')=='8':return True
     try:
         bot.call('setMyDescription',{'description':'Слушай песни из плейлиста и ставь оценки. Предлагай свои записи: сначала послушай, затем отправь на общую разметку.'})
         bot.call('setMyShortDescription',{'short_description':'Слушаем, оцениваем и предлагаем песни для общего плейлиста.'})
-        review_commands=[{'command':'review','description':'Слушать и оценивать песни'},
+        review_commands=[{'command':'apk','description':'Установить плеер: Android / iPhone'},{'command':'review','description':'Слушать и оценивать песни'},
             {'command':'suggest','description':'Предложить песню'},{'command':'help','description':'Помощь'}]
         bot.call('setMyCommands',{'commands':review_commands})
         owner_chat=meta_get(db,'owner_chat_id')
@@ -240,7 +243,7 @@ def configure_profile(db,bot):
             {'command':'android','description':'Android-приложение: установка и подключение'},
             {'command':'playlists','description':'Мои плейлисты'},{'command':'newplaylist','description':'Создать плейлист'},
             {'command':'cancel','description':'Отменить ввод названия'},{'command':'status','description':'Последние запросы'}]})
-        meta_set(db,'profile_version','7')
+        meta_set(db,'profile_version','8')
         return True
     except TelegramError:
         print('BOT_PROFILE_UPDATE_DEFERRED',flush=True)

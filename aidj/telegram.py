@@ -72,6 +72,18 @@ class Telegram:
                 if attempt==2 or error.code!=429 or error.retry_after is None or error.retry_after>60:raise
                 time.sleep(error.retry_after)
 
+    def document(self,chat_id,file,caption,keyboard=None):
+        file=Path(file)
+        fields={'chat_id':str(chat_id),'caption':caption[:1024]}
+        if keyboard:fields['reply_markup']=json.dumps({'inline_keyboard':keyboard},ensure_ascii=False)
+        try:
+            with file.open('rb') as stream:
+                encoder=MultipartEncoder(fields={**fields,'document':(file.name,stream,'application/vnd.android.package-archive')})
+                response=self.session.post(self.base+'sendDocument',data=encoder,headers={'Content-Type':encoder.content_type},timeout=(15,90));body=response.json()
+        except Exception:raise TelegramError('Не удалось отправить установочный файл.') from None
+        if not isinstance(body,dict) or body.get('ok') is not True:raise _response_error(body,response,'Telegram не принял установочный файл.')
+        return body.get('result')
+
     def audio(self,chat_id,result,keyboard=None):
         track=result['track']
         custom=result.get('caption')

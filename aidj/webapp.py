@@ -1,4 +1,4 @@
-"""Owner-only Mini App gateway. Audio is streamed, never buffered in VM RAM."""
+"""Role-checked music gateway. Audio is streamed, never buffered in VM RAM."""
 from contextlib import contextmanager
 import fcntl
 from http.cookies import SimpleCookie
@@ -19,7 +19,7 @@ from .config import Settings
 from .disk import Disk, DiskError
 from .playlists import PlaylistError
 from .store import connect,meta_get
-from .web_auth import AuthError,verify_telegram,create_session,session_valid,browser_code,redeem_code
+from .web_auth import AuthError,verify_telegram,create_session,session_access,access,browser_code,redeem_code
 from .web_catalog import catalog,mutate,Conflict
 from .android_release import version as android_version,connection_url
 from .web_transfer import register as register_transfer,current as current_transfer
@@ -33,17 +33,22 @@ from .review_web import request as review_request
 PORT=18782
 STATIC=Path(__file__).resolve().parent.parent/'miniapp'
 FILES={'/':'index.html','/index.html':'index.html','/app.css':'app.css','/app.mjs':'app.mjs',
-       '/native.mjs':'native.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/dj.mjs':'dj.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
+       '/native.mjs':'native.mjs','/personal-playlists.mjs':'personal-playlists.mjs','/web-remix.mjs':'web-remix.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/dj.mjs':'dj.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
        '/player.mjs':'player.mjs','/storage.mjs':'storage.mjs','/sw.js':'sw.js',
        '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/telegram-web-app.js':'telegram-web-app.js'}
-STREAMS=threading.BoundedSemaphore(2)
+STREAMS=threading.BoundedSemaphore(6)
 LINKS={}
 LINK_LOCK=threading.Lock()
 
 
-def client_catalog(db,version):
+def client_catalog(db,version,principal=None):
     """Do not send modern pools to old APKs or duplicate them in a new APK."""
     value=catalog(db)
+    value['access']=principal or access('admin')
+    if value['access']['role']=='listener':
+        for playlist in value['playlists']:playlist.pop('diskUrl',None)
+        for track in value['tracks']:
+            if isinstance(track.get('rating'),dict):track['rating']['mine']=None
     if version and (not re.fullmatch(r'[0-9]{1,6}',version) or int(version)<27):
         value['playlists']=[p for p in value['playlists'] if not p.get('combined')]
         value['combinedSupported']=False
@@ -150,7 +155,8 @@ class Handler(BaseHTTPRequestHandler):
         try:cookie.load(self.headers.get('Cookie',''))
         except Exception:return False
         token=cookie.get('aidj_session')
-        return session_valid(db,token.value if token else '')
+        self.access=session_access(db,token.value if token else '')
+        return self.access is not None
     def dispatch(self):
         path=urlsplit(self.path).path
         settings=self.server.settings
@@ -199,10 +205,19 @@ class Handler(BaseHTTPRequestHandler):
                         token=redeem_code(db,body['loginCode'])
                     else:
                         config=json.loads((settings.state/'telegram.json').read_text())
-                        verify_telegram(body.get('initData',''),config['token'],meta_get(db,'owner_id'))
-                        token=create_session(db)
-                    return self.output(200,{'ok':True},cookie='aidj_session='+token+'; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000')
+                        owner=meta_get(db,'owner_id')
+                        if not owner:raise AuthError('Владелец ещё не подключил библиотеку.')
+                        user_id=verify_telegram(body.get('initData',''),config['token'],owner,allow_listener=True)
+                        role='admin' if str(user_id)==str(owner) else 'listener'
+                        token=create_session(db,role=role,user_id=user_id)
+                    return self.output(200,{'ok':True,'access':session_access(db,token)},cookie='aidj_session='+token+'; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000')
             if not self.authenticated(db):return self.output(401,{'error':'Открой приложение из бота.'})
+            if self.access['role']=='listener':
+                if path=='/api/device-inbox' and self.command=='POST':return self.output(200,{'revision':library_revision(db),'items':[]})
+                if path=='/api/device-ack' and self.command=='POST':return self.output(200,{'ok':True})
+                readable=self.command in ('GET','HEAD') and (path in ('/api/catalog','/api/session','/api/library-version') or re.fullmatch(r'/api/audio/[a-f0-9]{24}',path))
+                portable=self.command=='POST' and path in ('/api/browser-link','/api/android-connect')
+                if not readable and not portable:return self.output(403,{'error':'Режим слушателя: общую библиотеку может изменять только владелец.'})
             if path=='/api/reviews' and self.command=='POST':return self.output(200,review_request(db,body))
             if path=='/api/dj' and self.command=='POST':
                 from .dj import enqueue
@@ -215,8 +230,8 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/discover' and self.command=='GET':return self.output(200,discover_recent(db))
             match=re.fullmatch(r'/api/discover/([1-9][0-9]{0,12})',path)
             if match and self.command=='GET':return self.output(200,public_job(owned_job(db,int(match[1]))))
-            if path=='/api/catalog' and self.command=='GET':return self.output(200,client_catalog(db,self.headers.get('X-AIDJ-Version')))
-            if path=='/api/session' and self.command=='GET':return self.output(200,{'ok':True})
+            if path=='/api/catalog' and self.command=='GET':return self.output(200,client_catalog(db,self.headers.get('X-AIDJ-Version'),self.access))
+            if path=='/api/session' and self.command=='GET':return self.output(200,{'ok':True,'access':self.access})
             if path=='/api/import-register' and self.command=='POST':
                 register_transfer(db,body)
                 return self.output(200,{'ok':True})
@@ -226,11 +241,11 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/browser-link' and self.command=='POST':
                 origin=public_url(settings)
                 if not origin:raise Conflict('Ссылка пока недоступна.')
-                return self.output(200,{'url':origin+'/#login='+browser_code(db)})
+                return self.output(200,{'url':origin+'/#login='+browser_code(db,role=self.access['role'],user_id=self.access['userId'])})
             if path=='/api/android-connect' and self.command=='POST':
                 origin=public_url(settings)
                 if not origin:raise Conflict('Ссылка пока недоступна.')
-                return self.output(200,{'url':connection_url(db,origin)})
+                return self.output(200,{'url':connection_url(db,origin,role=self.access['role'],user_id=self.access['userId'])})
             if path=='/api/edit' and self.command=='POST':
                 from .playlist_combined import ACTIONS as combined_actions
                 with editing(settings),tempfile.TemporaryDirectory(prefix='web-edit-',dir=settings.state/'work') as work:

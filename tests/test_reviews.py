@@ -297,12 +297,12 @@ def test_profile_update_failure_is_nonfatal_and_success_has_separate_guest_comma
     class Fail:
         def call(self,*a,**kw):raise TelegramError('temporary network error')
     assert configure_profile(db,Fail()) is False
-    assert meta_get(db,'profile_version')!='7'
+    assert meta_get(db,'profile_version')!='8'
     assert configure_profile(db,bot) is True
-    assert meta_get(db,'profile_version')=='7'
+    assert meta_get(db,'profile_version')=='8'
     commands=[data for method,data in bot.answered if method=='setMyCommands']
     assert len(commands)==2
-    assert [c['command'] for c in commands[0]['commands']]==['review','suggest','help']
+    assert [c['command'] for c in commands[0]['commands']]==['apk','review','suggest','help']
     assert commands[1]['scope']=={'type':'chat','chat_id':22}
     assert 'reviewstats' in [c['command'] for c in commands[1]['commands']]
 
