@@ -963,7 +963,18 @@ async function savePlaybackPreferences(value,playlistId=null){
     // Keep the current cue stable; settings affect the next song. Turning DJ off restores the original range.
     const current=queue.current,sameMode=oldPreferences.mode===preferences.mode,planned=remixMode(preferences)?planRemix(queue.entries,tracks,{...(sameMode?{pin:current,nextPin:queue.entries[queue.index+1]}:{}),remixDurationSeconds:preferences.remixDurationSeconds,remixMaxVisits:preferences.remixMaxVisits,remixLookahead:preferences.remixLookahead,allowTimed:native.version()>=25}):planDj(queue.entries,tracks,preferences.length);
     queue.entries=planned.map(e=>e.id===current?.id&&djMode(preferences)&&sameMode?current:e);lastDjPriority='';
-    if(native&&nativeReady&&queue.current){nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}
+    if(native&&nativeReady&&queue.current){
+      nativeRevision=Math.max(Date.now(),nativeRevision+1);
+      const result=await command('queue',{queue:nativeQueue()}),live=result.player?.queue;
+      // The playback transition wins, then retry only this still-current settings
+      // intent against its fresh snapshot. Never retry an obsolete user action.
+      if(result.queueAccepted===false&&live?.playbackEpoch===nativePlaybackEpoch&&live.uiRevision===nativeRevision&&queue.playlistId===playlistId&&JSON.stringify(preferencesFor(playlistId))===JSON.stringify(preferences)){
+        const playing=queue.current;
+        const options={...(sameMode?{pin:playing,nextPin:queue.entries[queue.index+1]}:{}),remixDurationSeconds:preferences.remixDurationSeconds,remixMaxVisits:preferences.remixMaxVisits,allowTimed:true};
+        queue.entries=(remixMode(preferences)?planRemix(queue.entries,tracks,options):planDj(queue.entries,tracks,preferences.length)).map(e=>e.id===playing?.id&&djMode(preferences)&&sameMode?playing:e);
+        nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});
+      }
+    }
     else applyBrowserVolume();
     await persist();
   }

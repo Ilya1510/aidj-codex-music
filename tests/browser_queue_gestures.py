@@ -151,6 +151,15 @@ def main():
             # A late high-uiRevision snapshot from A cannot overwrite B's epoch.
             page.evaluate('window.__oldPlayer.queue.uiRevision=Date.now()+1000000;window.__aidjNativeState({player:window.__oldPlayer})')
             assert page.locator('#mini-title').inner_text()==page.evaluate('window.__queueState.player.queue.tracks[window.__queueState.player.queue.entries[0].trackId].title')
+            # Changing the visit cap concurrently with a transition reapplies
+            # the chosen setting to C rather than discarding it or restoring B.
+            page.locator('.bottom-nav [data-view="home"]').click()
+            page.locator('.playlist-card').filter(has_text='Volleyball').click()
+            page.get_by_role('button',name='Воспроизведение · DJ: ремикс',exact=True).click()
+            page.evaluate('window.__advanceBeforeQueue=true;window.__beforeSettingsEpoch=window.__queueState.player.queue.playbackEpoch')
+            visits=page.get_by_label('Фрагментов из одной песни');visits.fill('1');visits.dispatch_event('change')
+            page.wait_for_function('()=>window.__queueState.player.queue.remixMaxVisits===1&&window.__queueState.player.queue.playbackEpoch>window.__beforeSettingsEpoch')
+            assert page.locator('#mini-title').inner_text()==page.evaluate('window.__queueState.player.queue.tracks[window.__queueState.player.queue.entries[0].trackId].title')
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             assert not errors,errors
             print('QUEUE_GESTURES_PASSED touch reorder cancel native_poll duplicates next_pin scroll manual_remix sliders full_shuffle_removed')

@@ -151,8 +151,18 @@ public final class MainActivity extends Activity {
                                     if(play&&(accepted||!replace))service.play();
                                     answer.put("queueAccepted",accepted).put("requestedUiRevision",queue.optLong("uiRevision")).put("player",service.snapshot(true));
                                 }else{
-                                    State.get(MainActivity.this).write("nativeQueue",queue.toString());lastPlayer="";
-                                    if(play)startForegroundService(new Intent(MainActivity.this,PlaybackService.class).putExtra("reloadQueue",true).putExtra("action","play"));
+                                    JSONObject saved=new JSONObject(State.get(MainActivity.this).read("nativeQueue","{}"));
+                                    long epoch=Math.max(0,saved.optLong("playbackEpoch"));Object raw=queue.opt("playbackEpoch");
+                                    boolean matching=raw instanceof Number&&Double.isFinite(((Number)raw).doubleValue())&&((Number)raw).doubleValue()==epoch;
+                                    boolean accepted=queue.optLong("uiRevision")>=saved.optLong("uiRevision")&&(replace||queue.optInt("queueProtocol")==0||matching);
+                                    JSONObject selected=saved;
+                                    if(accepted){
+                                        if(!saved.optString("currentId").equals(queue.optString("currentId"))&&epoch<Long.MAX_VALUE)epoch++;
+                                        queue.put("playbackEpoch",epoch);State.get(MainActivity.this).write("nativeQueue",queue.toString());selected=queue;lastPlayer="";
+                                    }
+                                    JSONObject player=new JSONObject().put("queue",PlaybackService.lightQueue(selected)).put("paused",!play).put("time",selected.optDouble("time",0)).put("duration",0);
+                                    answer.put("queueAccepted",accepted).put("requestedUiRevision",queue.optLong("uiRevision")).put("player",player);
+                                    if(play&&(accepted||!replace))startForegroundService(new Intent(MainActivity.this,PlaybackService.class).putExtra("action","play"));
                                 }
                                 answer.put("ok",true);
                             }catch(Exception e){try{answer.put("error","Не удалось обновить очередь. Попробуй ещё раз.");}catch(Exception ignored){}}
