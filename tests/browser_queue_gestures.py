@@ -94,6 +94,14 @@ def main():
             assert rows.first.locator('.queue-status').inner_text().startswith('1 · ')
             search.fill('');assert rows.count()==70 and rows.first.get_attribute('data-queue-entry')==wanted
             assert page.evaluate('window.__queueState.player.queue.currentId')==current
+            # A background level-only update reaches an existing native queue,
+            # without changing entry order, current excerpt or position.
+            entries_before=page.evaluate('JSON.stringify(window.__queueState.player.queue.entries)')
+            tracks[17]['loudness']={'integratedLufs':-9.35,'truePeakDbtp':.33,'method':'ebu-r128-v1'}
+            page.locator('#settings').click();page.get_by_role('button',name='Обновить библиотеку',exact=True).click()
+            page.wait_for_function('()=>window.__queueState.player.queue.tracks["000000000000000000000012"].loudness?.integratedLufs===-9.35')
+            assert page.evaluate('JSON.stringify(window.__queueState.player.queue.entries)')==entries_before
+            assert page.evaluate('window.__queueState.player.queue.currentId')==current
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             assert not errors,errors
             print('QUEUE_GESTURES_PASSED touch reorder cancel native_poll duplicates next_pin scroll manual_remix sliders full_shuffle_removed')

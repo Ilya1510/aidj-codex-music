@@ -121,6 +121,7 @@ function connection() {
 }
 function displayCatalog(value) {
   const before=queue.current&&tracks.get(queue.current.trackId);
+  const queuedLevels=new Map(queue.entries.map(entry=>[entry.trackId,JSON.stringify(tracks.get(entry.trackId)?.loudness)]));
   data={...value,tracks:value.tracks.map(withLocalRange),playlists:value.playlists.filter(p=>!p.djReview)};
   catalogReady=true;catalogError=null;
   if(native&&native.version()>=21){
@@ -128,13 +129,14 @@ function displayCatalog(value) {
     if(reviewIds.length)data.playlists.push({id:900000021,name:'DJ — проверить переходы',trackIds:reviewIds,djReview:true});
   }
   tracks=new Map(data.tracks.map(x=>[x.id,x]));
+  const levelsChanged=native&&nativeReady&&[...queuedLevels].some(([id,level])=>level!==JSON.stringify(tracks.get(id)?.loudness));
   if(djMode(activePreferences())){const current=queue.current;if(current?.dj?.start>0&&!current.dj.entryVerified&&!(current.dj.acoustic===true&&current.dj.needsReview===true&&current.dj.quality==='acoustic')&&!(current.remix&&timedCue(current.dj)))current.dj={...current.dj,start:0};queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{pin:current,nextPin:queue.entries[queue.index+1],remixDurationSeconds:activePreferences().remixDurationSeconds,remixMaxVisits:activePreferences().remixMaxVisits,allowTimed:native.version()>=25}):planDj(queue.entries,tracks,activePreferences().length).map(e=>e.id===current?.id?current:e);if(nativeReady)persist();}
   render();refreshRatingBars();connection();
   const summary=$('dj-ready-summary');if(summary){const p=data.playlists.find(p=>String(p.id)===summary.dataset.playlist),ids=p?.trackIds||queue.entries.map(e=>e.trackId),stats=progressFor(ids,preferencesFor(p?.id??queue.playlistId));summary.textContent=`Подготовлены DJ-фрагменты: ${stats.ready} из ${stats.total}.`;}
   if($('dj-now-label'))$('dj-now-label').textContent=djCurrentCaption();if($('dj-global-work'))$('dj-global-work').textContent=djWorkText();
   if(activeReviewTrack&&$('sheet').open){const track=tracks.get(activeReviewTrack);if(track)paintReviewDetails(track);}
   const after=queue.current&&tracks.get(queue.current.trackId);
-  if(after&&before&&(after.rangeStart!==before.rangeStart||after.rangeEnd!==before.rangeEnd))updatePlayerRange().catch(showError);
+  if(after&&(levelsChanged||before&&(after.rangeStart!==before.rangeStart||after.rangeEnd!==before.rangeEnd)))updatePlayerRange().catch(showError);
 }
 const playlistChanges=new PlaylistChanges({
   save:pending=>storage.putMeta('playlist-changes',pending),
