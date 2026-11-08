@@ -1,6 +1,6 @@
 """Acoustic entry candidates need a measured breath, not a bare beat timestamp."""
 import pytest
-from aidj.dj_worker import acoustic_graph,selection,usable_anchors
+from aidj.dj_worker import _strict_acoustic_graph as acoustic_graph,selection,usable_anchors
 
 
 def evidence(words,regions,duration=140,bpm=120,beats=None):
@@ -54,9 +54,11 @@ def test_a_bare_or_extrapolated_beat_does_not_make_an_unobserved_vocal_entry_saf
     assert not any(abs(t-40)<.001 for t in entries(value))
 
 
-def test_when_all_measured_entries_are_blocked_keep_an_honest_original_fallback():
+def test_blocked_strict_points_remain_distinct_from_explicitly_provisional_backups():
     value=evidence([(s,s+1,False) for s in range(180)],[[20,21,.05],[80,81,.05]],duration=180)
     result=selection(value)
-    assert result['acousticAnchors']['entries']==[[0,.5]]
-    assert not usable_anchors(result['acousticAnchors'])
-    assert result['fullFallback'] and result['needsReview']
+    strict=acoustic_graph(value)
+    assert strict['entries']==[[0,.5]] and not usable_anchors(strict)
+    assert result['needsReview'] and not result['fullFallback']
+    assert result['acousticAnchors']['wordGuarded'] is False
+    assert len(result['acousticAnchors']['entries'])>=12

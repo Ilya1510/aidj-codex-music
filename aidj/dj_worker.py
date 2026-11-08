@@ -4,6 +4,7 @@ Optional environment: requirements-dj-runtime.txt. A bounded service owns one
 scratch file at a time. Only numeric cues survive; transcripts are not stored.
 """
 import argparse
+from bisect import bisect_left,bisect_right
 import fcntl
 import json
 import math
@@ -147,7 +148,7 @@ def coarse_regions(energy):
     return regions
 
 
-def acoustic_graph(evidence):
+def _strict_acoustic_graph(evidence):
     """Provisional DSP boundaries, explicitly distinct from verified word gaps."""
     duration=evidence['duration'];bpm=evidence['bpm'];beats=evidence['beats']
     regions=evidence.get('acousticFeatures',{}).get('regions')
@@ -186,6 +187,102 @@ def acoustic_graph(evidence):
            'exits':thin_points([[t,*v] for t,v in sorted(exits.items())])}
     if bpm and beats:graph['grid']=round(beats[0]%(60/bpm),6)
     return graph
+
+
+def _acoustic_options(evidence):
+    """Keep precise DSP choices, with distributed review-only sparse backups.
+
+    Listening labels include entries immediately before a measured attack and
+    late inside a quiet plateau. A single early-decay/breath rule misses both.
+    Word timing is a ranking signal here, never fabricated verification: the
+    independent primary word-guarded graph remains unchanged.
+    """
+    graph=_strict_acoustic_graph(evidence)
+    duration=evidence['duration']
+    if duration<10 or min(len(graph['entries']),len(graph['exits']))>=10:return graph,False
+    target=min(12,int(duration/3))
+    if target<2:return graph,False
+    original_counts=(len(graph['entries']),len(graph['exits']))
+    words=sorted((float(w[0]),float(w[1]),bool(w[2]) if len(w)>2 else True) for w in evidence.get('words',[]))
+    starts=[w[0] for w in words]
+    ends=[];last=0.
+    for word in words:last=max(last,word[1]);ends.append(last)
+    def risk(lo,hi):
+        # Overlapping recognitions can be dense; bound lookup to nearby spans.
+        left=bisect_right(ends,lo);right=bisect_left(starts,hi);value=0.
+        for start,stop,confident in words[left:right]:
+            value+=max(0,min(hi,stop)-max(lo,start))*(1 if confident else .5)
+        return min(1,value/max(.001,hi-lo))
+    event={'entries':{},'exits':{}};weak={'entries':{},'exits':{}}
+    def offer(kind,t,base,energy=None,fallback=False):
+        t=round(float(t),4)
+        if not .02<t<duration-.02 or kind=='exits' and t<.5:return
+        energy=section_energy(evidence,max(0,t-.5),min(duration,t+.5)) if energy is None else energy
+        energy=round(max(0,min(1,float(energy))),4)
+        lo,hi=(t,min(duration,t+.08)) if kind=='entries' else (t-.5,t)
+        score=base+.35*(1-energy)-.65*risk(lo,hi)
+        row=[t,energy] if kind=='entries' else [t,.5,energy]
+        pool=weak[kind] if fallback else event[kind]
+        if t not in pool or score>pool[t][0]:pool[t]=(score,row)
+    regions=evidence.get('acousticFeatures',{}).get('regions')
+    if regions is None:regions=coarse_regions(evidence.get('energy',[]))
+    for lo,hi,energy in regions:
+        # Early release, an interior quiet option, and just before the next
+        # attack. These are explicitly provisional alternatives, not phonemes.
+        for t in (lo+.02,(lo+hi)/2,hi-.02):offer('entries',t,1.,energy)
+        # A fade after the beginning of the measured low-energy region, or
+        # ending inside it, may remain usable when ASR blankets the region.
+        for t in (lo+.5,(lo+hi)/2,hi-.02):
+            if lo+.5<=t<=hi:offer('exits',t,1.,energy)
+    for start,stop,confident in words:
+        offer('entries',start-.10,.75)
+        # The half-second fade starts at the observed word end, rather than
+        # deliberately fading across its final syllable. Following vocals can
+        # still overlap this provisional choice and lower its ranking.
+        offer('exits',stop+.5,.75)
+    for beat in evidence.get('beats',[]):
+        # Use only actually observed beats, not a BPM grid extrapolated over
+        # the song. Preferred listening labels can sit 4–30ms before an attack.
+        offer('entries',beat-.02,.85)
+        offer('exits',beat,.65)
+    for i,energy in enumerate(evidence.get('energy',[])):
+        if i>=duration:break
+        # Last resort: a real measured RMS neighbourhood, not a claim that an
+        # onset/phrase was detected. Flat-energy recordings stay review-only.
+        t=(i+min(duration,i+1))/2
+        offer('entries',t,.1,energy,True);offer('exits',t,.1,energy,True)
+    spacing=min(2.,duration/(target*2))
+    def supplement(kind):
+        existing={row[0]:row for row in graph[kind]}
+        if len(existing)>=10:return
+        def zone(t):return min(target-1,int(target*t/duration))
+        def available(pool,only_empty):
+            occupied={zone(t) for t in existing}
+            return [(score,row) for score,row in pool.values() if row[0] not in existing
+                    and (not only_empty or zone(row[0]) not in occupied)
+                    and all(abs(row[0]-t)>=spacing for t in existing)]
+        # First spread measured events across the song; then fill uncovered
+        # zones from weak RMS evidence. Never evict or move a precise point.
+        for pool,only_empty in ((event[kind],True),(weak[kind],True),(event[kind],False),(weak[kind],False)):
+            while len(existing)<target:
+                candidates=available(pool,only_empty)
+                if not candidates:break
+                counts={i:0 for i in range(target)}
+                for t in existing:counts[zone(t)]+=1
+                def priority(item):
+                    score,row=item;center=(zone(row[0])+.5)*duration/target
+                    distance=min((abs(center-t) for t in existing),default=duration)
+                    return (counts[zone(row[0])],-distance,
+                            -score+.12*abs(row[0]-center)/(duration/target),row[0])
+                _,row=min(candidates,key=priority)
+                existing[row[0]]=row
+        graph[kind]=sorted(existing.values(),key=lambda row:row[0])
+    supplement('entries');supplement('exits')
+    return graph,original_counts!=(len(graph['entries']),len(graph['exits']))
+
+
+def acoustic_graph(evidence):
+    return _acoustic_options(evidence)[0]
 
 
 def needs_rescue(evidence):
@@ -307,10 +404,10 @@ def selection(evidence):
     reason=None
     if not cues and not remix and not usable_anchors(graph):
         reason='few-recognised-words' if len(evidence['words'])<8 else 'no-safe-gap' if not graph['exits'] else 'no-safe-duration'
-    fallback=acoustic_graph(evidence)
+    fallback,supplemented=_acoustic_options(evidence)
     review=not usable_anchors(graph)
     return {'version':3,'cueSchema':4,'anchors':graph,'acousticAnchors':fallback,'needsReview':review,
-            'reviewRecommended':review or bool(evidence.get('rescuePlan')),'fullFallback':review and not usable_anchors(fallback),
+            'reviewRecommended':review or bool(evidence.get('rescuePlan')) or supplemented,'fullFallback':review and not usable_anchors(fallback),
             'cues':cues,'remix':remix,'method':'analysed','reason':reason}
 
 

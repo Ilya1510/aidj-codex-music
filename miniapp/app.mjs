@@ -1,4 +1,4 @@
-import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,planRemix,packRemixEntries} from './dj.mjs';
+import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues,planRemix,packRemixEntries,timedCue} from './dj.mjs';
 import {Queue} from './player.mjs';
 import {sortablePeople} from './reorder.mjs';
 import {PlaylistChanges} from './playlist-changes.mjs';
@@ -124,7 +124,7 @@ function displayCatalog(value) {
     if(reviewIds.length)data.playlists.push({id:900000021,name:'DJ — проверить переходы',trackIds:reviewIds,djReview:true});
   }
   tracks=new Map(data.tracks.map(x=>[x.id,x]));
-  if(djMode(activePreferences())){const current=queue.current;if(current?.dj?.start>0&&!current.dj.entryVerified&&!(current.dj.acoustic===true&&current.dj.needsReview===true&&current.dj.quality==='acoustic'))current.dj={...current.dj,start:0};queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{pin:current,nextPin:queue.entries[queue.index+1],remixDurationSeconds:activePreferences().remixDurationSeconds}):planDj(queue.entries,tracks,activePreferences().length).map(e=>e.id===current?.id?current:e);if(nativeReady)persist();}
+  if(djMode(activePreferences())){const current=queue.current;if(current?.dj?.start>0&&!current.dj.entryVerified&&!(current.dj.acoustic===true&&current.dj.needsReview===true&&current.dj.quality==='acoustic')&&!(current.remix&&timedCue(current.dj)))current.dj={...current.dj,start:0};queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{pin:current,nextPin:queue.entries[queue.index+1],remixDurationSeconds:activePreferences().remixDurationSeconds,allowTimed:native.version()>=25}):planDj(queue.entries,tracks,activePreferences().length).map(e=>e.id===current?.id?current:e);if(nativeReady)persist();}
   render();refreshRatingBars();connection();
   const summary=$('dj-ready-summary');if(summary){const p=data.playlists.find(p=>String(p.id)===summary.dataset.playlist),ids=p?.trackIds||queue.entries.map(e=>e.trackId),stats=progressFor(ids,preferencesFor(p?.id??queue.playlistId));summary.textContent=`Подготовлены DJ-фрагменты: ${stats.ready} из ${stats.total}.`;}
   if($('dj-now-label'))$('dj-now-label').textContent=djCurrentCaption();if($('dj-global-work'))$('dj-global-work').textContent=djWorkText();
@@ -203,13 +203,13 @@ async function startPlaylist(ids,start=0,shuffle=false) {
   if(!usable.length)throw new Error('Сначала скачай песни на устройство.');
   if(!native&&!online&&!usable.includes(wanted)&&!shuffle)throw new Error('Эта песня ещё не скачана.');
   queue.start(usable,Math.max(0,usable.indexOf(wanted)),shuffle);queue.playlistId=view==='playlist'?selectedPlaylist:null;
-  if(djMode(activePreferences())){queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{remixDurationSeconds:activePreferences().remixDurationSeconds}):planDj(queue.entries,tracks,activePreferences().length,{reorder:shuffle});queue.currentId=shuffle?queue.entries[0]?.id:queue.currentId;lastDjPriority='';}
+  if(djMode(activePreferences())){queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{remixDurationSeconds:activePreferences().remixDurationSeconds,allowTimed:native.version()>=25}):planDj(queue.entries,tracks,activePreferences().length,{reorder:shuffle});queue.currentId=shuffle?queue.entries[0]?.id:queue.currentId;lastDjPriority='';}
   await persist(); await loadCurrent(true); render();
 }
 function entryCaption(track,entry){
   if(entry.djFull)return 'Полный трек';
   if(remixMode(activePreferences())&&entry.remixFallback==='full-source')return 'Ремикс · полный трек · нужна проверка';
-  if(entry.dj){const part=segment(playbackTrack(track,entry,true));return (entry.remix?'Ремикс':'DJ')+' · '+formatTime(part.start)+'–'+formatTime(part.end)+(entry.dj.needsReview?' · по звуку, проверить':'');}
+  if(entry.dj){const part=segment(playbackTrack(track,entry,true));return (entry.remix?'Ремикс':'DJ')+' · '+formatTime(part.start)+'–'+formatTime(part.end)+(timedCue(entry.dj)?' · примерный переход':entry.dj.needsReview?' · по звуку, проверить':'');}
   return track.djStatus==='working'?'DJ · готовится':null;
 }
 function songRow(track,index,ids,context={}) {
@@ -763,7 +763,7 @@ function appendQueue(track,next){
   queue.append(track.id,next);
   if(djMode(activePreferences())){
     const at=Math.max(0,queue.index),current=queue.current;
-    queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{pin:current,nextPin:next?null:queue.entries[queue.index+1],remixDurationSeconds:activePreferences().remixDurationSeconds}):[...queue.entries.slice(0,at),...planDj(queue.entries.slice(at),tracks,activePreferences().length,{pin:current}).map(e=>e.id===current?.id?current:e)];
+    queue.entries=remixMode(activePreferences())?planRemix(queue.entries,tracks,{pin:current,nextPin:next?null:queue.entries[queue.index+1],remixDurationSeconds:activePreferences().remixDurationSeconds,allowTimed:native.version()>=25}):[...queue.entries.slice(0,at),...planDj(queue.entries.slice(at),tracks,activePreferences().length,{pin:current}).map(e=>e.id===current?.id?current:e)];
     lastDjPriority='';
   }
   persist();$('sheet').close();toast(next?'Будет играть следующей':'Добавлено в очередь');render();
@@ -852,7 +852,7 @@ async function savePlaybackPreferences(value,playlistId=null){
   else {playlistPlayback[playlistId]=preferences;await storage.putMeta('playlist-playback',playlistPlayback);}
   if(queue.playlistId===playlistId){
     // Keep the current cue stable; settings affect the next song. Turning DJ off restores the original range.
-    const current=queue.current,sameMode=oldPreferences.mode===preferences.mode,planned=remixMode(preferences)?planRemix(queue.entries,tracks,{...(sameMode?{pin:current,nextPin:queue.entries[queue.index+1]}:{}),remixDurationSeconds:preferences.remixDurationSeconds}):planDj(queue.entries,tracks,preferences.length);
+    const current=queue.current,sameMode=oldPreferences.mode===preferences.mode,planned=remixMode(preferences)?planRemix(queue.entries,tracks,{...(sameMode?{pin:current,nextPin:queue.entries[queue.index+1]}:{}),remixDurationSeconds:preferences.remixDurationSeconds,allowTimed:native.version()>=25}):planDj(queue.entries,tracks,preferences.length);
     queue.entries=planned.map(e=>e.id===current?.id&&djMode(preferences)&&sameMode?current:e);lastDjPriority='';
     if(native&&nativeReady&&queue.current){nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}
     else applyBrowserVolume();

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Queue} from '../miniapp/player.mjs';
-import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix,packRemixEntries,remixAnchors,remixAcousticAnchors,remixDurationSeconds} from '../miniapp/dj.mjs';
+import {planDj,djCue,playbackTrack,djProgress,modeName,remixCues,planRemix,packRemixEntries,remixAnchors,remixAcousticAnchors,remixDurationSeconds,timedCue} from '../miniapp/dj.mjs';
 import {playbackSettings} from '../miniapp/playback.mjs';
 const song=(id,bpm)=>({id,duration:240,dj:{cues:[{start:0,end:110,bpm,fade:1.8},{start:0,end:80,bpm,fade:2}]}});
 
@@ -175,9 +175,9 @@ test('acoustic fallback is audible at its measured entry but never claims recogn
   const graph={...a,wordGuarded:true,entries:[[30,.2]],exits:[[90,.3,.2]]};const [verified]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,djV4:{anchors:graph,acousticAnchors:a}}]]),{remixDurationSeconds:60});assert.equal(verified.dj.entryVerified,true);assert.equal(verified.dj.acoustic,undefined);
   assert.equal(remixAcousticAnchors({...track,djV4:{acousticAnchors:{...a,needsReview:false}}}),null);
 });
-test('missing requested duration retains a clearly marked full-source review fallback',()=>{
+test('old APKs retain a clearly marked full-source fallback when timed clips are unsupported',()=>{
   const track={id:'a',duration:240,djV4:{remix:[{start:40,end:52,bpm:128,fade:1,entryVerified:true}]}};
-  const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120});assert.equal(entry.dj,null);assert.equal(entry.remix,false);assert.equal(entry.remixNeedsReview,true);assert.equal(entry.remixFallback,'full-source');assert.equal(playbackTrack(track,entry,true),track);
+  const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120,allowTimed:false});assert.equal(entry.dj,null);assert.equal(entry.remix,false);assert.equal(entry.remixNeedsReview,true);assert.equal(entry.remixFallback,'full-source');assert.equal(playbackTrack(track,entry,true),track);
   const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:100}]]),{remixDurationSeconds:120});assert.equal(manual.remixFallback,null);assert.equal(manual.remixNeedsReview,false);
 });
 
@@ -221,4 +221,39 @@ test('regular valid static cues remain unchanged and malformed graph boundaries 
   // A graph containing only rejected/removed ends cannot recover that end from
   // static or another unfiltered source: it has no usable regular cue.
   assert.equal(djCue({...track,djV4:{cues:[],anchors:{...anchors,exits:[]}}}),null);
+});
+
+
+test('unmatched duration uses an honest short timed remix rather than a full source',()=>{
+  const track={id:'a',duration:112.744475,djV4:{anchors:{version:1,wordGuarded:true,bpm:114.9425,entries:[[0,.0889],[17.373,.9645],[21.033,.9654]],exits:[[21.633,.6,.7361]]}}};
+  const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:12});
+  assert.equal(entry.dj.end-entry.dj.start,12);assert([0,17.373,21.033].includes(entry.dj.start));assert(timedCue(entry.dj));assert.equal(entry.dj.sourceDuration,track.duration);assert.equal(entry.remixFallback,'timed');assert.equal(entry.remixNeedsReview,true);
+  assert.equal(entry.dj.entryVerified,false);assert.equal(entry.dj.wordGuarded,false);assert.equal(entry.dj.quality,'timed');assert.equal(entry.dj.acoustic,undefined);assert.equal(entry.dj.rate,1);assert.equal(entry.dj.mix,3.2);
+  assert.equal(playbackTrack(track,entry,true).rangeStart,entry.dj.start);
+  const [old]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:12,allowTimed:false});assert.equal(old.dj,null);assert.equal(old.remixFallback,'full-source');
+  const [downgraded]=planRemix([entry],new Map([['a',track]]),{pin:entry,remixDurationSeconds:12,allowTimed:false});assert.equal(downgraded.dj,null);
+});
+
+test('word/acoustic matches always precede a timed fallback and short originals stay bounded',()=>{
+  const word={version:1,wordGuarded:true,bpm:128,entries:[[40,1]],exits:[[52,.2,1]]},track={id:'a',duration:112,djV4:{anchors:word}};
+  const [matched]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]));assert.equal(matched.dj.wordGuarded,true);assert.equal(matched.dj.timedFallback,undefined);
+  const sound={...word,wordGuarded:false,quality:'acoustic',needsReview:true,exits:[[52,.7,1]]};const [acoustic]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,djV4:{acousticAnchors:sound}}]]));assert.equal(acoustic.dj.quality,'acoustic');assert.equal(acoustic.dj.timedFallback,undefined);
+  const short={id:'a',duration:57};const [bounded]=planRemix([{id:'e',trackId:'a'}],new Map([['a',short]]),{remixDurationSeconds:120});assert(timedCue(bounded.dj));assert.equal(bounded.dj.start,0);assert.equal(bounded.dj.end,57);
+  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:90}]]));assert.equal(manual.dj,null);assert.equal(manual.remixFallback,null);
+  const [full]=planRemix([{id:'e',trackId:'a',djFull:true}],new Map([['a',track]]));assert.equal(full.dj,null);assert.equal(full.remixFallback,null);
+});
+
+test('timed cue validation rejects false confidence, invalid numbers and normal DJ use',()=>{
+  const track={id:'a',duration:240};const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]));const c=entry.dj;assert(timedCue(c));
+  for(const change of [{timedFallback:false},{timedFallback:'true'},{needsReview:false},{wordGuarded:true},{entryVerified:true},{quality:'acoustic'},{acoustic:true},{start:-1},{end:240},{targetSeconds:9},{targetSeconds:121},{sourceDuration:NaN},{fade:.79},{fade:1.21},{mix:3.19},{mix:8.1},{bpm:50},{bpm:Infinity},{start:'0'}])assert.equal(timedCue({...c,...change}),false);
+  assert.equal(playbackTrack(track,{...entry,remix:false},true),track);assert.equal(playbackTrack({...track,duration:241},entry,true).rangeStart,undefined);
+  const regular={...track,djV4:{cues:[{...c,start:0,end:110,targetSeconds:110}]}};assert.equal(djCue(regular),null);
+});
+
+test('timed revisits prefer genuinely different published starts and retain native pins',()=>{
+  const track={id:'a',duration:112,djV4:{anchors:{version:1,wordGuarded:true,bpm:120,entries:[[0,.2],[20,1],[60,.9]],exits:[]}}},tracks=new Map([['a',track]]);
+  const [first]=planRemix([{id:'e',trackId:'a'}],tracks);assert(timedCue(first.dj));const heard=Math.round(first.dj.start*1000)+':'+Math.round(first.dj.end*1000);
+  const [second]=planRemix([{...first,remixVisits:1,remixUsed:[heard]}],tracks);assert(timedCue(second.dj));assert.notEqual(second.dj.start,first.dj.start);
+  const [pin]=planRemix([first],tracks,{pin:first,remixDurationSeconds:30});assert.deepEqual(pin.dj,first.dj);
+  const noChoice={id:'a',duration:112};const [only]=planRemix([{id:'e',trackId:'a'}],new Map([['a',noChoice]]));const [done]=planRemix([{...only,remixVisits:1,remixUsed:['0:12000']}],new Map([['a',noChoice]]));assert.equal(done.dj,null);
 });

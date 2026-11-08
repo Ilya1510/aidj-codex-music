@@ -4,7 +4,7 @@ import math
 import pytest
 
 from aidj.dj import validate,compatible_v3
-from aidj.dj_worker import anchor_graph,acoustic_graph,selection,usable_anchors,needs_rescue,rescue_windows,replace_observed_words,vocal_gaps
+from aidj.dj_worker import anchor_graph,acoustic_graph,_strict_acoustic_graph,selection,usable_anchors,needs_rescue,rescue_windows,replace_observed_words,vocal_gaps
 
 
 def base(duration=180):
@@ -76,7 +76,7 @@ def test_rescue_is_shifted_bounded_and_never_repeated_after_completed_quality_pa
 def test_acoustic_points_are_review_only_and_do_not_cross_any_detected_words():
     e=base();e['words']=[(12,25,True),(45,58,True),(60,80,False)]
     e['acousticFeatures']={'hop':.02,'regions':[[10,11,.1],[29,31,.1],[49,51,.1],[69,71,.1],[100,102,.1]]}
-    graph=acoustic_graph(e)
+    graph=_strict_acoustic_graph(e)
     assert graph['wordGuarded'] is False and graph['quality']=='acoustic' and graph['needsReview'] is True
     assert not any(59.8<t<80.2 for t,_ in graph['entries'])  # Uncertain vocals also block entry.
 
@@ -91,9 +91,9 @@ def test_continuous_known_words_do_not_get_fabricated_verified_internal_cuts():
     e=base(180);e['words']=[(s,s+1,True) for s in range(180)]
     e['acousticFeatures']={'hop':.02,'regions':[[t,t+.8,.05] for t in range(1,170,5)]}
     value=selection(e)
-    assert not value['anchors']['exits'] and not value['acousticAnchors']['exits']
-    assert value['needsReview'] and value['fullFallback'] and value['reviewRecommended']
-    assert validate(value,180)['fullFallback']
+    assert not value['anchors']['exits'] and value['acousticAnchors']['exits']
+    assert value['needsReview'] and not value['fullFallback'] and value['reviewRecommended']
+    assert validate(value,180)['acousticAnchors']['wordGuarded'] is False
 
 
 def test_measured_rms_features_detect_a_real_valley_without_convolution_edge_silence():

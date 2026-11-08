@@ -59,6 +59,34 @@ final class RemixPlan {
         }
         return out;
     }
+    private static ArrayList<JSONObject> timedCandidates(JSONObject q,JSONObject entry){
+        ArrayList<JSONObject> out=new ArrayList<>();JSONObject track=source(q,entry);if(track==null||DjPlan.manual(track)||entry.optBoolean("djFull"))return out;
+        double total=track.optDouble("duration"),desired=desiredDuration(q);if(!(track.opt("duration") instanceof Number)||!Double.isFinite(total)||total<8)return out;
+        Map<Double,double[]> starts=new LinkedHashMap<>();double fallbackBpm=0;
+        for(boolean acoustic:new boolean[]{false,true}){
+            JSONObject graph=entry.optJSONObject(acoustic?"remixAcousticAnchors":"remixAnchors");
+            if(graph==null||graph.optInt("version")!=1||(acoustic?!graph.optBoolean("needsReview")||!"acoustic".equals(graph.optString("quality"))||graph.optBoolean("wordGuarded"):!graph.optBoolean("wordGuarded")))continue;
+            double bpm=graph.optDouble("bpm",Double.NaN);if(!Double.isFinite(bpm)||(bpm!=0&&(bpm<60||bpm>210)))continue;if(fallbackBpm==0)fallbackBpm=bpm;
+            JSONArray points=graph.optJSONArray("entries");if(points==null||total<desired)continue;boolean flat=graph.optBoolean("flat");double scale=graph.optBoolean("packed")?1000:1;
+            for(int i=0;i<Math.min(256,flat?points.length()/2:points.length());i++){
+                JSONArray row=flat?points:points.optJSONArray(i);if(row==null)continue;int offset=flat?i*2:0;double start=row.optDouble(offset,Double.NaN)/scale,loud=energy(row.optDouble(offset+1,.5*scale)/scale);
+                if(!Double.isFinite(start)||start<0||start+desired>total+.000001)continue;double[] old=starts.get(start);if(old==null||loud>old[1])starts.put(start,new double[]{start,loud,bpm});
+            }
+        }
+        JSONArray compact=entry.optJSONArray("remixPool"),legacy=compact==null?entry.optJSONArray("remixCues"):compact;
+        if(legacy!=null&&total>=desired)for(int i=0;i<Math.min(32,legacy.length());i++){
+            JSONObject c=compact==null?legacy.optJSONObject(i):null;JSONArray row=compact==null?null:legacy.optJSONArray(i);
+            boolean verified=c!=null?c.optBoolean("entryVerified"):row!=null&&row.optInt(8,0)==1;if(!verified)continue;
+            double start=c!=null?c.optDouble("start",Double.NaN):row.optDouble(0,Double.NaN),bpm=c!=null?c.optDouble("bpm",Double.NaN):row.optDouble(2,Double.NaN),loud=energy(c!=null?c.optDouble("energy",.5):row.optDouble(6,.5));
+            if(Double.isFinite(start)&&start>=0&&start+desired<=total&&Double.isFinite(bpm)&&(bpm==0||bpm>=60&&bpm<=210)&&!starts.containsKey(start))starts.put(start,new double[]{start,loud,bpm});
+        }
+        if(starts.isEmpty())starts.put(0.,new double[]{0,.5,fallbackBpm});ArrayList<double[]> ordered=new ArrayList<>(starts.values());Collections.sort(ordered,(a,b)->a[1]==b[1]?Double.compare(a[0],b[0]):Double.compare(b[1],a[1]));
+        for(int i=0;i<Math.min(32,ordered.size());i++){
+            double[] point=ordered.get(i);
+            try{out.add(new JSONObject().put("start",point[0]).put("end",Math.min(total,point[0]+desired)).put("targetSeconds",desired).put("sourceDuration",total).put("bpm",point[2]).put("energy",point[1]).put("fade",Math.max(.8,Math.min(1.2,desired*.08))).put("mix",3.2).put("entryVerified",false).put("wordGuarded",false).put("timedFallback",true).put("quality","timed").put("needsReview",true).put("rate",1));}catch(Exception ignored){}
+        }
+        return out;
+    }
     private static String signature(JSONObject cue){return Math.round(cue.optDouble("start",0)*1000)+":"+Math.round(cue.optDouble("end",0)*1000);}
     private static LinkedHashSet<String> used(JSONObject entry,ArrayList<JSONObject> options){
         LinkedHashSet<String> out=new LinkedHashSet<>();JSONArray saved=entry.optJSONArray("remixUsed");
@@ -75,11 +103,13 @@ final class RemixPlan {
         if(entry.optInt("remixVisits",0)>=3)return null;ArrayList<JSONObject> options=cues(q,entry);Set<String> used=used(entry,options);
         // A metadata refresh must not change an already preloaded successor.
         JSONObject old=entry.optJSONObject("dj");
-        if(preserve&&entry.optBoolean("remix")&&old!=null&&(old.optBoolean("entryVerified")||DjPlan.acoustic(old))&&old.optDouble("end")-old.optDouble("start")<=123&&DjPlan.cue(source(q,entry),entry,true)!=null&&!used.contains(signature(old)))return old;
+        if(preserve&&entry.optBoolean("remix")&&old!=null&&(old.optBoolean("entryVerified")||DjPlan.acoustic(old)||DjPlan.timed(source(q,entry),entry))&&old.optDouble("end")-old.optDouble("start")<=123&&DjPlan.cue(source(q,entry),entry,true)!=null&&!used.contains(signature(old)))return old;
+        boolean fresh=false;for(JSONObject cue:options)if(!used.contains(signature(cue))){fresh=true;break;}
+        if(!fresh)options=timedCandidates(q,entry);
         JSONObject best=null;double bestScore=Double.POSITIVE_INFINITY,desired=desiredDuration(q);boolean nearby=false,wordFit=false;
-        for(JSONObject cue:options)if(!used.contains(signature(cue))&&Math.abs(cue.optDouble("end")-cue.optDouble("start")-desired)<=3){nearby=true;if(!DjPlan.acoustic(cue))wordFit=true;}
+        for(JSONObject cue:options)if(!used.contains(signature(cue))&&Math.abs(cue.optDouble("end")-cue.optDouble("start")-desired)<=3){nearby=true;if(!DjPlan.acoustic(cue)&&!cue.optBoolean("timedFallback"))wordFit=true;}
         for(JSONObject cue:options){
-            String key=signature(cue);if(used.contains(key)||wordFit&&DjPlan.acoustic(cue))continue;
+            String key=signature(cue);if(used.contains(key)||wordFit&&DjPlan.acoustic(cue)||cue.optBoolean("timedFallback")&&overlap(cue,used)>=.8)continue;
             double span=cue.optDouble("end")-cue.optDouble("start"),bpm=cue.optDouble("bpm",0),energy=cue.optDouble("energy",.5);if(!Double.isFinite(energy))energy=.5;
             if(nearby&&Math.abs(span-desired)>3)continue;
             double durationCost=Math.max(0,Math.abs(span-desired)-3)/3;
@@ -97,8 +127,8 @@ final class RemixPlan {
         try{
             if(candidate==null){e.remove("remix");e.remove("dj");if(!e.optBoolean("djFull")&&!DjPlan.manual(source(q,e)))e.put("remixNeedsReview",true).put("remixFallback","full-source");return null;}
             if(preserve&&e.optBoolean("remix")&&candidate==e.optJSONObject("dj"))return candidate;
-            JSONObject cue=new JSONObject(candidate.toString());double bpm=cue.optDouble("bpm",0),rate=bpm>0&&target>0?Math.max(.97,Math.min(1.03,target/bpm)):1;
-            cue.put("rate",rate);e.put("dj",cue);e.put("remix",true);e.put("remixNeedsReview",DjPlan.acoustic(cue));e.remove("remixFallback");return cue;
+            JSONObject cue=new JSONObject(candidate.toString());double bpm=cue.optDouble("bpm",0),rate=cue.optBoolean("timedFallback")?1:bpm>0&&target>0?Math.max(.97,Math.min(1.03,target/bpm)):1;
+            cue.put("rate",rate);e.put("dj",cue);e.put("remix",true);e.put("remixNeedsReview",DjPlan.acoustic(cue)||cue.optBoolean("timedFallback"));if(cue.optBoolean("timedFallback"))e.put("remixFallback","timed");else e.remove("remixFallback");return cue;
         }catch(Exception ignored){return null;}
     }
     static void arrange(JSONObject q){arrange(q,"");}
