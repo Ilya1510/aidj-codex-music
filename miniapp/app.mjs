@@ -50,6 +50,7 @@ const bytes=n=>n>=1024**3?(n/1024**3).toFixed(1)+' ГБ':n>=1024**2?(n/1024**2).
 const duration=n=>n>=3600?`${Math.floor(n/3600)} ч ${Math.round(n%3600/60)} мин`:`${Math.round(n/60)} мин`;
 const normalize=s=>s.toLocaleLowerCase('ru').replaceAll('ё','е');
 let data={tracks:[],playlists:[]}, tracks=new Map(), saved=new Map(), queue=new Queue();
+let catalogReady=false,catalogError=null;
 let view='home', selectedPlaylist=null, query='', shown=70, online=native?true:navigator.onLine, loggedIn=false, editing=null, installPrompt=null;
 let generation=0, objectURL=null, loadedEntry=null, restoreEntry=null, toastTimer, lastPersist=0, restoredTime=0;
 let nativeRevision=0,lastNativeQueue='',nativeReady=false,lastFiles='';
@@ -119,6 +120,7 @@ function connection() {
 function displayCatalog(value) {
   const before=queue.current&&tracks.get(queue.current.trackId);
   data={...value,tracks:value.tracks.map(withLocalRange),playlists:value.playlists.filter(p=>!p.djReview)};
+  catalogReady=true;catalogError=null;
   if(native&&native.version()>=21){
     const reviewIds=data.tracks.filter(track=>track.djV4&&(track.djV4.needsReview||track.djV4.reviewRecommended)).map(track=>track.id);
     if(reviewIds.length)data.playlists.push({id:900000021,name:'DJ — проверить переходы',trackIds:reviewIds,djReview:true});
@@ -165,7 +167,7 @@ async function savePlaybackRange(track,part){
 async function refresh(silent=false) {
   const generation=playlistChanges.generation;
   try { await applyData(await api('catalog'),generation);playlistChanges.flush();if(!silent)toast('Библиотека обновлена'); }
-  catch(error) { if(!silent||!data.tracks.length)showError(error); }
+  catch(error) { if(!catalogReady){catalogError=error;render();}else if(!silent)showError(error); }
 }
 async function edit(action,extra={}) {
   if(action==='add'||action==='remove')return playlistChanges.enqueue(action,extra);
@@ -382,6 +384,12 @@ async function beginSearch(youtubeOnly=false){
 }
 async function prepareDiscovery(jobId,index){await sendDiscovery({action:'prepare',jobId,index},true);}
 function render() {
+  if(!catalogReady){
+    if(catalogError?.status===401||catalogError?.status===403)main.replaceChildren(empty('Твоя музыка — здесь',native?'Для подключения нажми «Открыть бота», затем «Подключить приложение».':'Для первого входа открой приложение из бота.',el('a',{class:'button primary',href:'https://t.me/aidj_codex_music_bot?start=android'},'Открыть бота')));
+    else if(catalogError)main.replaceChildren(empty('Не удалось открыть музыку',catalogError.message,button('Повторить',null,initialize,'button primary')));
+    else main.replaceChildren(el('div',{class:'loading',role:'status'},el('div',{class:'spinner'}),'Загружаю библиотеку…'));
+    return;
+  }
   const active=document.activeElement,focused=['search','discover-query'].includes(active?.id);
   const tree=view==='playlist'?playlistPage():view==='saved'?savedPage():view==='queue'?queuePage():view==='discover'?discoverPage():view==='reviews'?reviewsPage():home();
   const location=view+':'+(selectedPlaylist??'');
@@ -973,7 +981,7 @@ setInterval(checkForUpdate,900000);
 $('update-notice').addEventListener('click',()=>downloadAPK().catch(showError));
 async function initialize(){
   try{tg?.ready();tg?.expand();tg?.setHeaderColor('#141514');tg?.setBackgroundColor('#141514');}catch{}
-  main.replaceChildren(el('div',{class:'loading'},el('div',{class:'spinner'}),'Открываю музыку…'));
+  catalogError=null;render();
   try{
     saved=new Map((await storage.files()).map(x=>[x.md5,x]));
     playbackPreferences=normalisePlayback(await storage.meta('playback-preferences'));playlistPlayback=await storage.meta('playlist-playback')||{};
@@ -988,13 +996,12 @@ async function initialize(){
     else if(tg?.initData)await api('auth',{initData:tg.initData});
     await refresh(true);checkForUpdate();
     flushRanges();flushVotes();
-    if(!data.tracks.length&&!loggedIn){main.replaceChildren(empty('Твоя музыка — здесь',native?'Для подключения нажми «Открыть бота», затем «Подключить приложение».':'Для первого входа открой приложение из бота.',el('a',{class:'button primary',href:'https://t.me/aidj_codex_music_bot?start=android'},'Открыть бота')));}
-    else render();
+    render();
     if(!native&&'serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
     connection();
     if(!native&&new URLSearchParams(location.hash.slice(1)).get('import')==='1')await importCached();
   }catch(error){
-    if(data.tracks.length){serverUnavailable=true;if(!native)online=navigator.onLine;connection();render();}else{main.replaceChildren(empty('Не удалось открыть музыку',error.message,button('Повторить',null,initialize,'button primary')));}
+    if(catalogReady){serverUnavailable=true;if(!native)online=navigator.onLine;connection();render();}else{catalogError=error;render();}
   }
 }
 async function checkForUpdate(){
