@@ -445,3 +445,42 @@ def test_author_never_receives_own_suggestion_even_through_a_library_alias(setup
     item=R.remember(db,other);proposal=R.proposal(db,202,202,p['id'],item)
     db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposal['id'],));db.commit()
     assert R.next_card(db,'other-author',101,101)[0]['item_id']==item
+
+
+@pytest.mark.parametrize('status',['confirmed','archived'])
+@pytest.mark.parametrize('state',['open','voted'])
+def test_author_cannot_vote_through_an_old_card_after_proposing_an_audio_alias(setup,status,state):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    original=R.remember(db,result)
+    alias=R.remember(db,{**result,'track':{**result['track'],'source':'youtube','id':'late-own-alias'}})
+    proposal=R.proposal(db,101,101,p['id'],alias)
+    db.execute('UPDATE review_proposals SET status=? WHERE id=?',(status,proposal['id']))
+    db.execute('INSERT INTO review_cards(id,user_id,chat_id,playlist_id,item_id,state,created) VALUES (?,?,?,?,?,?,0)',('old-own-card',101,101,p['id'],original,state))
+    if state=='voted':db.execute('INSERT INTO review_votes VALUES (?,?,?,?,?)',(p['id'],original,101,-1,1))
+    db.commit()
+    with pytest.raises(R.ReviewError,match='твоё предложение'):
+        R.vote(db,'old-own-card',101,101,1)
+    votes=db.execute('SELECT value FROM review_votes WHERE user_id=101').fetchall()
+    assert [v[0] for v in votes]==([-1] if state=='voted' else [])
+    if state=='open':assert db.execute("SELECT state FROM review_cards WHERE id='old-own-card'").fetchone()[0]=='skipped'
+
+
+def test_next_card_discards_an_already_open_self_proposal(setup):
+    settings,db,disk,bot,manager,result,p,*_=setup
+    start(setup);assert process(setup)==0
+    card=db.execute("SELECT * FROM review_cards WHERE user_id=101 AND state='open'").fetchone()
+    proposal=R.proposal(db,101,101,p['id'],card['item_id'])
+    db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposal['id'],));db.commit()
+    assert R.next_card(db,'discard-open-self',101,101)==(None,False)
+    assert db.execute('SELECT state FROM review_cards WHERE id=?',(card['id'],)).fetchone()[0]=='skipped'
+
+
+def test_worker_rechecks_author_before_delivering_a_queued_card(setup):
+    settings,db,disk,bot,manager,result,p,uploads,downloads=setup
+    start(setup)
+    card=db.execute("SELECT * FROM review_cards WHERE user_id=101 AND state='queued'").fetchone()
+    proposal=R.proposal(db,101,101,p['id'],card['item_id'])
+    db.execute("UPDATE review_proposals SET status='confirmed' WHERE id=?",(proposal['id'],));db.commit()
+    assert process(setup)==1
+    assert uploads==downloads==[]
+    assert db.execute('SELECT state FROM review_cards WHERE id=?',(card['id'],)).fetchone()[0]=='skipped'

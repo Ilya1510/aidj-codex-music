@@ -123,10 +123,22 @@ def review_weight(total,dislikes):
     return 1.25 if dislikes else 1/(1+total)
 
 
+def own_suggestion(db,playlist_id,user_id,item_id):
+    """Author exclusions follow the audio across aliases and old cards."""
+    return db.execute("""SELECT 1 FROM review_proposals p
+        JOIN review_items proposed ON proposed.id=p.item_id
+        JOIN review_items target ON target.id=?
+        WHERE p.playlist_id=? AND p.user_id=? AND p.status IN ('confirmed','archived')
+        AND (p.item_id=target.id OR json_extract(proposed.result,'$.md5')=json_extract(target.result,'$.md5'))
+        LIMIT 1""",(item_id,playlist_id,user_id)).fetchone() is not None
+
+
 def next_card(db,event,user_id,chat_id):
     user=ensure_user(db,user_id,chat_id);pid=user['playlist_id']
     current=db.execute("SELECT * FROM review_cards WHERE user_id=? AND state IN ('queued','open')",(user_id,)).fetchone()
-    if current:return current,False
+    if current:
+        if not own_suggestion(db,current['playlist_id'],user_id,current['item_id']):return current,False
+        db.execute("UPDATE review_cards SET state='skipped' WHERE id=?",(current['id'],));db.commit()
     capacity(db,user_id)
     pool=playlist_items(db,pid)
     if not pool:return None,False
@@ -167,6 +179,10 @@ def vote(db,card_id,user_id,chat_id,value):
     try:
         card=db.execute('SELECT * FROM review_cards WHERE id=? AND user_id=? AND chat_id=?',(card_id,user_id,chat_id)).fetchone()
         if not card or card['state'] not in ('open','voted'):raise ReviewError('Эта карточка недоступна. Нажми «Начать размечать».')
+        if own_suggestion(db,card['playlist_id'],user_id,card['item_id']):
+            if card['state']=='open':
+                db.execute("UPDATE review_cards SET state='skipped' WHERE id=?",(card_id,));db.commit()
+            raise ReviewError('Это твоё предложение. Нажми «Следующая песня», чтобы оценить другую запись.')
         db.execute('''INSERT INTO review_votes VALUES (?,?,?,?,?) ON CONFLICT(playlist_id,item_id,user_id)
             DO UPDATE SET value=excluded.value,updated=excluded.updated''',(card['playlist_id'],card['item_id'],user_id,value,time.time()))
         db.execute("UPDATE review_cards SET state='voted' WHERE id=?",(card_id,));db.commit()

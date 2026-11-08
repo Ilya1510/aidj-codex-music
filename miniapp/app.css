@@ -42,3 +42,5 @@ body.has-downloads{padding-bottom:calc(245px + var(--safe))}
 .header-tools{display:flex;flex-direction:column;align-items:center;flex-shrink:0;position:relative}.update-notice{color:var(--accent);font-size:10px;line-height:1.2;padding:0 3px 3px;white-space:nowrap}.header-tools .update-notice[hidden]{display:none}.full-player .transport{margin:16px 0}.full-player .seek{margin-top:20px}.full-player .player-title-row{margin-top:12px}.full-player .player-top{margin-bottom:10px}
 
 .playback-modes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.playback-modes .button{margin:0;min-height:46px;padding:10px 8px;white-space:normal}
+
+.review-person-details{display:grid;gap:3px;padding:7px 0}.review-person-details>span{display:block}

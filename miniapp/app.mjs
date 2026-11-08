@@ -705,7 +705,9 @@ function paintReviewDetails(track){
   for(const p of people){
     const label=p.isMine?'Ты':p.label;
     const name=p.username?el('button',{class:'text-button',onclick:()=>openLink('https://t.me/'+p.username)},label):el('span',{},label);
-    group.append(el('div',{class:'review-person'},name,el('span',{},(p.vote===1?'👍':p.vote===-1?'👎':p.vote===0?'😐':'Без оценки')+(p.proposed?' · предложил(а)':''))));
+    group.append(el('div',{class:'review-person'},name,el('span',{class:'review-person-details'},
+      el('span',{},p.vote===1?'👍 Нравится':p.vote===-1?'👎 Не нравится':p.vote===0?'😐 Всё равно':'Без оценки'),
+      p.proposed?el('span',{},'Автор предложения'):null)));
   }
   const children=[el('p',{},track.artist),priorityBadge(track),el('p',{class:'subtitle'},'Для плейлиста «'+(data.review?.playlistName||'Volleyball')+'»'),ratingControls(track,false),
     el('p',{class:'subtitle'},votesCount(r.total)+(!online?' · сохранённые данные':'')),group];

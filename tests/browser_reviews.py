@@ -225,6 +225,7 @@ def main():
                 assert not any(x in page.locator('#full-content').inner_text().split() for x in ['null','undefined','true','false'])
                 page.locator('#full-content').get_by_role('button',name='Кто оценил',exact=True).click()
                 page.get_by_role('button',name='@friend_like',exact=True).wait_for()
+                assert '👍 Нравится' in page.locator('.review-person').filter(has_text='@friend_like').inner_text()
                 stage='offline-vote';context.set_offline(True);page.wait_for_function('()=>!navigator.onLine')
                 page.locator('#sheet').get_by_role('button',name='Не нравится',exact=True).click();page.locator('#sheet .rating-vote[aria-label="Не нравится"][aria-pressed=true]').wait_for()
                 assert not votes
@@ -237,6 +238,8 @@ def main():
                 page.get_by_role('button',name='Плейлисты',exact=True).click();page.get_by_role('button',name='Оценки и предложения',exact=True).click();page.get_by_role('button',name='Предложения',exact=True).click()
                 stage='proposal';row=page.locator('main .song-row').filter(has_text='Предложенная песня');row.get_by_role('button',name='Действия с песней',exact=True).click();page.locator('#sheet').get_by_role('button',name='Кто оценил',exact=True).click()
                 page.get_by_role('button',name='@friend_suggest',exact=True).wait_for()
+                proposer=page.locator('.review-person').filter(has_text='@friend_suggest')
+                assert 'Автор предложения' in proposer.inner_text() and '👎 Не нравится' in proposer.inner_text()
                 assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
                 page.screenshot(path=str(output/'review-people.png'))
                 page.get_by_role('button',name='Добавить в Volleyball QA',exact=True).click();page.get_by_role('button',name='Снять с разметки',exact=True).wait_for()

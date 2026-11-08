@@ -99,6 +99,9 @@ def process(settings,db,row,bot,disk=None,sources=None):
             if action=='listen':
                 card=db.execute("SELECT * FROM review_cards WHERE id=? AND user_id=? AND chat_id=? AND state='queued'",(payload.get('card_id'),row['user_id'],row['chat_id'])).fetchone()
                 if not card:raise R.ReviewError('Эта карточка уже закрыта.')
+                if R.own_suggestion(db,card['playlist_id'],row['user_id'],card['item_id']):
+                    db.execute("UPDATE review_cards SET state='skipped' WHERE id=?",(card['id'],));db.commit()
+                    raise R.ReviewError('Это твоё предложение. Нажми «Следующая песня», чтобы оценить другую запись.')
                 if card['item_id'] not in R.playlist_items(db,card['playlist_id']):raise R.ReviewError('Эту песню уже убрали из разметки. Нажми «Следующая песня».')
                 sent=send_audio(settings,db,bot,row['chat_id'],card['item_id'],work,vote_keyboard(card['id']),disk)
                 db.execute("UPDATE review_cards SET state='open',message_id=? WHERE id=?",(sent['message_id'],card['id']));db.commit()
