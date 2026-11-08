@@ -1,4 +1,4 @@
-const CACHE = 'aidj-shell-v32';
+const CACHE = 'aidj-shell-v33';
 const SHELL = ['/', '/index.html', '/app.css', '/app.mjs', '/native.mjs', '/playlist-changes.mjs', '/transfer.mjs', '/segments.mjs', '/playback.mjs', '/dj.mjs', '/ratings.mjs', '/reorder.mjs', '/player.mjs', '/storage.mjs', '/icon.svg', '/manifest.webmanifest', '/telegram-web-app.js'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
 self.addEventListener('activate', event => event.waitUntil((async () => {

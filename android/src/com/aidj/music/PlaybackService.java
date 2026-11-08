@@ -26,6 +26,7 @@ public final class PlaybackService extends Service {
     private AudioManager audio;
     private AudioFocusRequest focus;
     private JSONObject queue=new JSONObject();
+    private long playbackEpoch=0;
     private String loaded="",error="";
     private boolean ready=false,wantPlay=false,resumeAfterFocus=false,rangeSeeking=false;
     private long pendingSeek=0;
@@ -39,6 +40,7 @@ public final class PlaybackService extends Service {
     @Override public void onCreate(){
         super.onCreate();instance=this;
         try{queue=new JSONObject(State.get(this).read("nativeQueue","{}"));}catch(Exception ignored){}
+        playbackEpoch=Math.max(0,queue.optLong("playbackEpoch",0));stampEpoch();
         pendingSeek=(long)(queue.optDouble("time")*1000);
         audio=(AudioManager)getSystemService(AUDIO_SERVICE);
         focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()).setOnAudioFocusChangeListener(change->{
@@ -84,12 +86,20 @@ public final class PlaybackService extends Service {
     private JSONObject current(){return playingTrack!=null&&loaded.equals(queue.optString("currentId"))?playingTrack:DjPlan.track(source(entry()),entry(),dj());}
     private JSONObject nextEntry(){if(!remix()&&"one".equals(queue.optString("repeat")))return null;int at=index()+1;if(at>=entries().length())at=!remix()&&"all".equals(queue.optString("repeat"))?0:-1;return at<0?null:entries().optJSONObject(at);}
     private String nextSpec(){JSONObject e=nextEntry(),t=source(e);return e==null||t==null?"":e.optString("id")+"|"+e.optBoolean("djFull")+"|"+e.optBoolean("remix")+"|"+String.valueOf(e.optJSONObject("dj"))+"|"+t.optString("md5")+"|"+t.optDouble("rangeStart",0)+"|"+t.optDouble("rangeEnd",t.optDouble("duration"))+"|"+dj();}
-    void setQueue(JSONObject value){
-        long revision=value.optLong("uiRevision");if(revision<queue.optLong("uiRevision"))return;
-        String before=queue.optString("currentId");boolean wasDj=dj(),wasAudition=queue.optBoolean("djAudition");long oldStart=PlaybackRange.start(current(),duration()),oldEnd=PlaybackRange.end(current(),duration());float oldSpeed=speed;String keepNext=incoming==null?"":incomingId;queue=value;RemixPlan.arrange(queue,before.equals(queue.optString("currentId"))?keepNext:"");if(!before.equals(queue.optString("currentId")))pendingSeek=0;
+    private void stampEpoch(){try{queue.put("playbackEpoch",playbackEpoch);}catch(Exception ignored){}}
+    private void advanceEpoch(){if(playbackEpoch<Long.MAX_VALUE)playbackEpoch++;stampEpoch();}
+    private boolean matchesEpoch(JSONObject value){Object raw=value.opt("playbackEpoch");if(!(raw instanceof Number))return false;double number=((Number)raw).doubleValue();return Double.isFinite(number)&&number>=0&&number==Math.rint(number)&&((Number)raw).longValue()==playbackEpoch;}
+    void setQueue(JSONObject value){applyQueue(value,false);}
+    boolean applyQueue(JSONObject value,boolean explicitSelection){return applyQueue(value,explicitSelection,false);}
+    private boolean applyQueue(JSONObject value,boolean explicitSelection,boolean metadataOnly){
+        if(value==null||value.optInt("queueProtocol",0)>=1&&!explicitSelection&&!matchesEpoch(value))return false;
+        long revision=value.optLong("uiRevision");if(revision<queue.optLong("uiRevision"))return false;
+        String before=queue.optString("currentId");boolean wasDj=dj(),wasAudition=queue.optBoolean("djAudition");long oldStart=PlaybackRange.start(current(),duration()),oldEnd=PlaybackRange.end(current(),duration());float oldSpeed=speed;String keepNext=incoming==null?"":incomingId;queue=value;if(!metadataOnly)RemixPlan.arrange(queue,before.equals(queue.optString("currentId"))?keepNext:"");if(!before.equals(queue.optString("currentId")))pendingSeek=0;
+        JSONObject selectedSource=source(entry()),selectedTrack=DjPlan.track(selectedSource,entry(),dj());long selectedDuration=before.equals(queue.optString("currentId"))&&ready?duration():(long)((selectedSource==null?0:selectedSource.optDouble("duration"))*1000);
+        if(!before.equals(queue.optString("currentId"))||oldStart!=PlaybackRange.start(selectedTrack,selectedDuration)||oldEnd!=PlaybackRange.end(selectedTrack,selectedDuration)||oldSpeed!=DjPlan.rate(selectedSource,entry(),dj()))advanceEpoch();else stampEpoch();
         State.get(this).write("nativeQueue",queue.toString());
         String id=queue.optString("currentId");
-        if(current()==null){releasePlayer();stopSelf();return;}
+        if(current()==null){releasePlayer();stopSelf();return true;}
         if(!loaded.equals(id)&&player!=null){boolean playing=wantPlay;releasePlayer();if(playing)prepare(true);}
         else if(ready){
             playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=DjPlan.rate(source(entry()),entry(),dj());if(oldSpeed!=speed)setSpeed(player,speed);
@@ -101,6 +111,25 @@ public final class PlaybackService extends Service {
         if(!wasAudition&&audition()&&ready)seek(DjPlan.previewTail(current(),duration(),speed));
         applyVolume();
         updateSession();
+        return true;
+    }
+    private static JSONObject shallow(JSONObject original){JSONObject result=new JSONObject();if(original!=null){java.util.Iterator<String> keys=original.keys();while(keys.hasNext()){String key=keys.next();try{result.put(key,original.opt(key));}catch(Exception ignored){}}}return result;}
+    boolean refreshMetadata(JSONObject patch){
+        if(patch==null)return false;
+        JSONObject oldTracks=queue.optJSONObject("tracks"),newTracks=shallow(oldTracks),patchTracks=patch.optJSONObject("tracks");
+        HashSet<String> liveIds=new HashSet<>();for(int i=0;i<entries().length();i++)liveIds.add(entries().optJSONObject(i).optString("trackId"));
+        boolean changed=false;
+        if(patchTracks!=null)for(String id:liveIds){JSONObject fresh=patchTracks.optJSONObject(id);if(fresh!=null&&oldTracks!=null&&oldTracks.has(id)&&!String.valueOf(oldTracks.opt(id)).equals(fresh.toString())){try{newTracks.put(id,fresh);changed=true;}catch(Exception ignored){}}}
+        HashMap<String,JSONObject> metadata=new HashMap<>();JSONArray updates=patch.optJSONArray("entries");if(updates!=null)for(int i=0;i<updates.length();i++){JSONObject e=updates.optJSONObject(i);if(e!=null&&liveIds.contains(e.optString("trackId")))metadata.put(e.optString("trackId"),e);}
+        JSONArray mergedEntries=new JSONArray();String[] fields={"remixAnchors","remixAcousticAnchors","remixPool","remixCues"};
+        for(int i=0;i<entries().length();i++){
+            JSONObject old=entries().optJSONObject(i),fresh=metadata.get(old.optString("trackId"));if(fresh==null){mergedEntries.put(old);continue;}JSONObject merged=shallow(old);
+            for(String field:fields){Object value=fresh.opt(field);if(value==JSONObject.NULL)value=null;if(!String.valueOf(old.opt(field)).equals(String.valueOf(value)))changed=true;try{if(value==null)merged.remove(field);else merged.put(field,value);}catch(Exception ignored){}}
+            mergedEntries.put(merged);
+        }
+        if(!changed)return true;JSONObject merged=shallow(queue);
+        try{merged.put("tracks",newTracks).put("entries",mergedEntries).put("playbackEpoch",playbackEpoch);}catch(Exception ignored){return false;}
+        return applyQueue(merged,false,true);
     }
     boolean isPlaying(){try{return ready&&player!=null&&player.isPlaying();}catch(Exception e){return false;}}
     long position(){try{return ready&&player!=null?player.getCurrentPosition():pendingSeek;}catch(Exception e){return 0;}}
@@ -249,6 +278,7 @@ public final class PlaybackService extends Service {
         incomingLevel=null;incoming=null;cancelIncoming();if(playerLevel!=null){playerLevel.release();playerLevel=null;}if(player!=null)try{player.release();}catch(Exception ignored){}
         RemixPlan.finish(queue,finished,id,skipped);
         try{queue.put("currentId",id);queue.put("time",next.getCurrentPosition()/1000.0);}catch(Exception ignored){}
+        advanceEpoch();
         try{JSONObject e=entry();if(e!=null)e.put("auditionIntro",queue.optBoolean("djAudition"));}catch(Exception ignored){}
         player=next;playerLevel=nextLevel;loaded=id;playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=rate;ready=true;rangeSeeking=false;pendingSeek=0;failedIncoming="";lastGain=-1;
         next.setOnPreparedListener(null);next.setOnSeekCompleteListener(mp->{if(player==mp){rangeSeeking=false;applyVolume();if(wantPlay&&!isPlaying())play();}});
@@ -261,7 +291,7 @@ public final class PlaybackService extends Service {
         if(direction==1&&(remix()||!"one".equals(queue.optString("repeat")))&&incomingReady&&incomingId.equals(nextEntry()==null?"":nextEntry().optString("id"))){promote(!ended);play();return;}
         if(remix()){
             if(direction<0){seek(0);play();return;}
-            String finished=queue.optString("currentId");RemixPlan.finish(queue,finished,"",!ended);pendingSeek=0;
+            String finished=queue.optString("currentId");RemixPlan.finish(queue,finished,"",!ended);advanceEpoch();pendingSeek=0;
             if(entries().length()==0){pause();releasePlayer();savePosition();updateSession();return;}
             State.get(this).write("nativeQueue",queue.toString());prepare(true);return;
         }
@@ -275,10 +305,11 @@ public final class PlaybackService extends Service {
         }
         if(next<0)next=0;
         try{queue.put("currentId",list.getJSONObject(next).getString("id"));queue.put("time",0);}catch(Exception ignored){}
+        advanceEpoch();
         pendingSeek=0;State.get(this).write("nativeQueue",queue.toString());prepare(true);
     }
     private void releasePlayer(){cancelIncoming();if(playerLevel!=null){playerLevel.release();playerLevel=null;}playingTrack=null;if(player!=null){try{player.release();}catch(Exception ignored){}player=null;}ready=false;rangeSeeking=false;lastGain=-1f;loaded="";}
-    private void savePosition(){try{queue.put("time",position()/1000.0);State.get(this).write("nativeQueue",queue.toString());}catch(Exception ignored){}}
+    private void savePosition(){stampEpoch();try{queue.put("time",position()/1000.0);State.get(this).write("nativeQueue",queue.toString());}catch(Exception ignored){}}
     private PendingIntent action(String value,int request){
         Intent intent=new Intent(this,PlaybackService.class).putExtra("action",value);
         return PendingIntent.getForegroundService(this,request,intent,PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
@@ -324,7 +355,7 @@ public final class PlaybackService extends Service {
     }
     JSONObject snapshot(){return snapshot(false);}
     JSONObject snapshot(boolean light){
-        JSONObject visibleQueue=light?lightQueue(queue):queue;
+        stampEpoch();JSONObject visibleQueue=light?lightQueue(queue):queue;
         JSONObject state=new JSONObject();try{state.put("queue",visibleQueue);state.put("paused",!wantPlay);state.put("playing",wantPlay&&isPlaying());state.put("buffering",wantPlay&&!isPlaying());state.put("time",position()/1000.0);state.put("duration",duration()/1000.0);state.put("error",error);state.put("waitingNext",waitingNext);}catch(Exception ignored){}return state;
     }
     @Override public void onDestroy(){handler.removeCallbacks(librarySync);handler.removeCallbacks(rangeTick);savePosition();releasePlayer();audio.abandonAudioFocusRequest(focus);if(noisy!=null)unregisterReceiver(noisy);if(session!=null)session.release();instance=null;super.onDestroy();}

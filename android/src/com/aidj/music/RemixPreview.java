@@ -12,11 +12,12 @@ final class RemixPreview {
     // anchor graphs participate in the poll cache key.
     private static final class Tag {
         final String currentId,manualNextId,nextId,currentDj,nextDj,currentRange,nextRange;
-        final long revision;
+        final long revision,epoch;
         final int entries,visits,lookahead;
         final double duration;
         Tag(JSONObject q){
             currentId=q.optString("currentId");manualNextId=q.optString("manualNextId");revision=q.optLong("uiRevision");
+            epoch=q.optLong("playbackEpoch");
             JSONArray all=q.optJSONArray("entries");entries=all==null?0:all.length();
             visits=RemixPlan.maxVisits(q);lookahead=RemixPlan.lookahead(q);duration=RemixPlan.desiredDuration(q);
             int at=index(q,currentId);JSONObject current=at<0?null:all.optJSONObject(at),next=at<0?null:all.optJSONObject(at+1);
@@ -28,7 +29,7 @@ final class RemixPreview {
             return t==null?"":e.optString("trackId")+"|"+t.optDouble("duration")+"|"+DjPlan.lower(t)+"|"+DjPlan.upper(t);
         }
         boolean same(Tag other){
-            return other!=null&&revision==other.revision&&entries==other.entries&&visits==other.visits&&lookahead==other.lookahead&&duration==other.duration
+            return other!=null&&revision==other.revision&&epoch==other.epoch&&entries==other.entries&&visits==other.visits&&lookahead==other.lookahead&&duration==other.duration
                 &&currentId.equals(other.currentId)&&manualNextId.equals(other.manualNextId)&&nextId.equals(other.nextId)
                 &&currentDj.equals(other.currentDj)&&nextDj.equals(other.nextDj)&&currentRange.equals(other.currentRange)&&nextRange.equals(other.nextRange);
         }
@@ -74,7 +75,7 @@ final class RemixPreview {
                 if(!Double.isFinite(start)||!Double.isFinite(end)||end<=start)break;
                 segments.put(new JSONObject().put("position",i+1).put("entryId",entry.optString("id")).put("trackId",entry.optString("trackId")).put("start",start).put("end",end));
             }
-            JSONObject result=new JSONObject().put("currentId",tag.currentId).put("uiRevision",tag.revision).put("segments",segments);
+            JSONObject result=new JSONObject().put("currentId",tag.currentId).put("uiRevision",tag.revision).put("playbackEpoch",tag.epoch).put("segments",segments);
             cachedResult=result.toString();cachedTag=tag;return new JSONObject(cachedResult);
         }catch(Exception ignored){return null;}
     }

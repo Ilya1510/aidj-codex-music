@@ -3,6 +3,7 @@ let sequence=0;
 const waiting=new Map();
 if(native)globalThis.__aidjNativeReply=(id,result)=>{
   const task=waiting.get(String(id));if(!task)return;waiting.delete(String(id));clearTimeout(task.timer);
+  if(result.player)globalThis.__aidjNativeState?.({player:result.player,queueConflict:result.queueAccepted===false,requestedUiRevision:result.requestedUiRevision});
   if(result.error)task.reject(new Error(result.error));else task.resolve(result);
 };
 export function command(type,extra={}){
@@ -27,14 +28,26 @@ export class NativeAudio extends EventTarget {
   }
 }
 export class NativeDownloads {
-  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;this.phase='';this.percent=0;this.bytesTotal=0;this.failedCount=0;this.needsRetry=false;this.controlling=false;}
-  add(tracks){command('download',{tracks}).catch(error=>{this.error=error;this.changed();});}
+  constructor(changed){this.changed=changed;this.active=null;this.pending=[];this.paused=false;this.completed=0;this.total=0;this.error=null;this.phase='';this.percent=0;this.bytesTotal=0;this.bytesDownloaded=0;this.failedCount=0;this.needsRetry=false;this.pauseReason='';this.controlling=false;this.snapshotKey=this.stateKey();}
+  stateKey(){
+    // Track snapshots may include large DJ/loudness graphs. Compare the download
+    // identity and display metadata without walking those graphs on every poll.
+    const track=t=>t?[t.id,t.md5,t.title,t.artist,t.bytes]:null;
+    return JSON.stringify([track(this.active),this.pending.map(track),this.paused,this.completed,this.total,this.phase,this.percent,this.bytesTotal,this.bytesDownloaded,this.failedCount,this.needsRetry,this.pauseReason,this.controlling,this.error?.name,this.error?.message]);
+  }
+  notify(){this.snapshotKey=this.stateKey();this.changed();}
+  add(tracks){command('download',{tracks}).catch(error=>{this.error=error;this.notify();});}
   toggle(){return this.setPaused(!(this.paused||this.needsRetry));}
   setPaused(paused){
     const modern=typeof native.version==='function'&&native.version()>=16;
-    this.controlling=true;this.changed();
-    return command(modern?'downloadPause':'downloadToggle',modern?{paused}:{}).catch(error=>{this.error=error;}).finally(()=>{this.controlling=false;this.changed();});
+    this.controlling=true;this.notify();
+    return command(modern?'downloadPause':'downloadToggle',modern?{paused}:{}).catch(error=>{this.error=error;}).finally(()=>{this.controlling=false;this.notify();});
   }
   cancel(){command('downloadCancel').catch(()=>{});}
-  accept(state){Object.assign(this,{failedCount:0,needsRetry:false},state);this.error=state.error?new Error(state.error):null;this.changed();}
+  accept(state){
+    const message=state.error?String(state.error):null,error=this.error;
+    Object.assign(this,{failedCount:0,needsRetry:false},state);
+    this.error=message?(error?.name==='Error'&&error.message===message?error:new Error(message)):null;
+    const key=this.stateKey();if(key===this.snapshotKey)return;this.snapshotKey=key;this.changed();
+  }
 }

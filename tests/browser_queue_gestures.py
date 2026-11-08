@@ -12,9 +12,21 @@ def main():
     tracks[0].update(rangeStart=0,rangeEnd=114.832)
     tracks[0]['loudness']={'integratedLufs':-26.12,'truePeakDbtp':-12.08,'method':'ebu-r128-v1'}
     data={'tracks':tracks,'playlists':[{'id':1,'name':'Volleyball','trackIds':[t['id'] for t in tracks],'revision':'queue-qa'}]}
-    bridge=BRIDGE.replace('version:()=>8','version:()=>32').replace('window.__fadeCalls=[];','''window.__fadeCalls=[];window.__queueState=state;
+    bridge=BRIDGE.replace('version:()=>8','version:()=>33').replace('window.__fadeCalls=[];','''window.__fadeCalls=[];window.__queueState=state;
     window.__qaForecast=()=>{const q=state.player.queue,at=q.entries.findIndex(e=>e.id===q.currentId);
-      state.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,segments:q.entries.slice(at+1,at+11).map((e,i)=>({position:i+1,entryId:e.id,trackId:e.trackId,start:e.dj?.start??0,end:e.dj?.end??q.tracks[e.trackId].duration}))};};''')
+      state.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,playbackEpoch:q.playbackEpoch||0,segments:q.entries.slice(at+1,at+11).map((e,i)=>({position:i+1,entryId:e.id,trackId:e.trackId,start:e.dj?.start??0,end:e.dj?.end??q.tracks[e.trackId].duration}))};};''')
+    bridge=bridge.replace("else if(value.type==='queue'||value.type==='play'){state.player.queue=value.queue;if(value.type==='play')state.player.paused=false;}",'''else if(value.type==='queue'||value.type==='play'){
+      if(window.__advanceBeforeQueue){window.__advanceBeforeQueue=false;const q=state.player.queue;q.entries.shift();q.currentId=q.entries[0].id;q.playbackEpoch=(q.playbackEpoch||0)+1;state.player.time=q.entries[0].dj.start+2;}
+      const old=state.player.queue,accepted=value.replaceQueue||value.queue.playbackEpoch===(old.playbackEpoch||0);
+      if(accepted)state.player.queue={...value.queue,playbackEpoch:(old.playbackEpoch||0)+(old.currentId!==value.queue.currentId?1:0)};
+      if(value.type==='play')state.player.paused=false;
+      result={ok:true,queueAccepted:accepted,requestedUiRevision:value.queue.uiRevision,player:structuredClone(state.player)};
+    }else if(value.type==='metadata'){
+      const q=state.player.queue,patch=value.metadata;
+      for(const id of Object.keys(q.tracks||{}))if(patch.tracks[id])q.tracks[id]=patch.tracks[id];
+      for(const e of q.entries){const p=patch.entries.find(p=>p.trackId===e.trackId);if(p)for(const key of ['remixAnchors','remixAcousticAnchors','remixPool','remixCues']){delete e[key];if(p[key]!=null)e[key]=p[key];}}
+      result={ok:true,player:structuredClone(state.player)};
+    }''')
     bridge=bridge.replace('window.__aidjNativeReply(id,result);', 'if(value.type==="queue"||value.type==="play")window.__qaForecast();window.__aidjNativeReply(id,result);')
     bridge+=';localStorage.setItem("fade_playback-preferences",JSON.stringify({mode:"remix",remixDurationSeconds:12,remixMaxVisits:3}));'
     with sync_playwright() as p:
@@ -58,7 +70,7 @@ def main():
             # execution forecast, including a second visit to one entry.
             page.evaluate('''()=>{const s=window.__queueState,q=s.player.queue,e=q.entries.slice(1);
               const step=(position,entry,start)=>({position,entryId:entry.id,trackId:entry.trackId,start,end:start+10});
-              s.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,segments:[step(1,e[0],20),step(2,e[2],70),step(3,e[1],40),step(4,e[2],100),step(5,q.entries[0],60)]};
+              s.player.remixPreview={currentId:q.currentId,uiRevision:q.uiRevision,playbackEpoch:q.playbackEpoch,segments:[step(1,e[0],20),step(2,e[2],70),step(3,e[1],40),step(4,e[2],100),step(5,q.entries[0],60)]};
               window.__aidjNativeState(structuredClone(s));}''')
             assert rows.nth(0).locator('.queue-step').all_text_contents()==['1 · 0:20–0:30']
             assert rows.nth(1).locator('.queue-step').all_text_contents()==['3 · 0:40–0:50']
@@ -109,17 +121,36 @@ def main():
             assert rows.count()==1 and rows.first.get_attribute('data-queue-entry')==wanted
             rows.first.get_by_role('button',name='Поставить следующей',exact=True).click()
             page.wait_for_function('window.__queueState.player.queue.manualNextId==='+__import__('json').dumps(wanted))
-            assert rows.first.locator('.queue-status').inner_text().startswith('1 · ')
+            page.wait_for_function('()=>document.querySelector(".queue-sortable .queue-status").textContent.startsWith("1 · ")')
             search.fill('');assert rows.count()==70 and rows.first.get_attribute('data-queue-entry')==wanted
             assert page.evaluate('window.__queueState.player.queue.currentId')==current
             # A background level-only update reaches an existing native queue,
             # without changing entry order, current excerpt or position.
-            entries_before=page.evaluate('JSON.stringify(window.__queueState.player.queue.entries)')
+            playback_entries='JSON.stringify(window.__queueState.player.queue.entries.map(({remixAnchors,remixAcousticAnchors,remixPool,remixCues,...e})=>e))'
+            entries_before=page.evaluate(playback_entries)
             tracks[17]['loudness']={'integratedLufs':-9.35,'truePeakDbtp':.33,'method':'ebu-r128-v1'}
             page.locator('#settings').click();page.get_by_role('button',name='Обновить библиотеку',exact=True).click()
             page.wait_for_function('()=>window.__queueState.player.queue.tracks["000000000000000000000012"].loudness?.integratedLufs===-9.35')
-            assert page.evaluate('JSON.stringify(window.__queueState.player.queue.entries)')==entries_before
+            assert page.evaluate(playback_entries)==entries_before
             assert page.evaluate('window.__queueState.player.queue.currentId')==current
+            # Polls must not replace visible rows during a scroll gesture.
+            page.evaluate('''()=>{window.__scrollRow=document.querySelector('.queue-sortable [data-queue-entry]');document.dispatchEvent(new Event('scroll'));window.__queueState.files=[{md5:'scroll-new-file'}];for(let i=0;i<12;i++)window.__aidjNativeState(structuredClone(window.__queueState));}''')
+            assert page.evaluate('window.__scrollRow.isConnected')
+            page.wait_for_timeout(240)
+            assert not page.evaluate('window.__scrollRow.isConnected')
+            # A transition between the last poll and a queue edit wins over the
+            # stale edit. The response restores the live epoch immediately.
+            page.evaluate('window.__oldPlayer=structuredClone(window.__queueState.player);window.__advanceBeforeQueue=true')
+            upcoming=page.evaluate('window.__queueState.player.queue.entries[1].trackId')
+            rows.nth(2).get_by_role('button',name='Поставить следующей',exact=True).click()
+            page.wait_for_function('()=>window.__queueState.player.queue.playbackEpoch>window.__oldPlayer.queue.playbackEpoch')
+            page.wait_for_function('()=>document.querySelector("#mini-title").textContent===window.__queueState.player.queue.tracks[window.__queueState.player.queue.entries[0].trackId].title')
+            assert page.evaluate('window.__queueState.player.queue.currentId')!=current
+            assert page.evaluate('window.__queueState.player.queue.entries[0].trackId')==upcoming
+            assert page.evaluate('window.__queueState.player.time===window.__queueState.player.queue.entries[0].dj.start+2')
+            # A late high-uiRevision snapshot from A cannot overwrite B's epoch.
+            page.evaluate('window.__oldPlayer.queue.uiRevision=Date.now()+1000000;window.__aidjNativeState({player:window.__oldPlayer})')
+            assert page.locator('#mini-title').inner_text()==page.evaluate('window.__queueState.player.queue.tracks[window.__queueState.player.queue.entries[0].trackId].title')
             assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
             assert not errors,errors
             print('QUEUE_GESTURES_PASSED touch reorder cancel native_poll duplicates next_pin scroll manual_remix sliders full_shuffle_removed')

@@ -139,14 +139,37 @@ public final class MainActivity extends Activity {
                     }
                     else if("queue".equals(type)||"play".equals(type)){
                         JSONObject queue=data.getJSONObject("queue");if(queue.optJSONArray("entries")==null||queue.getJSONArray("entries").length()>5000)throw new Exception();
-                        final boolean play="play".equals(type);State.get(MainActivity.this).write("nativeQueue",queue.toString());if(PlaybackService.instance==null)lastPlayer="";
+                        final boolean play="play".equals(type),replace=data.optBoolean("replaceQueue");
                         main.post(()->{
+                            JSONObject answer=new JSONObject();
                             try{
                                 PlaybackService service=PlaybackService.instance;
-                                if(play){Intent intent=new Intent(MainActivity.this,PlaybackService.class).putExtra("reloadQueue",true).putExtra("action","play");startForegroundService(intent);}
-                                else if(service!=null)service.setQueue(queue);
-                            }catch(Exception e){Toast.makeText(MainActivity.this,"Открой приложение и нажми воспроизведение ещё раз.",Toast.LENGTH_LONG).show();}
-                        });result.put("ok",true);
+                                if(service!=null){
+                                    boolean accepted=service.applyQueue(queue,replace);
+                                    // Resume targets the live song even if the submitted UI
+                                    // snapshot predates its automatic transition.
+                                    if(play&&(accepted||!replace))service.play();
+                                    answer.put("queueAccepted",accepted).put("requestedUiRevision",queue.optLong("uiRevision")).put("player",service.snapshot(true));
+                                }else{
+                                    State.get(MainActivity.this).write("nativeQueue",queue.toString());lastPlayer="";
+                                    if(play)startForegroundService(new Intent(MainActivity.this,PlaybackService.class).putExtra("reloadQueue",true).putExtra("action","play"));
+                                }
+                                answer.put("ok",true);
+                            }catch(Exception e){try{answer.put("error","Не удалось обновить очередь. Попробуй ещё раз.");}catch(Exception ignored){}}
+                            reply(id,answer);publish();
+                        });return;
+                    }else if("metadata".equals(type)){
+                        JSONObject patch=data.getJSONObject("metadata");
+                        if(patch.optJSONArray("entries")==null||patch.getJSONArray("entries").length()>5000)throw new Exception();
+                        main.post(()->{
+                            JSONObject answer=new JSONObject();
+                            try{
+                                PlaybackService service=PlaybackService.instance;
+                                if(service!=null){service.refreshMetadata(patch);answer.put("player",service.snapshot(true));}
+                                answer.put("ok",true);
+                            }catch(Exception e){try{answer.put("error","Не удалось обновить данные песен.");}catch(Exception ignored){}}
+                            reply(id,answer);publish();
+                        });return;
                     }else if("pause".equals(type)||"seek".equals(type)||"next".equals(type)||"previous".equals(type)){
                         main.post(()->{PlaybackService s=PlaybackService.instance;if(s!=null){if("pause".equals(type))s.pause();else if("next".equals(type))s.skip(1);else if("previous".equals(type))s.skip(-1);else s.seek((long)(data.optDouble("time")*1000));}else if("next".equals(type)||"previous".equals(type)){startForegroundService(new Intent(MainActivity.this,PlaybackService.class).putExtra("action",type));}});result.put("ok",true);
                     }else throw new Exception();

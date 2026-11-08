@@ -41,3 +41,36 @@ test('Resume sends an explicit desired state even when snapshots change during t
  assert.equal(downloads.controlling,false);
  await downloads.setPaused(true);assert.deepEqual(calls.at(-1),{type:'downloadPause',paused:true});
 });
+
+test('identical native download polls do not rebuild UI but real progress and queue changes notify',()=>{
+ let updates=0;const downloads=new NativeDownloads(()=>updates++);
+ const track={id:'song',md5:'hash',title:'Song',artist:'Artist',bytes:100,djV4:{anchors:Array(256).fill([1,2])}};
+ const state={active:track,pending:[{id:'next',md5:'next-hash',title:'Next',bytes:50}],completed:1,total:3,paused:false,error:null,phase:'Скачиваю',percent:25,bytesTotal:200,bytesDownloaded:50};
+ downloads.accept(state);assert.equal(updates,1);
+ downloads.accept(structuredClone(state));assert.equal(updates,1,'newly parsed objects with identical values are unchanged');
+ const metadata=structuredClone(state);metadata.active.djV4.anchors.push([3,4]);downloads.accept(metadata);assert.equal(updates,1,'unused DJ analysis does not rebuild download controls');
+ const progress={...state,percent:26,bytesDownloaded:52};downloads.accept(progress);assert.equal(updates,2);assert.equal(downloads.bytesDownloaded,52);
+ const phase={...progress,phase:'Жду подключения к сети'};downloads.accept(phase);assert.equal(updates,3);
+ const pending={...phase,pending:[{id:'replacement',md5:'replacement-hash',title:'Replacement',bytes:50}]};downloads.accept(pending);assert.equal(updates,4,'same-size pending queue with different songs is a change');
+ const renamed={...pending,active:{...track,title:'Renamed'}};downloads.accept(renamed);assert.equal(updates,5);
+ const paused={...renamed,paused:true,pauseReason:'manual'};downloads.accept(paused);assert.equal(updates,6);
+ downloads.accept(structuredClone(paused));assert.equal(updates,6);
+});
+
+test('download error equality preserves Error identity and older snapshots reset failure defaults',()=>{
+ let updates=0;const downloads=new NativeDownloads(()=>updates++);
+ downloads.accept({active:null,pending:[],error:null});assert.equal(updates,0,'initial idle poll has no visible change');
+ downloads.accept({failedCount:2,needsRetry:true,error:'Не удалось скачать'});const error=downloads.error;assert.equal(updates,1);
+ downloads.accept({failedCount:2,needsRetry:true,error:'Не удалось скачать'});assert.equal(updates,1);assert.strictEqual(downloads.error,error);
+ downloads.accept({error:'Нет подключения'});assert.equal(updates,2);assert.equal(downloads.error.message,'Нет подключения');assert.equal(downloads.failedCount,0);assert.equal(downloads.needsRetry,false);
+ downloads.accept({});assert.equal(updates,3);assert.equal(downloads.error,null,'an omitted native error clears the prior error');
+ downloads.accept({error:null});assert.equal(updates,3);
+});
+
+test('native snapshots still clear a local command error and preserve control updates',async()=>{
+ let updates=0;const downloads=new NativeDownloads(()=>updates++);
+ downloads.error=new Error('Local request failed');downloads.notify();assert.equal(updates,1);
+ downloads.accept({error:null});assert.equal(updates,2);assert.equal(downloads.error,null);
+ await downloads.setPaused(true);assert.equal(updates,4,'request start and finish still update disabled controls');
+ downloads.accept({error:null});assert.equal(updates,4,'a poll after the request does not redraw unchanged controls');
+});
