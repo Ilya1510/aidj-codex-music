@@ -39,3 +39,16 @@ test('partial files never enter offline storage and completed downloads are skip
   assert(saved.has('good'));assert(!saved.has('bad'));assert(d.paused);
   d.toggle();await new Promise(resolve=>setTimeout(resolve,20));assert(saved.has('bad'));assert.equal(d.completed,2);
 });
+
+test('upcoming drag moves duplicate occurrences by entry ID, preserves current and pins the next song',()=>{
+  const q=new Queue();q.start(['played','current','same','other','same'],1);
+  const [played,current,a,b,c]=q.entries;
+  assert(q.moveUpcoming(c.id,a.id));assert.deepEqual(q.entries.map(e=>e.id),[played.id,current.id,c.id,a.id,b.id]);
+  assert.equal(q.currentId,current.id);assert.equal(q.manualNextId,c.id);
+  const restored=new Queue(JSON.parse(JSON.stringify(q.snapshot())));assert.equal(restored.manualNextId,c.id);
+  assert.equal(q.moveUpcoming(current.id,null),false);assert.equal(q.moveUpcoming(played.id,null),false);
+  assert.equal(q.moveUpcoming(a.id,played.id),false);assert.equal(q.moveUpcoming(a.id,'deleted-entry'),false);
+  assert(q.moveUpcoming(c.id,null));assert.deepEqual(q.entries.map(e=>e.id),[played.id,current.id,a.id,b.id,c.id]);
+  assert.equal(q.manualNextId,a.id);q.next();assert.equal(q.currentId,a.id);assert.equal(q.manualNextId,null);
+  q.clearUpcoming();assert.equal(q.currentId,a.id);
+});

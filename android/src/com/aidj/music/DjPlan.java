@@ -4,31 +4,39 @@ import org.json.*;
 /** Queue-local interpretation. Never rewrites an original or a manual excerpt. */
 final class DjPlan {
     static boolean manual(JSONObject t){return t!=null&&(t.optDouble("rangeStart",0)>.001||t.optDouble("rangeEnd",t.optDouble("duration"))<t.optDouble("duration")-.1);}
+    static double lower(JSONObject t){double total=t==null?0:t.optDouble("duration",0),start=t==null?0:t.optDouble("rangeStart",0);return Double.isFinite(total)&&Double.isFinite(start)?Math.max(0,Math.min(total,start)):0;}
+    static double upper(JSONObject t){double total=t==null?0:t.optDouble("duration",0),end=t==null?0:t.optDouble("rangeEnd",total);return Double.isFinite(total)&&Double.isFinite(end)?Math.max(lower(t),Math.min(total,end)):lower(t);}
     static boolean timed(JSONObject track,JSONObject entry){
-        if(track==null||!(track.opt("duration") instanceof Number)||entry==null||!entry.optBoolean("remix")||entry.optBoolean("djFull")||manual(track))return false;
+        if(track==null||!(track.opt("duration") instanceof Number)||entry==null||!entry.optBoolean("remix")||entry.optBoolean("djFull"))return false;
         JSONObject c=entry.optJSONObject("dj");if(c==null||!Boolean.TRUE.equals(c.opt("timedFallback"))||!"timed".equals(c.optString("quality"))||!Boolean.TRUE.equals(c.opt("needsReview"))||!Boolean.FALSE.equals(c.opt("entryVerified"))||!Boolean.FALSE.equals(c.opt("wordGuarded"))||c.optBoolean("acoustic"))return false;
         for(String key:new String[]{"start","end","targetSeconds","sourceDuration","bpm","fade","mix"})if(!(c.opt(key) instanceof Number)||!Double.isFinite(c.optDouble(key)))return false;
         double start=c.optDouble("start"),end=c.optDouble("end"),target=c.optDouble("targetSeconds"),total=c.optDouble("sourceDuration"),actual=track.optDouble("duration"),span=end-start,bpm=c.optDouble("bpm"),fade=c.optDouble("fade"),mix=c.optDouble("mix");
         if(!Double.isFinite(actual)||Math.abs(total-actual)>.001||target<10||target>120||total<8||start<0||end>total+.001||span<8||span>123||(bpm!=0&&(bpm<60||bpm>210))||fade<.8||fade>1.2||mix<3.2||mix>8)return false;
-        return total<target?start==0&&Math.abs(end-total)<.001:Math.abs(span-target)<=3;
+        double lo=lower(track),hi=upper(track);if(start<lo-.001||end>hi+.001)return false;
+        if(manual(track)||c.has("sourceRangeStart")||c.has("sourceRangeEnd")){
+            if(!(c.opt("sourceRangeStart") instanceof Number)||!(c.opt("sourceRangeEnd") instanceof Number))return false;
+            double savedLo=c.optDouble("sourceRangeStart"),savedHi=c.optDouble("sourceRangeEnd");
+            if(!Double.isFinite(savedLo)||!Double.isFinite(savedHi)||savedLo<0||savedHi>total||savedHi<=savedLo||Math.abs(savedLo-lo)>.001||Math.abs(savedHi-hi)>.001)return false;
+        }
+        return hi-lo<target?Math.abs(start-lo)<.001&&Math.abs(end-hi)<.001:Math.abs(span-target)<=3;
     }
     static boolean acoustic(JSONObject cue){return cue!=null&&cue.optBoolean("acoustic")&&cue.optBoolean("needsReview")&&"acoustic".equals(cue.optString("quality"));}
     static boolean guarded(JSONObject cue){return cue!=null&&cue.optBoolean("wordGuarded")&&cue.optBoolean("entryVerified");}
     static double minimumFade(JSONObject cue,boolean remix){return guarded(cue)?(remix?.15:.25):.5;}
     static JSONObject cue(JSONObject t,JSONObject entry,boolean enabled){
-        if(!enabled||t==null||entry==null||entry.optBoolean("djFull")||manual(t))return null;
+        if(!enabled||t==null||entry==null||entry.optBoolean("djFull")||manual(t)&&!entry.optBoolean("remix"))return null;
         JSONObject c=entry.optJSONObject("dj");if(c==null)return null;
         boolean timed=timed(t,entry);
         if((c.has("timedFallback")&&!Boolean.FALSE.equals(c.opt("timedFallback"))||"timed".equals(c.optString("quality")))&&!timed)return null;
         double start=c.optDouble("start",-1),end=c.optDouble("end",-1),bpm=c.optDouble("bpm",0),fade=c.optDouble("fade",0);
         if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end-start<(entry.optBoolean("remix")&&(c.optBoolean("entryVerified")||acoustic(c)||timed)?8:30)||end>t.optDouble("duration")+.1||!Double.isFinite(bpm)||(bpm!=0&&bpm<60)||bpm>210||!Double.isFinite(fade)||fade<minimumFade(c,entry.optBoolean("remix"))||fade>8)return null;
-        if(entry.optBoolean("remix")&&end-start>123)return null;
+        if(entry.optBoolean("remix")&&(end-start>123||start<lower(t)-.001||end>upper(t)+.001))return null;
         if(guarded(c)&&c.has("mix")){double mix=c.optDouble("mix",Double.NaN);if(!Double.isFinite(mix)||mix<Math.max(1.5,fade)||mix>8)return null;}
         return c;
     }
     static JSONObject track(JSONObject t,JSONObject entry,boolean enabled){
         JSONObject c=cue(t,entry,enabled);if(c==null)return t;
-        try{return new JSONObject(t.toString()).put("rangeStart",c.optBoolean("entryVerified")||acoustic(c)||timed(t,entry)?c.optDouble("start"):0).put("rangeEnd",c.getDouble("end"));}catch(Exception e){return t;}
+        try{return new JSONObject(t.toString()).put("rangeStart",Math.max(lower(t),c.optBoolean("entryVerified")||acoustic(c)||timed(t,entry)?c.optDouble("start"):0)).put("rangeEnd",Math.min(upper(t),c.getDouble("end")));}catch(Exception e){return t;}
     }
     static long previewTail(JSONObject track,long duration,float rate){return Math.max(PlaybackRange.start(track,duration),PlaybackRange.end(track,duration)-(long)(10000*rate));}
     static float rate(JSONObject t,JSONObject entry,boolean enabled){

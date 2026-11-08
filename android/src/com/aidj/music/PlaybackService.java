@@ -15,6 +15,7 @@ public final class PlaybackService extends Service {
     private static final int NOTIFICATION=100;
     private static final String CHANNEL="aidj-playback";
     private MediaPlayer player,incoming;
+    private PlaybackLevel playerLevel,incomingLevel;
     private boolean incomingReady=false,mixing=false,waitingNext=false;
     private String incomingId="",incomingSpec="",failedIncoming="";
     private JSONObject playingTrack;
@@ -95,6 +96,8 @@ public final class PlaybackService extends Service {
             if(!waitingNext&&(position()<PlaybackRange.start(current(),duration())-100||position()>=PlaybackRange.end(current(),duration())))seek(PlaybackRange.start(current(),duration()));
         }
         if(wasDj!=dj()||!incomingSpec.equals(nextSpec())||oldStart!=PlaybackRange.start(current(),duration())||oldEnd!=PlaybackRange.end(current(),duration())||oldSpeed!=speed)cancelIncoming();
+        if(playerLevel!=null&&playerLevel.update(source(entry())))lastGain=-1;
+        if(incomingLevel!=null&&incomingId.equals(nextEntry()==null?"":nextEntry().optString("id")))incomingLevel.update(source(nextEntry()));
         if(!wasAudition&&audition()&&ready)seek(DjPlan.previewTail(current(),duration(),speed));
         applyVolume();
         updateSession();
@@ -122,16 +125,16 @@ public final class PlaybackService extends Service {
             double progress=mixing?(double)(position()-mixStart)/mixSpan:0;
             gain=(mixing?DjPlan.gain(progress,false,(double)mixFade/mixSpan)*Math.min(1,mixOutStart/.70f):.70f)*duckGain;
             if(!mixing&&(nextEntry()==null||!incomingReady)){long window=DjPlan.safeFade(source(entry()),entry());gain*=Math.min(1f,Math.max(0f,(PlaybackRange.end(current(),length)-position())/(window*speed)));}
-            if(mixing&&incomingReady&&incoming!=null){float g=DjPlan.gain(progress,true,(double)mixFade/mixSpan)*duckGain;try{incoming.setVolume(g,g);}catch(Exception ignored){}}
+            if(mixing&&incomingReady&&incoming!=null){float g=DjPlan.gain(progress,true,(double)mixFade/mixSpan)*duckGain;try{float actual=incomingLevel==null?g:incomingLevel.gain(g);incoming.setVolume(actual,actual);}catch(Exception ignored){}}
         }
         if(Math.abs(gain-lastGain)<.001f)return;
-        try{player.setVolume(gain,gain);lastGain=gain;}catch(Exception ignored){}
+        try{float actual=playerLevel==null?gain:playerLevel.gain(gain);player.setVolume(actual,actual);lastGain=gain;}catch(Exception ignored){}
     }
     private void prepare(boolean start){
         JSONObject track=current();if(track==null){releasePlayer();wantPlay=false;updateSession();return;}
         releasePlayer();wantPlay=start;loaded=queue.optString("currentId");playingTrack=track;speed=DjPlan.rate(source(entry()),entry(),dj());error="";
         try{
-            player=new MediaPlayer();MediaPlayer loading=player;
+            player=new MediaPlayer();playerLevel=new PlaybackLevel(player,source(entry()));MediaPlayer loading=player;
             player.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
             player.setWakeMode(this,PowerManager.PARTIAL_WAKE_LOCK);
             player.setOnPreparedListener(mp->{if(player!=loading)return;ready=true;setSpeed(mp,speed);long target=PlaybackRange.clamp(current(),mp.getDuration(),pendingSeek);if(audition()&&pendingSeek==0)target=DjPlan.previewTail(current(),mp.getDuration(),speed);pendingSeek=0;if(target>0){rangeSeeking=true;mp.seekTo(target,MediaPlayer.SEEK_CLOSEST);}else if(wantPlay)play();else updateSession();});
@@ -155,6 +158,7 @@ public final class PlaybackService extends Service {
     void skip(int direction){if(direction<0&&position()-PlaybackRange.start(current(),duration())>3000)seek(0);else advance(direction,false);}
     private void cancelIncoming(){
         nextGeneration++;mixing=false;waitingNext=false;incomingReady=false;incomingId="";incomingSpec="";
+        if(incomingLevel!=null){incomingLevel.release();incomingLevel=null;}
         if(incoming!=null){try{incoming.release();}catch(Exception ignored){}incoming=null;}
         lastGain=-1;
     }
@@ -164,7 +168,7 @@ public final class PlaybackService extends Service {
         boolean waiting=waitingNext;cancelIncoming();waitingNext=waiting;incomingSpec=spec;JSONObject e=nextEntry(),t=source(e);if(t==null)return;
         incomingId=e.optString("id");incomingSpeed=DjPlan.rate(t,e,true);final int token=nextGeneration;
         try{
-            MediaPlayer deck=new MediaPlayer();incoming=deck;
+            MediaPlayer deck=new MediaPlayer();incoming=deck;incomingLevel=new PlaybackLevel(deck,t);
             deck.setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());deck.setWakeMode(this,PowerManager.PARTIAL_WAKE_LOCK);deck.setVolume(0,0);
             deck.setOnErrorListener((mp,what,extra)->{if(incoming==mp&&token==nextGeneration)incomingFailed(spec);return true;});
             deck.setOnPreparedListener(mp->{if(incoming!=mp||token!=nextGeneration)return;setSpeed(mp,incomingSpeed);long start=PlaybackRange.start(DjPlan.track(t,e,true),mp.getDuration());if(start>0)mp.seekTo(start,MediaPlayer.SEEK_CLOSEST);else incomingPrepared();});
@@ -214,12 +218,12 @@ public final class PlaybackService extends Service {
     private void promote(){promote(false);}
     private void promote(boolean skipped){
         if(incoming==null||!incomingReady)return;
-        String id=incomingId,finished=queue.optString("currentId");MediaPlayer next=incoming;float rate=incomingSpeed;
-        incoming=null;cancelIncoming();if(player!=null)try{player.release();}catch(Exception ignored){}
+        String id=incomingId,finished=queue.optString("currentId");MediaPlayer next=incoming;float rate=incomingSpeed;PlaybackLevel nextLevel=incomingLevel;
+        incomingLevel=null;incoming=null;cancelIncoming();if(playerLevel!=null){playerLevel.release();playerLevel=null;}if(player!=null)try{player.release();}catch(Exception ignored){}
         RemixPlan.finish(queue,finished,id,skipped);
         try{queue.put("currentId",id);queue.put("time",next.getCurrentPosition()/1000.0);}catch(Exception ignored){}
         try{JSONObject e=entry();if(e!=null)e.put("auditionIntro",queue.optBoolean("djAudition"));}catch(Exception ignored){}
-        player=next;loaded=id;playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=rate;ready=true;rangeSeeking=false;pendingSeek=0;failedIncoming="";lastGain=-1;
+        player=next;playerLevel=nextLevel;loaded=id;playingTrack=DjPlan.track(source(entry()),entry(),dj());speed=rate;ready=true;rangeSeeking=false;pendingSeek=0;failedIncoming="";lastGain=-1;
         next.setOnPreparedListener(null);next.setOnSeekCompleteListener(mp->{if(player==mp){rangeSeeking=false;applyVolume();if(wantPlay&&!isPlaying())play();}});
         next.setOnCompletionListener(mp->{if(player==mp)completed();});
         next.setOnErrorListener((mp,what,extra)->{if(player==mp){releasePlayer();wantPlay=false;error="Не удалось воспроизвести песню.";updateSession();}return true;});
@@ -246,7 +250,7 @@ public final class PlaybackService extends Service {
         try{queue.put("currentId",list.getJSONObject(next).getString("id"));queue.put("time",0);}catch(Exception ignored){}
         pendingSeek=0;State.get(this).write("nativeQueue",queue.toString());prepare(true);
     }
-    private void releasePlayer(){cancelIncoming();playingTrack=null;if(player!=null){try{player.release();}catch(Exception ignored){}player=null;}ready=false;rangeSeeking=false;lastGain=-1f;loaded="";}
+    private void releasePlayer(){cancelIncoming();if(playerLevel!=null){playerLevel.release();playerLevel=null;}playingTrack=null;if(player!=null){try{player.release();}catch(Exception ignored){}player=null;}ready=false;rangeSeeking=false;lastGain=-1f;loaded="";}
     private void savePosition(){try{queue.put("time",position()/1000.0);State.get(this).write("nativeQueue",queue.toString());}catch(Exception ignored){}}
     private PendingIntent action(String value,int request){
         Intent intent=new Intent(this,PlaybackService.class).putExtra("action",value);

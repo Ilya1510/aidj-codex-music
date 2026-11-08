@@ -46,3 +46,9 @@ body.has-downloads{padding-bottom:calc(245px + var(--safe))}
 .review-person-details{display:grid;gap:3px;padding:7px 0}.review-person-details>span{display:block}
 
 .combined-source-list{max-height:240px;overflow:auto;margin:8px 0}.combined-source-list .check{display:flex;align-items:center;gap:12px;min-height:48px}.combined-source-list input{width:20px;height:20px;flex-shrink:0}.combined-source-list .check>span{overflow-wrap:anywhere}
+
+.queue-sortable{position:relative;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}.queue-sortable .song-row{position:relative;transition:transform 120ms ease}.queue-sortable .song-row.dragging{z-index:3;background:var(--soft);box-shadow:0 8px 28px #0008;outline:1px solid var(--accent);transition:none}.queue-drag-help{font-size:12px;margin:0 0 12px}
+
+.full-player .transport{display:grid;grid-template-columns:44px 44px 68px 44px 44px;justify-content:space-between}
+
+.queue-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;column-gap:8px;row-gap:0;padding-bottom:10px}.queue-row>.song-main{grid-column:1;grid-row:1}.queue-row>.duration{grid-column:2;grid-row:1}.queue-row>.queue-next{grid-column:3;grid-row:1}.queue-row>[aria-label="Убрать из очереди"]{grid-column:4;grid-row:1}.queue-row>.queue-status{grid-column:1/-1;grid-row:2;color:var(--accent);font-size:12px;line-height:1.4;padding-left:58px;white-space:normal}

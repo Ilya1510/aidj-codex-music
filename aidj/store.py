@@ -88,6 +88,9 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS device_diagnostics(device_id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS library_added(track_key TEXT PRIMARY KEY,added REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS audio_clips(track_key TEXT PRIMARY KEY,result TEXT NOT NULL,created REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS audio_loudness(md5 TEXT PRIMARY KEY,integrated_lufs REAL,true_peak_dbtp REAL,
+        method TEXT NOT NULL,status TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+        retry_after REAL NOT NULL DEFAULT 0,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_batch_runs(id TEXT PRIMARY KEY,scope TEXT NOT NULL,created REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_batch_jobs(run_id TEXT NOT NULL,md5 TEXT NOT NULL,asset_id TEXT NOT NULL,state TEXT NOT NULL,
         lease REAL NOT NULL DEFAULT 0,token TEXT,attempts INTEGER NOT NULL DEFAULT 0,error TEXT,updated REAL NOT NULL,

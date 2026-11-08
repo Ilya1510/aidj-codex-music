@@ -31,7 +31,7 @@ test('only shuffle may choose compatible neighbours and queue identity survives 
   q.entries=planDj(q.entries,tracks,'normal',{reorder:true});assert.deepEqual(q.entries.map(e=>e.trackId),['a','c','b']);
   q.current.djFull=true;const restore=new Queue(JSON.parse(JSON.stringify(q.snapshot())));
   assert.equal(restore.playlistId,7);assert.equal(restore.current.djFull,true);restore.remove(restore.entries[1].id);assert.equal(restore.entries.length,2);
-  assert.deepEqual(playbackSettings({mode:'dj',length:'long'}),{audition:false,mode:'dj',length:'long',seconds:3,remixDurationSeconds:12});
+  assert.deepEqual(playbackSettings({mode:'dj',length:'long'}),{audition:false,mode:'dj',length:'long',seconds:3,remixDurationSeconds:12,remixMaxVisits:3,remixLookahead:10});
 });
 
 test('inserting an upcoming song keeps the current tempo fixed',()=>{
@@ -178,7 +178,7 @@ test('acoustic fallback is audible at its measured entry but never claims recogn
 test('old APKs retain a clearly marked full-source fallback when timed clips are unsupported',()=>{
   const track={id:'a',duration:240,djV4:{remix:[{start:40,end:52,bpm:128,fade:1,entryVerified:true}]}};
   const [entry]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]),{remixDurationSeconds:120,allowTimed:false});assert.equal(entry.dj,null);assert.equal(entry.remix,false);assert.equal(entry.remixNeedsReview,true);assert.equal(entry.remixFallback,'full-source');assert.equal(playbackTrack(track,entry,true),track);
-  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:100}]]),{remixDurationSeconds:120});assert.equal(manual.remixFallback,null);assert.equal(manual.remixNeedsReview,false);
+  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:100}]]),{remixDurationSeconds:120,allowTimed:false});assert.equal(manual.remixFallback,'full-source');assert.equal(playbackTrack({...track,rangeStart:40,rangeEnd:100},manual,true).rangeEnd,100);
 });
 
 test('regular DJ can pair primary graph boundaries when no static cue was preselected',()=>{
@@ -239,7 +239,7 @@ test('word/acoustic matches always precede a timed fallback and short originals 
   const [matched]=planRemix([{id:'e',trackId:'a'}],new Map([['a',track]]));assert.equal(matched.dj.wordGuarded,true);assert.equal(matched.dj.timedFallback,undefined);
   const sound={...word,wordGuarded:false,quality:'acoustic',needsReview:true,exits:[[52,.7,1]]};const [acoustic]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,djV4:{acousticAnchors:sound}}]]));assert.equal(acoustic.dj.quality,'acoustic');assert.equal(acoustic.dj.timedFallback,undefined);
   const short={id:'a',duration:57};const [bounded]=planRemix([{id:'e',trackId:'a'}],new Map([['a',short]]),{remixDurationSeconds:120});assert(timedCue(bounded.dj));assert.equal(bounded.dj.start,0);assert.equal(bounded.dj.end,57);
-  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:90}]]));assert.equal(manual.dj,null);assert.equal(manual.remixFallback,null);
+  const [manual]=planRemix([{id:'e',trackId:'a'}],new Map([['a',{...track,rangeStart:40,rangeEnd:90}]]));assert(manual.dj);assert(manual.dj.start>=40&&manual.dj.end<=90);assert.equal(manual.remix,true);
   const [full]=planRemix([{id:'e',trackId:'a',djFull:true}],new Map([['a',track]]));assert.equal(full.dj,null);assert.equal(full.remixFallback,null);
 });
 
@@ -256,4 +256,46 @@ test('timed revisits prefer genuinely different published starts and retain nati
   const [second]=planRemix([{...first,remixVisits:1,remixUsed:[heard]}],tracks);assert(timedCue(second.dj));assert.notEqual(second.dj.start,first.dj.start);
   const [pin]=planRemix([first],tracks,{pin:first,remixDurationSeconds:30});assert.deepEqual(pin.dj,first.dj);
   const noChoice={id:'a',duration:112};const [only]=planRemix([{id:'e',trackId:'a'}],new Map([['a',noChoice]]));const [done]=planRemix([{...only,remixVisits:1,remixUsed:['0:12000']}],new Map([['a',noChoice]]));assert.equal(done.dj,null);
+});
+
+test('remix selects original-coordinate boundaries inside the user excerpt and retains full override',()=>{
+ const anchors={version:1,wordGuarded:true,bpm:128,entries:[[0,.4],[30,.8],[80,.9],[120,1]],exits:[[12,.3,.4],[42,.3,.8],[92,.3,.9],[132,.3,1]]};
+ const track={id:'manual',duration:173.244,rangeStart:25,rangeEnd:114.832,djV4:{anchors}};
+ const choices=remixCues(track,12);assert.equal(choices.length,2);assert(choices.every(c=>c.start>=25&&c.end<=114.832));
+ assert.equal(djCue(track),null);
+ const [entry]=planRemix([{id:'e',trackId:track.id}],new Map([[track.id,track]]));assert(entry.remix);assert(entry.dj.start>=25&&entry.dj.end<=114.832);
+ const playing=playbackTrack(track,entry,true);assert.equal(playing.rangeStart,entry.dj.start);assert.equal(playing.rangeEnd,entry.dj.end);
+ assert.equal(playbackTrack(track,{...entry,djFull:true},true),track);
+ assert.equal(playbackTrack(track,{...entry,remix:false},true),track);
+ const stale={...entry,dj:{...entry.dj,start:120,end:132}};
+ const [replanned]=planRemix([stale],new Map([[track.id,track]]),{pin:stale});assert(replanned.dj.start>=25&&replanned.dj.end<=114.832);
+});
+test('timed remix stays in a manual excerpt even when the target exceeds its length',()=>{
+ const track={id:'manual',duration:173.244,rangeStart:25,rangeEnd:114.832};
+ const [short]=planRemix([{id:'e',trackId:track.id}],new Map([[track.id,track]]));assert(timedCue(short.dj));assert.equal(short.dj.start,25);assert.equal(short.dj.end,37);
+ const [long]=planRemix([{id:'e',trackId:track.id}],new Map([[track.id,track]]),{remixDurationSeconds:120});assert(timedCue(long.dj));assert.equal(long.dj.start,25);assert.equal(long.dj.end,114.832);assert.equal(long.dj.sourceDuration,173.244);
+ for(const patch of [{sourceRangeStart:undefined},{sourceRangeEnd:undefined},{sourceRangeEnd:180},{sourceRangeStart:'25'},{sourceRangeEnd:24}])assert(!timedCue({...long.dj,...patch}));
+ const changed={...track,rangeStart:30};assert.equal(playbackTrack(changed,short,true),changed);
+ const tiny={...track,rangeStart:25,rangeEnd:30};const [e]=planRemix([{id:'e',trackId:track.id}],new Map([[track.id,tiny]]));assert(!e.dj);assert.equal(playbackTrack(tiny,e,true),tiny);
+});
+
+test('timed pins are recomputed when manual scope changes even if the old cue still lies inside',()=>{
+ const before={id:'s',duration:180,rangeStart:25,rangeEnd:114.832};
+ const [pin]=planRemix([{id:'e',trackId:'s'}],new Map([['s',before]]));
+ const after={...before,rangeStart:20,rangeEnd:100};
+ const [updated]=planRemix([pin],new Map([['s',after]]),{pin});
+ assert(timedCue(updated.dj));assert.equal(updated.dj.sourceRangeStart,20);assert.equal(updated.dj.sourceRangeEnd,100);
+ const invalid={...pin,dj:{...pin.dj,wordGuarded:true}};
+ const [recovered]=planRemix([invalid],new Map([['s',before]]),{pin:invalid});assert(timedCue(recovered.dj));
+});
+
+
+test('per-song visit limits are independent and keep an already playing cue pinned',()=>{
+ const track={id:'a',duration:240,djV4:{anchors:{version:1,wordGuarded:true,bpm:128,entries:[[0,.4],[40,.8],[80,.9],[120,1]],exits:[[12,.3,.4],[52,.3,.8],[92,.3,.9],[132,.3,1]]}}};
+ const tracks=new Map([['a',track]]),entry={id:'e',trackId:'a',remixVisits:3,remixUsed:['0:12000','40000:52000','80000:92000']};
+ assert.equal(planRemix([entry],tracks,{remixMaxVisits:3})[0].dj,null);
+ const raised=planRemix([entry],tracks,{remixMaxVisits:5})[0];assert(raised.dj);assert.equal(raised.dj.start,120);
+ assert.equal(planRemix([entry],tracks,{remixMaxVisits:1})[0].dj,null);
+ const pinned=planRemix([raised],tracks,{remixMaxVisits:1,pin:raised})[0];assert.equal(pinned.dj.start,120);
+ const [a,b]=planRemix([entry,{id:'b',trackId:'a',remixVisits:0}],tracks,{remixMaxVisits:3});assert.equal(a.dj,null);assert(b.dj);
 });

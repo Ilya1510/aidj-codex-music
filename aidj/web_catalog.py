@@ -51,6 +51,8 @@ def catalog(db):
     ranges={r['track_id']:r for r in db.execute('SELECT * FROM playback_ranges')}
     from .dj import metadata,legacy,compatible_v2,compatible_v3,service_state
     cues=metadata(db)
+    from .loudness import metadata as loudness_metadata
+    levels=loudness_metadata(db)
     states={r['md5']:r['status'] for r in db.execute('SELECT md5,status FROM dj_analysis')}
     for row in db.execute('SELECT a.* FROM web_assets a LEFT JOIN library_added n ON n.track_key=a.track_key ORDER BY COALESCE(n.added,0) DESC,a.rowid DESC'):
         value={k:row[k] for k in ['id','title','artist','duration','md5','bytes']} | {'format':PurePosixPath(row['remote_path']).suffix[1:],
@@ -58,6 +60,7 @@ def catalog(db):
         if row['md5'] in cues:
             value['djV4']=cues[row['md5']];value['djV3']=compatible_v3(cues[row['md5']]);value['djV2']=compatible_v2(cues[row['md5']]);value['dj']=legacy(cues[row['md5']])
         if row['md5'] in states:value['djStatus']=states[row['md5']]
+        if row['md5'] in levels:value['loudness']=levels[row['md5']]
         if row['id'] in ranges:value.update(rangeStart=ranges[row['id']]['start'],rangeEnd=ranges[row['id']]['end'])
         tracks.append(value)
     playlists=[]

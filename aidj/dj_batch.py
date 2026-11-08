@@ -310,6 +310,8 @@ def local_job(settings,db,run,job,analysis_python,ffmpeg,stopped,runner=None,dis
             disk_factory(settings).download(asset['remote_path'],source,expected_md5=job['md5'])
             if source.stat().st_size!=asset['bytes']:raise BatchError('SOURCE_CHANGED')
             if stopped.is_set():raise RemoteError('INTERRUPTED')
+            from .loudness import measure_original
+            measure_original(settings,db,asset,source,ffmpeg)
             cached=checkpoint_for(job.get('cached'),_checkpoint(checkpoint))
             if cached:
                 cached=dict(cached);known=(job.get('cached') or {}).get('safeExits',[])
@@ -402,6 +404,9 @@ def serve(settings,analysis_python,ffmpeg,run=None,once=False,stopped=None,pause
                         continue
                     runtime_heartbeat(db,'idle')
                     if once:break
+                    if not stopped.is_set():
+                        from .loudness import process_next
+                        if process_next(settings,db,ffmpeg):continue
                     pause(10);continue
                 outcome=local_job(settings,db,selected,job,analysis_python,ffmpeg,stopped,cpu_threads=cpu_threads)
                 # Logs contain bounded counts, numeric observations and error

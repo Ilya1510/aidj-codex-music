@@ -5,7 +5,10 @@ export function timedCue(c){
   if(!['start','end','targetSeconds','sourceDuration','bpm','fade','mix'].every(k=>typeof c[k]==='number'&&Number.isFinite(c[k])))return false;
   const span=c.end-c.start;
   if(c.targetSeconds<10||c.targetSeconds>120||c.sourceDuration<8||c.start<0||c.end>c.sourceDuration+.001||span<8||span>123||c.bpm!==0&&(c.bpm<60||c.bpm>210)||c.fade<.8||c.fade>1.2||c.mix<3.2||c.mix>8)return false;
-  return c.sourceDuration<c.targetSeconds?c.start===0&&Math.abs(c.end-c.sourceDuration)<.001:Math.abs(span-c.targetSeconds)<=3;
+  const hasRange=c.sourceRangeStart!==undefined||c.sourceRangeEnd!==undefined;
+  if(hasRange&&(!Number.isFinite(c.sourceRangeStart)||!Number.isFinite(c.sourceRangeEnd)||c.sourceRangeStart<0||c.sourceRangeEnd>c.sourceDuration+.001||c.sourceRangeEnd<=c.sourceRangeStart||c.start<c.sourceRangeStart||c.end>c.sourceRangeEnd+.001))return false;
+  const lo=hasRange?c.sourceRangeStart:0,hi=hasRange?c.sourceRangeEnd:c.sourceDuration;
+  return hi-lo<c.targetSeconds?c.start===lo&&Math.abs(c.end-hi)<.001:Math.abs(span-c.targetSeconds)<=3;
 }
 const acoustic=c=>c?.acoustic===true&&c.needsReview===true&&c.quality==='acoustic';
 const guarded=c=>c.entryVerified===true&&c.wordGuarded===true&&Number.isFinite(c.mix)&&c.mix>=1.5&&c.mix<=8;
@@ -55,9 +58,13 @@ export function planDj(entries,tracks,length,{reorder=false,pin=null}={}){
 export function playbackTrack(track,entry,enabled){
   if(!track||!enabled||entry?.djFull||!entry?.dj)return track;
   // A manual excerpt saved while the queue is running has priority too.
-  if(Number(track.rangeStart)>0||Number(track.rangeEnd)<track.duration-.1)return track;
+  if(!entry.remix&&(Number(track.rangeStart)>0||Number(track.rangeEnd)<track.duration-.1))return track;
     if((entry.dj.timedFallback===true||entry.dj.quality==='timed')&&(!entry.remix||!timedCue(entry.dj)||!Number.isFinite(track.duration)||Math.abs(entry.dj.sourceDuration-track.duration)>.001))return track;
-  return {...track,rangeStart:entry.dj.entryVerified||acoustic(entry.dj)||entry.remix&&timedCue(entry.dj)?entry.dj.start:0,rangeEnd:entry.dj.end};
+  const bounds=entry.remix?remixBounds(track):null;
+  if(entry.remix&&(!bounds||entry.dj.start<bounds.start-.001||entry.dj.end>bounds.end+.001))return track;
+  if(entry.remix&&timedCue(entry.dj)&&(bounds.manual||entry.dj.sourceRangeStart!==undefined||entry.dj.sourceRangeEnd!==undefined)&&
+      (Math.abs(entry.dj.sourceRangeStart-bounds.start)>.001||Math.abs(entry.dj.sourceRangeEnd-bounds.end)>.001||!Number.isFinite(entry.dj.sourceRangeStart)||!Number.isFinite(entry.dj.sourceRangeEnd)))return track;
+  return {...track,rangeStart:Math.max(bounds?.start||0,entry.dj.entryVerified||acoustic(entry.dj)||entry.remix&&timedCue(entry.dj)?entry.dj.start:0),rangeEnd:Math.min(bounds?.end??track.duration,entry.dj.end)};
 }
 
 export function djProgress(ids,tracks){
@@ -72,15 +79,20 @@ export function djProgress(ids,tracks){
 }
 
 export function remixDurationSeconds(value=12){return typeof value==='number'&&Number.isFinite(value)?Math.max(10,Math.min(120,value)):12;}
+function remixBounds(track){
+  if(!track||!Number.isFinite(track.duration)||track.duration<=0)return null;
+  const start=Number.isFinite(track.rangeStart)?Math.max(0,track.rangeStart):0,end=Number.isFinite(track.rangeEnd)&&track.rangeEnd>0?Math.min(track.duration,track.rangeEnd):track.duration;
+  return end>start?{start,end,manual:start>0||end<track.duration-.1}:null;
+}
 function remixGraph(track,isAcoustic=false,allowEmptyExits=false){
-  if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return null;
+  const bounds=remixBounds(track);if(!bounds)return null;
   const a=track.djV4?.[isAcoustic?'acousticAnchors':'anchors'];
   if(!a||a.version!==1||(isAcoustic?a.wordGuarded!==false||a.needsReview!==true||a.quality!=='acoustic':a.wordGuarded!==true)||!Number.isFinite(a.bpm)||a.bpm!==0&&(a.bpm<60||a.bpm>210)||!Array.isArray(a.entries)||!Array.isArray(a.exits))return null;
   const scale=a.packed===true?1000:1,energy=n=>Number.isFinite(n)?Math.max(0,Math.min(1,n/scale)):.5;
   const entryRows=a.flat===true?Array.from({length:Math.min(256,Math.floor(a.entries.length/2))},(_,i)=>a.entries.slice(i*2,i*2+2)):a.entries;
   const exitRows=a.flat===true?Array.from({length:Math.min(256,Math.floor(a.exits.length/3))},(_,i)=>a.exits.slice(i*3,i*3+3)):a.exits;
-  const entries=entryRows.slice(0,256).filter(x=>Array.isArray(x)&&Number.isFinite(x[0])&&x[0]>=0&&x[0]/scale<=track.duration-8).map(x=>[x[0]/scale,energy(x[1])]).sort((x,y)=>x[0]-y[0]);
-  const exits=exitRows.slice(0,256).filter(x=>Array.isArray(x)&&Number.isFinite(x[0])&&x[0]>=0&&x[0]/scale<=track.duration+.1&&Number.isFinite(x[1])&&x[1]/scale>=(isAcoustic?.5:.15)&&x[1]/scale<=2).map(x=>[x[0]/scale,x[1]/scale,energy(x[2])]).sort((x,y)=>x[0]-y[0]);
+  const entries=entryRows.slice(0,256).filter(x=>Array.isArray(x)&&Number.isFinite(x[0])&&x[0]/scale>=bounds.start&&x[0]/scale<=bounds.end-8).map(x=>[x[0]/scale,energy(x[1])]).sort((x,y)=>x[0]-y[0]);
+  const exits=exitRows.slice(0,256).filter(x=>Array.isArray(x)&&Number.isFinite(x[0])&&x[0]/scale>=bounds.start&&x[0]/scale<=bounds.end+(bounds.manual?.001:.1)&&Number.isFinite(x[1])&&x[1]/scale>=(isAcoustic?.5:.15)&&x[1]/scale<=2).map(x=>[x[0]/scale,x[1]/scale,energy(x[2])]).sort((x,y)=>x[0]-y[0]);
   if(!entries.length||!allowEmptyExits&&!exits.length)return null;
   return {version:1,wordGuarded:!isAcoustic,...(isAcoustic?{quality:'acoustic',needsReview:true}:{}),bpm:a.bpm,...(a.bpm>0&&Number.isFinite(a.grid)&&a.grid>=0&&a.grid<60/a.bpm?{grid:a.grid}:{}),entries,exits};
 }
@@ -100,24 +112,24 @@ function anchorCandidates(track,desired,isAcoustic=false,{minimum=8,maximum=123,
   return result;
 }
 export function remixCues(track,desired=12){
-  if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return [];
+  if(!remixBounds(track))return [];
   desired=remixDurationSeconds(desired);
   const dynamic=[...anchorCandidates(track,desired),...anchorCandidates(track,desired,true)].filter(c=>Math.abs(c.end-c.start-desired)<=3);if(dynamic.length)return dynamic;
   return publishedRemixCues(track).filter(c=>Math.abs(c.end-c.start-desired)<=3);
 }
 function publishedRemixCues(track){
-  if(!track||Number(track.rangeStart)>0||Number(track.rangeEnd)<Number(track.duration)-.1)return [];
-  return ((track.djV4||track.djV3)?.remix||[]).filter(c=>c&&c.timedFallback!==true&&[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=0&&c.end<=track.duration+.1&&c.end-c.start>=8&&c.end-c.start<=30&&(c.start===0||c.entryVerified===true||acoustic(c))&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=minimumFade(c,true)&&c.fade<=8).slice(0,32).map(c=>({...c,rate:1}));
+  const bounds=remixBounds(track);if(!bounds)return [];
+  return ((track.djV4||track.djV3)?.remix||[]).filter(c=>c&&c.timedFallback!==true&&[c.start,c.end,c.bpm,c.fade].every(Number.isFinite)&&c.start>=bounds.start&&c.end<=bounds.end+(bounds.manual?.001:.1)&&c.end-c.start>=8&&c.end-c.start<=30&&(c.start===0||c.entryVerified===true||acoustic(c))&&(c.bpm===0||c.bpm>=60&&c.bpm<=210)&&c.fade>=minimumFade(c,true)&&c.fade<=8).slice(0,32).map(c=>({...c,rate:1}));
 }
 function timedCandidates(track,desired){
-  if(!track||!Number.isFinite(track.duration)||track.duration<8||Number(track.rangeStart)>0||Number(track.rangeEnd)<track.duration-.1)return [];
+  const bounds=remixBounds(track);if(!bounds||bounds.end-bounds.start<8)return [];
   const starts=new Map(),graphs=[remixAnchors(track),remixAcousticAnchors(track)].filter(Boolean);
-  if(track.duration>=desired){
-    for(const graph of graphs)for(const [start,energy]of graph.entries)if(start+desired<=track.duration+.000001){const previous=starts.get(start);if(!previous||energy>previous.energy)starts.set(start,{start,energy,bpm:graph.bpm});}
-    for(const cue of publishedRemixCues(track))if(cue?.entryVerified===true&&Number.isFinite(cue.start)&&cue.start>=0&&cue.start+desired<=track.duration&&Number.isFinite(cue.bpm)&&(cue.bpm===0||cue.bpm>=60&&cue.bpm<=210)&&!starts.has(cue.start))starts.set(cue.start,{start:cue.start,energy:Number.isFinite(cue.energy)?Math.max(0,Math.min(1,cue.energy)):.5,bpm:cue.bpm});
+  if(bounds.end-bounds.start>=desired){
+    for(const graph of graphs)for(const [start,energy]of graph.entries)if(start+desired<=bounds.end+.000001){const previous=starts.get(start);if(!previous||energy>previous.energy)starts.set(start,{start,energy,bpm:graph.bpm});}
+    for(const cue of publishedRemixCues(track))if(cue?.entryVerified===true&&Number.isFinite(cue.start)&&cue.start>=bounds.start&&cue.start+desired<=bounds.end&&Number.isFinite(cue.bpm)&&(cue.bpm===0||cue.bpm>=60&&cue.bpm<=210)&&!starts.has(cue.start))starts.set(cue.start,{start:cue.start,energy:Number.isFinite(cue.energy)?Math.max(0,Math.min(1,cue.energy)):.5,bpm:cue.bpm});
   }
-  if(!starts.size)starts.set(0,{start:0,energy:.5,bpm:graphs[0]?.bpm||0});
-  return [...starts.values()].sort((a,b)=>b.energy-a.energy||a.start-b.start).slice(0,32).map(({start,energy,bpm})=>({start,end:Math.min(track.duration,start+desired),targetSeconds:desired,sourceDuration:track.duration,bpm,energy,fade:Math.max(.8,Math.min(1.2,desired*.08)),mix:3.2,entryVerified:false,wordGuarded:false,timedFallback:true,quality:'timed',needsReview:true,rate:1})).filter(timedCue);
+  if(!starts.size)starts.set(bounds.start,{start:bounds.start,energy:.5,bpm:graphs[0]?.bpm||0});
+  return [...starts.values()].sort((a,b)=>b.energy-a.energy||a.start-b.start).slice(0,32).map(({start,energy,bpm})=>({start,end:Math.min(bounds.end,start+desired),targetSeconds:desired,sourceDuration:track.duration,...(bounds.manual?{sourceRangeStart:bounds.start,sourceRangeEnd:bounds.end}:{}),bpm,energy,fade:Math.max(.8,Math.min(1.2,desired*.08)),mix:3.2,entryVerified:false,wordGuarded:false,timedFallback:true,quality:'timed',needsReview:true,rate:1})).filter(timedCue);
 }
 const cueSignature=c=>Math.round(c.start*1000)+':'+Math.round(c.end*1000);
 function heardOverlap(cue,used){
@@ -125,14 +137,18 @@ function heardOverlap(cue,used){
   for(const key of used){const [lo,hi]=key.split(':').map(n=>Number(n)/1000);if(![lo,hi].every(Number.isFinite)||hi<=lo)continue;overlap=Math.max(overlap,Math.max(0,Math.min(cue.end,hi)-Math.max(cue.start,lo))/Math.min(cue.end-cue.start,hi-lo));}
   return overlap;
 }
-export function planRemix(entries,tracks,{pin=null,nextPin=null,remixDurationSeconds:desired=12,allowTimed=true}={}){
+export function planRemix(entries,tracks,{pin=null,nextPin=null,remixDurationSeconds:desired=12,remixMaxVisits=3,allowTimed=true}={}){
   desired=remixDurationSeconds(desired);
+  const maxVisits=typeof remixMaxVisits==='number'&&Number.isFinite(remixMaxVisits)?Math.max(1,Math.min(10,Math.round(remixMaxVisits))):3;
   return entries.map(entry=>{
     const track=tracks.get(entry.trackId),cues=remixCues(track,desired),anchors=remixAnchors(track),acousticAnchors=remixAcousticAnchors(track),graph=anchors||acousticAnchors;
     const keep=entry.id===pin?.id?pin:entry.id===nextPin?.id?nextPin:null;
     // Native owns the moving queue and its next prepared deck. Refresh only the
     // available choices, retaining both selected snippets and completed visits.
-    if(keep&&(allowTimed||keep.dj?.timedFallback!==true))return {...entry,...keep,remixCues:graph?[]:publishedRemixCues(track),remixAnchors:anchors,remixAcousticAnchors:acousticAnchors};
+    const bounds=remixBounds(track),isTimed=keep?.dj?.timedFallback===true||keep?.dj?.quality==='timed';
+    const keepFits=keep?.dj&&bounds&&keep.dj.start>=bounds.start&&keep.dj.end<=bounds.end+.001&&(!isTimed||timedCue(keep.dj)&&
+      (!(bounds.manual||keep.dj.sourceRangeStart!==undefined||keep.dj.sourceRangeEnd!==undefined)||Number.isFinite(keep.dj.sourceRangeStart)&&Number.isFinite(keep.dj.sourceRangeEnd)&&Math.abs(keep.dj.sourceRangeStart-bounds.start)<=.001&&Math.abs(keep.dj.sourceRangeEnd-bounds.end)<=.001));
+    if(keep&&(keep.djFull||keepFits)&&(allowTimed||keep.dj?.timedFallback!==true))return {...entry,...keep,remixCues:graph?[]:publishedRemixCues(track),remixAnchors:anchors,remixAcousticAnchors:acousticAnchors};
     const used=new Set(Array.isArray(entry.remixUsed)?entry.remixUsed:[]);
     let remaining=cues.filter(c=>!used.has(cueSignature(c)));
     if(!used.size&&entry.remixVisits)remaining=remaining.slice(entry.remixVisits);
@@ -140,8 +156,8 @@ export function planRemix(entries,tracks,{pin=null,nextPin=null,remixDurationSec
     const wordFit=remaining.filter(c=>!acoustic(c));if(wordFit.length)remaining=wordFit;
     const nearby=remaining.filter(c=>Math.abs(c.end-c.start-desired)<=3);if(nearby.length)remaining=nearby;
     const score=c=>heardOverlap(c,used)*8+Math.max(0,Math.abs(c.end-c.start-desired)-3)/3+(1-(Number.isFinite(c.energy)?Math.max(0,Math.min(1,c.energy)):.5))*.4;
-    const cue=(entry.remixVisits||0)>=3?null:remaining.sort((a,b)=>score(a)-score(b))[0]||null;
-    const explicit=entry.djFull||Number(track?.rangeStart)>0||Number(track?.rangeEnd)<Number(track?.duration)-.1;
+    const cue=(entry.remixVisits||0)>=maxVisits?null:remaining.sort((a,b)=>score(a)-score(b))[0]||null;
+    const explicit=entry.djFull;
     return {...entry,remixAnchors:anchors,remixAcousticAnchors:acousticAnchors,remixCues:graph?[]:publishedRemixCues(track),remix:!entry.djFull&&!!cue,remixNeedsReview:!explicit&&(!cue||acoustic(cue)||timedCue(cue)),remixFallback:!explicit?(cue?(timedCue(cue)?'timed':null):'full-source'):null,dj:entry.djFull?null:cue};
   });
 }

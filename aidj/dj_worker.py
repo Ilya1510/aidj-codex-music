@@ -636,6 +636,8 @@ def process(settings,db,row,ffmpeg):
     with tempfile.TemporaryDirectory(prefix='dj-',dir=settings.state/'work') as scratch:
         file=Path(scratch)/('source'+Path(asset['remote_path']).suffix)
         Disk(settings).download(asset['remote_path'],file,expected_md5=row['md5'])
+        from .loudness import measure_original
+        measure_original(settings,db,asset,file,ffmpeg)
         # The child exits after each song, bounding native/JIT/model allocator growth.
         output=Path(scratch)/'cues.json';checkpoint=Path(scratch)/'evidence.json'
         cmd=[os.sys.executable,'-m','aidj.dj_worker','analyse','--file',str(file),'--output',str(output),'--ffmpeg',ffmpeg,'--checkpoint',str(checkpoint)]
@@ -707,6 +709,10 @@ def main():
                     if args.action=='once':break
                 elif args.action=='once':break
                 else:
+                    from .loudness import process_next
+                    heartbeat(db,'idle')
+                    measured=process_next(settings,db,args.ffmpeg)
+                    if measured:continue
                     if time.monotonic()-idle_heartbeat>20:heartbeat(db,'idle');idle_heartbeat=time.monotonic()
                     time.sleep(2)
         finally:
