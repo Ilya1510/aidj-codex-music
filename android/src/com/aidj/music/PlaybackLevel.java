@@ -17,8 +17,10 @@ final class PlaybackLevel {
         if(m==null||!"ebu-r128-v1".equals(m.optString("method"))||!(m.opt("integratedLufs") instanceof Number)||!(m.opt("truePeakDbtp") instanceof Number))return 0;
         double loudness=m.optDouble("integratedLufs"),peak=m.optDouble("truePeakDbtp");
         if(!Double.isFinite(loudness)||!Double.isFinite(peak)||loudness< -70||loudness>0||peak< -60||peak>6)return 0;
-        double delta= -16-loudness,soft=Math.abs(delta)<1.5?0:Math.max(-6,Math.min(6,delta));
-        return Math.min(soft,-1-peak);
+        // A six-decibel cap left quiet tracks below target and heavily mastered
+        // songs above it. Apply the complete measured attenuation; amplification
+        // is limited by both available peak headroom and a twelve-decibel cap.
+        return Math.min(Math.min(12,-16-loudness),-1-peak);
     }
     boolean update(JSONObject track){
         JSONObject m=track==null?null:track.optJSONObject("loudness");
