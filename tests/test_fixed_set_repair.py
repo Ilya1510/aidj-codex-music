@@ -109,7 +109,8 @@ def test_vocal_evidence_must_cover_whole_fade_and_reject_word_energy():
     from aidj.vocal_probe import MODEL_SHA256
     check={'accepted':True,'modelSha256':MODEL_SHA256,'normalizedVocalMaxDbfs':-40,
            'normalizedVocalP95Dbfs':-45,'vocalToMixP95Db':-10,'proofStart':70.6,'proofEnd':72.2,
-           'sourceOffsetSeconds':68,'sourceEndSeconds':74,'playbackGainDb':-6,'asrClear':True}
+           'sourceOffsetSeconds':68,'sourceEndSeconds':74,'playbackGainDb':-6,'asrClear':True,
+           'normalizedMixMaxDbfs':-34,'normalizedMixP95Dbfs':-36}
     point={'time':72,'fade':1.2,'fadeStart':70.8,'regionStart':70.6,'regionEnd':72.2,
            'maxRms':.5,'relativeMax':1,'method':'vocal-isolated-fade','vocalCheck':check}
     item={'status':'ready','row':{'end':72,'fadeOut':1.2},'exit':point,'observedWords':[]}

@@ -1,0 +1,165 @@
+"""Incoming audio can sing soon after a verified breath, never across the cut."""
+import copy
+import hashlib
+import json
+import math
+
+import pytest
+
+from aidj import fixed_set_entry_review as review
+from aidj.vocal_probe import MODEL_SHA256
+
+MD5='1'*32
+COVERAGE=[[0.,180.]]
+
+
+def vectors(offset=37.3,duration=5.4,voice=.0005,mix=.3):
+    n=math.ceil(duration/.01-1e-8)
+    voices=[voice]*n if isinstance(voice,(int,float)) else voice
+    return {'modelSha256':MODEL_SHA256,'md5':MD5,'sourceOffsetSeconds':offset,
+            'durationSeconds':duration,'requestedEndSeconds':offset+duration,'frameHopSeconds':.01,
+            'vocalRms':voices,'mixRms':[mix]*n,'instrumentalRms':[mix]*n,
+            'vocalToMixDb':[20*math.log10(max(v,1e-8)/max(mix,1e-8)) for v in voices],
+            'cacheKey':'a'*64,'warnings':[]}
+
+
+def fixtures(start=40.):
+    row={'trackId':'a'*24,'md5':MD5,'start':start,'end':100.,'fadeIn':.1,'fadeOut':.8,
+         'transitionKind':'clean-cut','transitionSeconds':0,'rate':1.}
+    item={'trackId':row['trackId'],'md5':MD5,'row':row,'status':'ready','position':1,
+          'entry':{'time':start,'kind':'observed-word-gap'},'exit':{'validated':True},'observedWords':[]}
+    song={'md5':MD5,'lo':0.,'hi':180.,'duration':180.,'manualStart':False,
+          'lufs':-16.,'peak':-2.}
+    return item,song
+
+
+def test_singing_after_the_breath_is_expected_but_one_frame_at_cut_is_a_veto():
+    v=vectors(voice=[.0005 if 37.3+i*.01<40.1 else .3 for i in range(540)])
+    good=review.check_entry(v,40,[[40.35,41,True]],-3.098,MD5,coverage=COVERAGE)
+    assert good['accepted'] and good['frameCount']==20
+    assert good['verifiedWordBoundary'] is False and good['naturalSilenceClaimed'] is False
+    # Touching all10ms frames, not an average or p95 alone, prevents a short
+    # vocal onset hiding inside nineteen quiet frames.
+    v['vocalRms'][270]=.3;v['vocalToMixDb'][270]=0
+    assert not review.check_entry(v,40,[],-3.098,MD5,coverage=COVERAGE)['accepted']
+
+
+def test_retained_word_vetoes_even_an_acoustically_quiet_dip_inside_word():
+    v=vectors()
+    assert not review.check_entry(v,40,[[39.8,40.2,True]],-3.098,MD5,coverage=COVERAGE)['accepted']
+    assert review.check_entry(v,40,[],-3.098,MD5,coverage=COVERAGE)['accepted']
+
+
+def test_invalid_source_model_and_excerpt_edges_cannot_certify_entry():
+    v=vectors()
+    assert review.check_entry(v,37.4,[],-3.098,MD5,coverage=COVERAGE)['reason']=='incomplete-entry-context'
+    for change in (lambda v:v.update(md5='2'*32),lambda v:v.update(modelSha256='wrong'),
+                   lambda v:v.update(warnings=['near-zero-vocal-output']),
+                   lambda v:v['vocalRms'].__setitem__(0,float('nan'))):
+        bad=copy.deepcopy(v);change(bad)
+        assert not review.check_entry(bad,40,[],-3.098,MD5,coverage=COVERAGE)['accepted']
+
+
+def test_only_physical_zero_explicit_manual_start_or_exact_owner_are_exempt():
+    item,song=fixtures(0.)
+    def forbidden(*a):raise AssertionError('exemption needs no model or download')
+    result=review.review_checkpoint(item,song,[],forbidden)
+    assert result['entryProof']['method']=='physical-source-start'
+    assert result['entryProof']['acousticProofClaimed'] is False
+    assert review.exemption(3,{**song,'lo':3},[]) is None
+    assert review.exemption(3,{**song,'lo':3,'manualStart':True},[])=='manual-range-start'
+    assert review.exemption(40,song,[40])=='owner-approved'
+    assert review.exemption(40.01,song,[40]) is None
+
+
+def test_kept_source_start_name_cannot_exempt_a_nonzero_actual_entry():
+    item,song=fixtures();item['entry']['kind']='kept-source-start';calls=[]
+    def probe(a,b):calls.append((a,b));return vectors(a,b-a)
+    result=review.review_checkpoint(item,song,[],probe,coverage=COVERAGE)
+    assert calls==[(37.3,42.699999999999996)]
+    assert result['entryProof']['method']=='vocal-free-entry-breath'
+
+
+def test_reuse_and_nearest_safe_shift_preserve_exit_but_invalidate_stereo_row():
+    item,song=fixtures();item['stereoEvidence']={'rowStart':40};item['stereoVersion']=1
+    item['exit']['stereoVerified']=True
+    v=vectors(voice=[.0005 if 37.3+i*.01<39.7 else .3 for i in range(540)])
+    def forbidden(*a):raise AssertionError('cached vectors already cover a safe nearby entry')
+    result=review.review_checkpoint(item,song,[],forbidden,coverage=COVERAGE,existing_evidence=[v])
+    assert result['status']=='ready' and 39.3<result['row']['start']<39.7
+    assert result['row']['end']==100 and result['row']['fadeOut']==.8
+    assert result['row']['trackId']==item['trackId'] and result['md5']==MD5
+    assert 'stereoEvidence' not in result and 'stereoVersion' not in result
+    assert 'stereoVerified' not in result['exit'] and result['entryShiftNeedsStereoRecheck']
+    assert result['entryReviewBudget']['newProbes']==0
+    assert item['row']['start']==40 and item['stereoEvidence']=={'rowStart':40}
+
+
+def test_search_never_escapes_allowed_range_duration_or_owner_negative_veto():
+    item,song=fixtures(55);item['row']['end']=100
+    calls=[]
+    def loud(a,b):calls.append((a,b));return vectors(a,b-a,voice=.3)
+    result=review.review_checkpoint(item,song,[],loud,coverage=COVERAGE,rejected=[55])
+    assert result['status']=='needs-review' and result['row']['start']==55
+    assert result['entryReviewOnly'] and result['entryReviewBudget']['newProbes']==1 and len(calls)==1
+    v=vectors(52.3,voice=[.0005 if 52.3+i*.01>55.5 else .3 for i in range(540)])
+    # A later safe breath would leave less than45s, so it must stay unresolved.
+    result=review.review_checkpoint(item,song,[],lambda a,b:v,coverage=COVERAGE,existing_evidence=[v])
+    assert result['status']=='needs-review'
+
+
+def test_final_gate_reloads_raw_vectors_and_rejects_stale_or_forged_verdict(tmp_path):
+    item,song=fixtures();v=vectors()
+    result=review.review_checkpoint(item,song,[],lambda a,b:v,coverage=COVERAGE)
+    path=tmp_path/('a'*64+'.json');path.write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path) is None
+    changed=copy.deepcopy(result);changed['row']['start']+=.01
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-stale'
+    changed=copy.deepcopy(result);changed['observedWords']=[[39.8,40.2,True]]
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-input-changed'
+    changed=copy.deepcopy(result);changed['entryProof']['method']='imaginary-boundary'
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-method'
+    changed=copy.deepcopy(result);changed['entryProof']['normalizedVocalMaxDbfs']=-100
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-mismatch'
+    v['vocalRms'][270]=.3;v['vocalToMixDb'][270]=0;path.write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path).startswith('entry-proof-')
+
+
+def test_owner_exemption_is_rechecked_at_final_gate(tmp_path):
+    item,song=fixtures()
+    result=review.review_checkpoint(item,song,[],lambda *a:None,owner=[40])
+    assert review.selection_error(result,song,owner=[40],evidence_folder=tmp_path) is None
+    assert review.selection_error(result,song,owner=[],evidence_folder=tmp_path)=='entry-input-changed'
+
+
+def test_failed_entry_review_can_retry_without_changing_an_already_valid_exit():
+    item,song=fixtures()
+    bad=review.review_checkpoint(item,song,[],lambda a,b:vectors(a,b-a,voice=.3),coverage=COVERAGE)
+    assert bad['status']=='needs-review' and bad['entryReviewOnly']
+    assert bad['entryVocalEvidence'][0]['cacheKey']=='a'*64
+    good=review.review_checkpoint(bad,song,[],lambda a,b:vectors(a,b-a),coverage=COVERAGE)
+    assert good['status']=='ready' and not good['entryReviewOnly']
+    assert good['exit']==item['exit'] and good['row']['end']==item['row']['end']
+
+
+def test_missing_or_partial_asr_coverage_cannot_turn_absent_words_into_a_safe_entry():
+    v=vectors()
+    result=review.check_entry(v,40,[],-3.098,MD5)
+    assert not result['accepted'] and result['reason']=='entry-asr-unobserved'
+    assert result['asrClear'] and result['asrCoverageComplete'] is False
+    assert not review.check_entry(v,40,[],-3.098,MD5,coverage=[[0,40.2]])['accepted']
+    # Consecutive actually observed windows may cover the whole guard.
+    assert review.check_entry(v,40,[],-3.098,MD5,coverage=[[39.7,40],[40,40.3]])['accepted']
+    assert not review.check_entry(v,40,[],-3.098,MD5,coverage=[[39.7,39.9],[40,40.3]])['accepted']
+
+
+def test_final_gate_rejects_removed_coverage_and_replays_the_observation_bounds(tmp_path):
+    item,song=fixtures();v=vectors()
+    result=review.review_checkpoint(item,song,[],lambda a,b:v,coverage=COVERAGE)
+    (tmp_path/('a'*64+'.json')).write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path) is None
+    changed=copy.deepcopy(result);changed['observedCoverage']=[]
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-input-changed'
+    # Even a recomputed fingerprint cannot launder an unobserved ASR window.
+    changed['entryReviewInputHash']=review.fingerprint(changed,song,[])
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-entry-asr-unobserved'

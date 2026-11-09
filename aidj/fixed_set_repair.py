@@ -76,7 +76,21 @@ def selection_error(item):
         if check['proofStart']>point['fadeStart']-.199 or check['proofEnd']<point['time']+.199:return 'incomplete-vocal-margin'
         if check['proofStart']<check['sourceOffsetSeconds']+.249 or check['proofEnd']>check['sourceEndSeconds']-.249:return 'vocal-context-edge'
         if check['normalizedVocalMaxDbfs']>-37 or (check['normalizedVocalP95Dbfs']>-43 and check['vocalToMixP95Db']>-30):return 'vocal-not-quiet'
-        if not check.get('asrClear') or not word_clear(item.get('observedWords',[]),point['fadeStart'],point['time'],.3):return 'vocal-ASR-conflict'
+        mix_fields=('normalizedMixMaxDbfs','normalizedMixP95Dbfs')
+        if any(type(check.get(k)) not in (int,float) or not math.isfinite(check[k]) for k in mix_fields):return 'invalid-vocal-mix-metrics'
+        if check['normalizedMixP95Dbfs']>-30 and point['fade']<2-1e-7:return 'music-release-too-short'
+        if point['fade']<.7-1e-7 and check['normalizedMixMaxDbfs']>-35:return 'short-fade-mix-not-quiet'
+        if check.get('criterion')=='physical-EOF-quiet':
+            from .fixed_set_vocal_review import _valid_eof_source
+            proof=check.get('sourceProof')
+            if not _valid_eof_source(proof,{'md5':item.get('md5')},point):return 'invalid-vocal-EOF-source'
+            if check.get('asrClear') is not False or check.get('asrIgnored') is not True:return 'fake-vocal-EOF-ASR'
+            if check.get('asrIgnoredReason')!='terminal-ASR-conflict-corroborated-by-vocal-and-stereo-decay':return 'missing-vocal-EOF-reason'
+            if check['proofEnd']-check['proofStart']<1.5-1e-6:return 'brief-vocal-EOF-proof'
+            if check['normalizedVocalMaxDbfs']>-43 or check['normalizedVocalP95Dbfs']>-48 or check['normalizedMixMaxDbfs']>-35 or check['normalizedMixP95Dbfs']>-40:return 'not-quiet-vocal-EOF'
+        else:
+            from .fixed_set_vocal_review import vocal_word_clear
+            if not check.get('asrClear') or not vocal_word_clear(item.get('observedWords',[]),point['fadeStart'],point['time'],.3):return 'vocal-ASR-conflict'
         return None
     if method=='reobserved-instrumental-fade':
         if not any(probe_supports(p,point) for p in item.get('repairProbes',[])):return 'missing-local-reprobe'
@@ -287,19 +301,45 @@ def assemble(settings,work):
         item=json.loads(path.read_text())
         error=selection_error(item)
         if error:raise RuntimeError('REPAIR_UNRESOLVED_'+error)
+        if item['exit']['method'] in ('reobserved-instrumental-fade','instrumental-fade'):
+            raise RuntimeError('REPAIR_VOCAL_REVIEW_REQUIRED')
         tracks.append(item['row']);audits.append(item)
     assert [r['trackId'] for r in tracks]==[r['trackId'] for r in baseline['tracks']]
     plan={**baseline,'tracks':tracks,'revision':signature(tracks)}
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
     assets={r['id']:dict(r) for r in db.execute('SELECT id,md5,duration FROM web_assets')}
     ranges={r['track_id']:(r['start'],r['end']) for r in db.execute('SELECT * FROM playback_ranges')}
+    from .fixed_set_stereo_verify import PHYSICAL,stereo_error
+    from .fixed_set_resolve import restore_evidence
+    from .fixed_set_entry_review import selection_error as entry_selection_error
+    owner_path=settings.state/'research/dj1-curation/owner-entries.json'
+    if not owner_path.exists():raise RuntimeError('REPAIR_ENTRY_OWNER_MARKS_MISSING')
+    owner_entries=json.loads(owner_path.read_text())
     for item in audits:
+        aid=item['trackId'];asset=assets.get(aid)
+        if not asset:raise RuntimeError('REPAIR_SOURCE_MISSING')
+        raw_lo,raw_hi=ranges.get(aid,(None,None))
+        lo=0 if raw_lo is None else raw_lo
+        hi=asset['duration'] if raw_hi is None else raw_hi
+        level=db.execute('SELECT integrated_lufs AS lufs,true_peak_dbtp AS peak,method AS loudnessMethod,status AS loudnessStatus FROM audio_loudness WHERE md5=?',(asset['md5'],)).fetchone()
+        entry_source={**asset,**(dict(level) if level else {'lufs':None,'peak':None}),
+                      'lo':lo,'hi':hi,'manualStart':raw_lo is not None}
+        entry_error=entry_selection_error(item,entry_source,owner=owner_entries.get(aid,[]),evidence_folder=work/'vocal-evidence')
+        if entry_error:raise RuntimeError('REPAIR_'+entry_error)
+        if item['exit']['method'] in PHYSICAL:
+            source={**asset,'lo':lo,'hi':hi,'manualEnd':hi<asset['duration']-.001}
+            raw=db.execute('SELECT payload FROM dj_evidence WHERE md5=?',(asset['md5'],)).fetchone()
+            if not raw:raise RuntimeError('REPAIR_STEREO_OBSERVATIONS_MISSING')
+            proof_error=stereo_error(item,source,restore_evidence(json.loads(raw[0]),item))
+            if proof_error:raise RuntimeError('REPAIR_STEREO_'+proof_error)
         if item['exit']['method'] in ('short-digital-EOF','short-natural-release'):
             aid=item['trackId'];duration=assets[aid]['duration']
-            if abs(item['exit']['metadataDuration']-duration)>.001 or ranges.get(aid,(0,duration))[1]<duration-.001:
+            if abs(item['exit']['metadataDuration']-duration)>.001 or hi<duration-.001:
                 raise RuntimeError('REPAIR_EOF_SOURCE_MISMATCH')
         if item['exit']['method'] in ('vocal-checked-instrumental-fade','vocal-isolated-fade'):
-            from .fixed_set_vocal_review import check_endpoint
+            from .fixed_set_vocal_review import check_endpoint,replay_source
+            try:current_gain,trusted_source=replay_source(item,entry_source)
+            except ValueError:raise RuntimeError('REPAIR_VOCAL_SOURCE_CHANGED') from None
             check=item['exit']['vocalCheck'];verified=False
             for ref in item.get('vocalEvidence',[]):
                 key=ref.get('cacheKey','')
@@ -308,7 +348,7 @@ def assemble(settings,work):
                 if not file.exists() or file.stat().st_size>2*1024**2:continue
                 evidence=json.loads(file.read_text())
                 if evidence.get('cacheKey')!=key or evidence.get('md5')!=item['md5']:continue
-                result=check_endpoint(evidence,item['exit'],item.get('observedWords',[]),check['playbackGainDb'],item['referenceRms'])
+                result=check_endpoint(evidence,item['exit'],item.get('observedWords',[]),current_gain,item['referenceRms'],source_proof=trusted_source)
                 if result.get('accepted'):verified=True;break
             if not verified:raise RuntimeError('REPAIR_VOCAL_EVIDENCE_MISSING')
     plan=validate(plan,assets,ranges);db.close()
