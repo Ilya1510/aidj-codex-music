@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 from .config import Settings, atomic_json
-from .fixed_sets import signature
+from .fixed_sets import revise_boundary, signature
 
 FEATURE_VERSION = 2
 SR = 11025
@@ -319,8 +319,18 @@ def compile_plan(work, playlist_id):
             'group':groups.get(song['trackId'],'other'),'bpm':song['bpm'],'optionIndex':song['selectedOption'],'option':option,
             'nextDistance':round(distance(song,order[i+1]),4) if i+1<len(order) else None})
     result={'id':'dj1','name':'DJ 1','playlistId':playlist_id,'revision':signature(tracks),'tracks':tracks}
+    # Reviewed quiet exits are applied after ordering, so an improved endpoint
+    # never silently reshuffles an already curated set on the next compilation.
+    assets={aid:{'md5':s['md5'],'duration':s['duration']} for aid,s in features.items()}
+    ranges={aid:(s['allowedStart'],s['allowedEnd']) for aid,s in features.items()}
+    for correction in curated.get('reviewedBoundaries',[]):
+        result=revise_boundary(result,correction,assets,ranges)
+        item=next(a for a in audit if a['trackId']==correction['trackId'])
+        item['option']={**item['option'],'end':correction['end'],'fadeOut':correction['fadeOut'],
+                        'exitOrigin':'reviewed-quiet','quietWindow':correction['quietWindow']}
+        item['reviewNote']=correction.get('reason','')
     atomic_json(work/'plan.json',result);atomic_json(work/'audit.json',audit)
-    print('COMPILED',len(tracks),'segments',round(sum(r['end']-r['start'] for r in tracks)/3600,2),'hours',flush=True)
+    print('COMPILED',len(result['tracks']),'segments',round(sum(r['end']-r['start'] for r in result['tracks'])/3600,2),'hours',flush=True)
     return result
 
 

@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from aidj.fixed_set_prepare import occupied, points, quiet_tail_end, source_rows
-from aidj.fixed_sets import publish, records, signature, validate
+from aidj.fixed_sets import publish, records, revise_boundary, signature, validate
 
 
 def manifest():
@@ -146,3 +146,27 @@ def test_owner_exit_is_explicit_candidate_and_still_obeys_rejected_point_veto():
     assert any(p[0]==60 and p[1]=='owner' for p in exits)
     _,exits,_=points(song,{}, {'words':[]},human_exits=[60],rejected=[60])
     assert not any(p[0]==60 for p in exits)
+
+
+def quiet_correction():
+    return {'trackId':'a'*24,'md5':'1'*32,'previousEnd':72,'end':82,'fadeOut':.5,
+            'quietWindow':{'start':81,'end':83,'maxRelativeRms':.06,'lastVocalEnd':79}}
+
+
+def test_reviewed_quiet_exit_keeps_order_entry_and_other_track_fields():
+    before=manifest();after=revise_boundary(before,quiet_correction(),assets())
+    assert after['tracks'][0]['start']==before['tracks'][0]['start']
+    assert after['tracks'][0]['end']==82 and after['tracks'][0]['fadeOut']==.5
+    assert after['revision']!=before['revision']
+    assert before['tracks'][0]['end']==72
+
+
+@pytest.mark.parametrize('patch',[
+    {'start':81.5,'end':82}, # a tiny dip is not a quiet region
+    {'maxRelativeRms':.8}, # still loud even if ASR reports a gap
+    {'lastVocalEnd':81.4}, # fade would consume a word tail
+    {'start':81.8}, # fade does not fit inside quiet region
+])
+def test_quiet_exit_rejects_tiny_dips_loud_music_and_fades_over_vocals(patch):
+    change=quiet_correction();change['quietWindow'].update(patch)
+    with pytest.raises(ValueError):revise_boundary(manifest(),change,assets())

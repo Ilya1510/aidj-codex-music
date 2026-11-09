@@ -48,6 +48,33 @@ def signature(tracks):
     return hashlib.sha256(json.dumps(tracks, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:20]
 
 
+def revise_boundary(value, correction, assets, ranges=None):
+    """Correct one reviewed cut without running the song-order selector again.
+
+    Quiet proof describes a continuously measured low-energy window, not the
+    minimum of a single FFT frame. The whole fade and a breath before it must
+    fit inside that window. No absence-of-ASR claim is inferred here.
+    """
+    value=validate(value,assets,ranges)
+    if not isinstance(correction,dict):raise ValueError('FIXED_CORRECTION')
+    proof=correction.get('quietWindow')
+    if not isinstance(proof,dict):raise ValueError('FIXED_CORRECTION_QUIET')
+    fields=('start','end','maxRelativeRms','lastVocalEnd')
+    if any(type(proof.get(k)) not in (int,float) or not math.isfinite(proof[k]) for k in fields):raise ValueError('FIXED_CORRECTION_QUIET')
+    if not (proof['end']-proof['start']>=.7 and 0<=proof['maxRelativeRms']<=.08):raise ValueError('FIXED_CORRECTION_QUIET')
+    result={**value,'tracks':[dict(r) for r in value['tracks']]}
+    matches=[r for r in result['tracks'] if r['trackId']==correction.get('trackId')]
+    if len(matches)!=1:raise ValueError('FIXED_CORRECTION_TRACK')
+    row=matches[0]
+    if row['md5']!=correction.get('md5') or row['end']!=correction.get('previousEnd'):raise ValueError('FIXED_CORRECTION_STALE')
+    end,fade=correction.get('end'),correction.get('fadeOut')
+    if any(type(x) not in (int,float) or not math.isfinite(x) for x in (end,fade)):raise ValueError('FIXED_CORRECTION_NUMBER')
+    if not (proof['start']<=end-fade-.15 and end<=proof['end'] and proof['lastVocalEnd']+.35<=end-fade):raise ValueError('FIXED_CORRECTION_VOCAL_OR_FADE')
+    row.update(end=end,fadeOut=fade)
+    result['revision']=signature(result['tracks'])
+    return validate(result,assets,ranges)
+
+
 def records(db):
     # Old backups/fixtures need not contain a set. Never turn stale cuts into a
     # silently different set when a source or the owner's allowed range changes.
