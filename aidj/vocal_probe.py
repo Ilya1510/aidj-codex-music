@@ -12,6 +12,7 @@ https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/mo
 """
 import hashlib
 import math
+import os
 from pathlib import Path
 
 MODEL_NAME = 'UVR_MDXNET_1_9703.onnx'
@@ -128,11 +129,21 @@ def _separate(wave, predict, *, n_fft=N_FFT, hop=HOP, dim_f=DIM_F,
     return result[:, trim:wanted] * compensate
 
 
+def cpu_threads():
+    """One CPU worker by default;2 is opt-in only after a bounded resource pilot."""
+    configured=os.environ.get('AIDJ_VOCAL_CPU_THREADS','1')
+    if configured not in ('1','2'):
+        raise ValueError('Vocal probe CPU threads must be1 or2')
+    return int(configured)
+
+
 def _load_model(path):
+    threads=cpu_threads()  # Validate before importing/allocating the native model.
     import onnxruntime as ort
     path = verify_model(path)
     options = ort.SessionOptions()
-    options.intra_op_num_threads = options.inter_op_num_threads = 1
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
     options.enable_cpu_mem_arena = options.enable_mem_pattern = False

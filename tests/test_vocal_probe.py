@@ -77,3 +77,50 @@ def test_partial_final_frame_does_not_invent_quiet_at_cropped_eof(np):
     np.testing.assert_allclose(result['vocalRms'],[.05,.05],atol=1e-8)
     assert result['lastFrameSeconds']==1/44100
     assert result['centerNearExcerptEdge'] is True
+
+
+def test_cpu_threads_default_and_explicit_supported_values(monkeypatch):
+    monkeypatch.delenv('AIDJ_VOCAL_CPU_THREADS',raising=False)
+    assert probe.cpu_threads()==1
+    for value in ('1','2'):
+        monkeypatch.setenv('AIDJ_VOCAL_CPU_THREADS',value)
+        assert probe.cpu_threads()==int(value)
+
+
+@pytest.mark.parametrize('value',['','0','3','-1','1.0',' 2','2 ','+2','secret-like-invalid'])
+def test_cpu_threads_reject_invalid_before_optional_runtime_import_or_model_allocation(monkeypatch,value):
+    import sys
+    from types import SimpleNamespace
+    def forbidden(*args,**kwargs):raise AssertionError('model allocation must not run')
+    monkeypatch.setenv('AIDJ_VOCAL_CPU_THREADS',value)
+    monkeypatch.setitem(sys.modules,'onnxruntime',SimpleNamespace(SessionOptions=forbidden))
+    with pytest.raises(ValueError,match='CPU threads must be1 or2') as error:
+        probe._load_model('unused')
+    assert str(error.value)=='Vocal probe CPU threads must be1 or2'
+
+
+def test_opt_in_two_threads_changes_only_intra_op_and_keeps_memory_controls(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    captured={}
+    class Options:
+        def add_session_config_entry(self,key,value):captured[key]=value
+    class Session:
+        def __init__(self,path,*,sess_options,providers):
+            captured['options']=sess_options;captured['providers']=providers
+        def get_inputs(self):return [SimpleNamespace(name='input',type='tensor(float)',shape=[None,4,2048,256])]
+        def get_outputs(self):return [SimpleNamespace(name='output')]
+        def run(self,*args):return ['numeric-output']
+    fake=SimpleNamespace(SessionOptions=Options,InferenceSession=Session,
+        ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL='sequential'),
+        GraphOptimizationLevel=SimpleNamespace(ORT_ENABLE_BASIC='basic'))
+    monkeypatch.setitem(sys.modules,'onnxruntime',fake)
+    monkeypatch.setattr(probe,'verify_model',lambda path:path)
+    monkeypatch.setenv('AIDJ_VOCAL_CPU_THREADS','2')
+    predict=probe._load_model('unused');options=captured['options']
+    assert options.intra_op_num_threads==2 and options.inter_op_num_threads==1
+    assert options.execution_mode=='sequential' and options.graph_optimization_level=='basic'
+    assert options.enable_cpu_mem_arena is False and options.enable_mem_pattern is False
+    assert captured['providers']==['CPUExecutionProvider']
+    assert captured['session.intra_op.allow_spinning']=='0'
+    assert predict(None)=='numeric-output'
