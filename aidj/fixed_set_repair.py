@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 import sqlite3
@@ -50,7 +51,33 @@ def selection_error(item):
     required=('time','fade','fadeStart','regionStart','regionEnd','maxRms','relativeMax')
     if any(type(point.get(k)) not in (int,float) or not math.isfinite(point[k]) for k in required):return 'invalid-proof'
     if abs(row.get('end',-1)-point['time'])>.001 or abs(row.get('fadeOut',-1)-point['fade'])>.001:return 'different-cut'
+    if method in ('short-digital-EOF','short-natural-release'):
+        fields=('sourceDuration','metadataDuration','unmeasuredTail')
+        if any(type(point.get(k)) not in (int,float) or not math.isfinite(point[k]) for k in fields):return 'invalid-EOF-proof'
+        if point.get('actualEOF') is not True or abs(point['sourceDuration']-point['metadataDuration'])>.05:return 'not-original-EOF'
+        if not 0<=point['unmeasuredTail']<=.010001:return 'unmeasured-EOF'
+        if point['regionStart']>point['fadeStart']-.024 or point['regionEnd']<point['time']+.024:return 'fade-outside-EOF-proof'
+        if abs(point['time']-point['sourceDuration'])>.05:return 'not-at-EOF'
+        minimum=.25 if method=='short-digital-EOF' else .3
+        if point['regionEnd']-point['regionStart']<minimum-1e-6:return 'brief-EOF-valley'
+        if method=='short-digital-EOF':return None if point['maxRms']<=.0001 else 'not-digital-EOF'
+        if point['relativeMax']>.18+1e-6:return 'EOF-not-quiet'
+        if not any(p['confident']>=3 and p['start']<=point['regionStart']-.3 and p['end']>=point['sourceDuration']-1e-6 for p in item.get('repairProbes',[])):return 'missing-EOF-reprobe'
+        if not word_clear(item.get('observedWords',[]),point['fadeStart'],point['time'],.3):return 'vocal-over-EOF-fade'
+        return None
     if point['regionStart']>point['fadeStart']-.149 or point['regionEnd']<point['time']+.099:return 'fade-outside-proof'
+    if method in ('vocal-checked-instrumental-fade','vocal-isolated-fade'):
+        from .vocal_probe import MODEL_SHA256
+        check=point.get('vocalCheck',{})
+        fields=('normalizedVocalMaxDbfs','normalizedVocalP95Dbfs','vocalToMixP95Db',
+                'proofStart','proofEnd','sourceOffsetSeconds','sourceEndSeconds','playbackGainDb')
+        if check.get('accepted') is not True or check.get('modelSha256')!=MODEL_SHA256:return 'unverified-vocal-model'
+        if any(type(check.get(k)) not in (int,float) or not math.isfinite(check[k]) for k in fields):return 'invalid-vocal-metrics'
+        if check['proofStart']>point['fadeStart']-.199 or check['proofEnd']<point['time']+.199:return 'incomplete-vocal-margin'
+        if check['proofStart']<check['sourceOffsetSeconds']+.249 or check['proofEnd']>check['sourceEndSeconds']-.249:return 'vocal-context-edge'
+        if check['normalizedVocalMaxDbfs']>-37 or (check['normalizedVocalP95Dbfs']>-43 and check['vocalToMixP95Db']>-30):return 'vocal-not-quiet'
+        if not check.get('asrClear') or not word_clear(item.get('observedWords',[]),point['fadeStart'],point['time'],.3):return 'vocal-ASR-conflict'
+        return None
     if method=='reobserved-instrumental-fade':
         if not any(probe_supports(p,point) for p in item.get('repairProbes',[])):return 'missing-local-reprobe'
         if not word_clear(item.get('observedWords',[]),point['fadeStart']-.15,point['time']+.1,.4):return 'vocal-over-fade'
@@ -180,6 +207,8 @@ def run(settings,work,decoder,limit=None):
     gold={g['trackId']:g for g in gold};disk=Disk(settings);count=0;model=None
     def observe(evidence,y,lo,hi):
         nonlocal model
+        if any(abs(p['start']-lo)<.001 and abs(p['end']-hi)<.001 for p in evidence.get('repairProbes',[])):
+            return False
         from .dj_worker import numeric_words,replace_observed_words
         if model is None:
             from faster_whisper import WhisperModel
@@ -195,6 +224,7 @@ def run(settings,work,decoder,limit=None):
         else:evidence['words']=[*evidence.get('words',[]),*fresh]
         evidence['coverage']=[*evidence.get('coverage',[]),[lo,hi]]
         evidence.setdefault('repairProbes',[]).append({'start':lo,'end':hi,'words':len(fresh),'confident':sum(bool(w[2]) for w in fresh)})
+        return True
     for at,old in enumerate(plan['tracks'],1):
         asset=db.execute('SELECT a.*,r.start AS lo,r.end AS hi,l.integrated_lufs AS lufs,l.true_peak_dbtp AS peak FROM web_assets a LEFT JOIN playback_ranges r ON r.track_id=a.id LEFT JOIN audio_loudness l ON l.md5=a.md5 WHERE a.id=?',(old['trackId'],)).fetchone()
         if not asset or asset['md5']!=old['md5']:raise RuntimeError('REPAIR_SOURCE_CHANGED')
@@ -230,8 +260,11 @@ def run(settings,work,decoder,limit=None):
             result=choose(old,song,evidence,rms,owner.get(old['trackId'],[]),bad.get(old['trackId'],[]),gold.get(old['trackId']))
             for attempt in range(3):
                 if result['status']!='needs-probe':break
+                point=result['exit'];a=point['fadeStart']-.15;b=point['time']+.1
+                if any(probe_supports(p,point) for p in evidence.get('repairProbes',[])) and word_clear(evidence['words'],a,b,.4):
+                    result['status']='ready';point.update(validated=True,method='reobserved-instrumental-fade',proof='long-gap-reobserved-and-guarded');break
                 end=result['exit']['time'];begin=max(0,end-14);finish=min(song['duration'],begin+28)
-                observe(evidence,y,begin,finish)
+                if not observe(evidence,y,begin,finish):break
                 result=choose(old,song,evidence,rms,owner.get(old['trackId'],[]),bad.get(old['trackId'],[]),gold.get(old['trackId']))
                 if result['status']=='needs-probe':
                     point=result['exit'];a=point['fadeStart']-.15;b=point['time']+.1
@@ -260,6 +293,24 @@ def assemble(settings,work):
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
     assets={r['id']:dict(r) for r in db.execute('SELECT id,md5,duration FROM web_assets')}
     ranges={r['track_id']:(r['start'],r['end']) for r in db.execute('SELECT * FROM playback_ranges')}
+    for item in audits:
+        if item['exit']['method'] in ('short-digital-EOF','short-natural-release'):
+            aid=item['trackId'];duration=assets[aid]['duration']
+            if abs(item['exit']['metadataDuration']-duration)>.001 or ranges.get(aid,(0,duration))[1]<duration-.001:
+                raise RuntimeError('REPAIR_EOF_SOURCE_MISMATCH')
+        if item['exit']['method'] in ('vocal-checked-instrumental-fade','vocal-isolated-fade'):
+            from .fixed_set_vocal_review import check_endpoint
+            check=item['exit']['vocalCheck'];verified=False
+            for ref in item.get('vocalEvidence',[]):
+                key=ref.get('cacheKey','')
+                if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):continue
+                file=work/'vocal-evidence'/(key+'.json')
+                if not file.exists() or file.stat().st_size>2*1024**2:continue
+                evidence=json.loads(file.read_text())
+                if evidence.get('cacheKey')!=key or evidence.get('md5')!=item['md5']:continue
+                result=check_endpoint(evidence,item['exit'],item.get('observedWords',[]),check['playbackGainDb'],item['referenceRms'])
+                if result.get('accepted'):verified=True;break
+            if not verified:raise RuntimeError('REPAIR_VOCAL_EVIDENCE_MISSING')
     plan=validate(plan,assets,ranges);db.close()
     atomic_json(work/'plan.json',plan);atomic_json(work/'audit.json',audits)
     print('REPAIR_ASSEMBLED',len(tracks),plan['revision'],plan['duration'])

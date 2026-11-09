@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aidj.fixed_set_repair import choose, covered, merge, probe_supports, word_clear
+from aidj.fixed_set_repair import choose, covered, merge, probe_supports, selection_error, word_clear
 
 
 def test_fresh_model_tuples_and_cached_json_lists_merge_without_losing_vocals():
@@ -89,3 +89,31 @@ def test_unobserved_ordinary_quiet_music_is_not_declared_vocal_free(numeric_fixt
     result = choose(old, song, {**evidence, 'coverage': []}, rms, owner=[10])
     assert result['status'] == 'needs-review'
     assert 'row' not in result
+
+
+def test_short_digital_EOF_requires_physical_padding_and_actual_file_end():
+    import copy
+    point={'time':99.975,'fade':.15,'fadeStart':99.825,'regionStart':99.7,'regionEnd':100,
+           'maxRms':.00001,'relativeMax':.0001,'method':'short-digital-EOF',
+           'actualEOF':True,'sourceDuration':100,'metadataDuration':100,'unmeasuredTail':0}
+    item={'status':'ready','row':{'end':99.975,'fadeOut':.15},'exit':point,
+          'observedWords':[[99.9,100.01,False]]}
+    assert selection_error(item) is None
+    for patch in [{'actualEOF':False},{'maxRms':.01},{'sourceDuration':104},{'unmeasuredTail':.08}]:
+        changed=copy.deepcopy(item);changed['exit'].update(patch)
+        assert selection_error(changed)
+
+
+def test_vocal_evidence_must_cover_whole_fade_and_reject_word_energy():
+    import copy
+    from aidj.vocal_probe import MODEL_SHA256
+    check={'accepted':True,'modelSha256':MODEL_SHA256,'normalizedVocalMaxDbfs':-40,
+           'normalizedVocalP95Dbfs':-45,'vocalToMixP95Db':-10,'proofStart':70.6,'proofEnd':72.2,
+           'sourceOffsetSeconds':68,'sourceEndSeconds':74,'playbackGainDb':-6,'asrClear':True}
+    point={'time':72,'fade':1.2,'fadeStart':70.8,'regionStart':70.6,'regionEnd':72.2,
+           'maxRms':.5,'relativeMax':1,'method':'vocal-isolated-fade','vocalCheck':check}
+    item={'status':'ready','row':{'end':72,'fadeOut':1.2},'exit':point,'observedWords':[]}
+    assert selection_error(item) is None
+    for patch in [{'normalizedVocalMaxDbfs':-20},{'proofEnd':72},{'modelSha256':'0'*64}]:
+        changed=copy.deepcopy(item);changed['exit']['vocalCheck'].update(patch)
+        assert selection_error(changed)
