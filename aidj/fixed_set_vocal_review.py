@@ -35,7 +35,11 @@ PARAMETERS = {'quietP95Dbfs': -43., 'absoluteMaxDbfs': -37.,
               'suppressedP95Db': -30., 'fadeMarginSeconds': .2,
               'wordPaddingSeconds': .3, 'excerptGuardSeconds': .25,
               'searchMinSeconds': 1.5, 'searchFadeSeconds': .8,
-              'searchMarginSeconds': .3}
+              'searchMarginSeconds': .3, 'shortMixMaxDbfs':-35., 'loudMixP95Dbfs':-30.,
+              'loudMinimumFadeSeconds':2., 'EOFVocalMaxDbfs':-43., 'EOFVocalP95Dbfs':-48.,
+              'EOFMixMaxDbfs':-35., 'EOFMixP95Dbfs':-40., 'EOFProofMinSeconds':1.5,
+              'EOFDistanceMinSeconds':.45, 'EOFDistanceMaxSeconds':2.5,
+              'EOFMetadataToleranceSeconds':.05, 'probeMetadataCapToleranceSeconds':.25}
 METHODS = {'vocal-checked-instrumental-fade', 'vocal-isolated-fade'}
 
 
@@ -230,13 +234,16 @@ def _search_candidates(old, song, evidence, vocal, owner, rejected, extra_entrie
                           evidence.get('coverage', []), [], owner)
     seen_entries={round(e['time'],4) for e in entries}
     entries.extend(e for e in extra_entries if isinstance(e,dict) and finite(e.get('time')) and round(e['time'],4) not in seen_entries)
+    entries=[entry for entry in entries if _entry_valid(entry,old,song,evidence,owner)]
     gain = gain_db(song); candidate_points = []
     reference=max(1e-5,quantile(values[0],.75))
     # Loud music needs a real long engineered release; short fades are reserved
     # for independently quiet stereo sound, not merely an absence of vocals.
     for minimum,fade in ((2.8,2.4),(1.5,.8),(.7,.3),(1.6,1.2)):
+        if minimum<1 and candidate_points:continue
         n=math.ceil(minimum/hop-1e-8)
-        for first in range(math.ceil(PARAMETERS['excerptGuardSeconds']/hop),len(values[0])-n,10):
+        stride=1 if minimum<1 else 10
+        for first in range(math.ceil(PARAMETERS['excerptGuardSeconds']/hop),len(values[0])-n,stride):
             a=offset+first*hop;b=a+n*hop
             if a<song['lo'] or b>min(song['hi'],offset+duration-PARAMETERS['excerptGuardSeconds']):continue
             voice=values[1][first:first+n];ratio=values[3][first:first+n]
@@ -247,12 +254,12 @@ def _search_candidates(old, song, evidence, vocal, owner, rejected, extra_entrie
             end=round(a+margin+fade,4)
             point={'time':end,'fade':fade,'fadeStart':round(end-fade,4),'regionStart':a,'regionEnd':b}
             if any(abs(end-t)<.35 for t in rejected):continue
+            eligible=[entry for entry in entries if 45<=end-entry['time']<=100 and not any(abs(entry['time']-t)<.35 for t in rejected)]
+            if not eligible:continue
             check=check_endpoint(vocal,point,evidence.get('words',[]),gain,reference)
             if not check['accepted']:continue
-            for entry in entries:
+            for entry in eligible:
                 span=end-entry['time']
-                if not 45<=span<=100 or any(abs(entry['time']-t)<.35 for t in rejected):continue
-                if not _entry_valid(entry,old,song,evidence,owner):continue
                 score=entry.get('penalty',1)+abs(span-62)/45+abs(entry['time']-old['start'])/200+abs(end-old['end'])/100
                 candidate_points.append({'score':score,'entry':entry,'exit':point})
     return sorted(candidate_points, key=lambda item:item['score'])[:32]
