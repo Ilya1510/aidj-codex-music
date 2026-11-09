@@ -300,6 +300,14 @@ def compile_plan(work, playlist_id):
             selected=min(pool,key=lambda song:(distance(current,song) if current else abs(song['bpm']-120),song['trackId']))
             pool.remove(selected);remaining.remove(selected['trackId']);order.append(selected)
     if remaining:raise ValueError('FIXED_CURATOR_UNASSIGNED')
+    # Explicit listening/editorial review can replace the proposed adjacency.
+    # These edits are applied once at authoring time, never at playback time.
+    for move in curated.get('moveAfter',[]):
+        aid,anchor=move['trackId'],move['afterTrackId']
+        if aid==anchor or aid not in features or anchor not in features:raise ValueError('FIXED_SET_EDITORIAL_MOVE')
+        item=next(song for song in order if song['trackId']==aid)
+        order.remove(item);at=next(i for i,song in enumerate(order) if song['trackId']==anchor)
+        order.insert(at+1,item)
     tracks=[];audit=[]
     for i,song in enumerate(order):
         option=song['options'][0]
