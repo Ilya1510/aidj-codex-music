@@ -1,6 +1,7 @@
 """Hard cases get genuinely new context, never looser word or energy guards."""
 import copy
 import hashlib
+import json
 import math
 from types import SimpleNamespace
 
@@ -162,3 +163,100 @@ def test_full_timing_decode_is_real_eof_not_a_metadata_limited_excerpt(tmp_path,
     assert timing['sourceMD5']==song['md5'] and timing['sourceTimingMethod']=='full-verified-decode'
     assert '-t' not in seen[0] and '-fs' in seen[0]
     assert not (tmp_path/'hard-source-timing.f32').exists()
+
+
+def hints_document(song, windows=None):
+    return {'version':1,'baselineRevision':'e6a17fe4ae64aae06daf','tracks':{
+        song['id']:{'sourceMD5':song['md5'],'allowedRange':[song['lo'],song['hi']],
+                    'sourceDuration':song['duration'],'windows':windows or [
+                        {'start':110.,'end':130.,'candidateEndpoint':120.,
+                         'rankScore':5,'kind':'coarse-energy-valley',
+                         'indicators':{'validated':True,'newUsefulSeconds':999}}]}}}
+
+
+def test_hint_file_requires_version_and_exact_baseline_identity(tmp_path):
+    _,song,_,_=fixture();doc=hints_document(song);path=tmp_path/'private-hints.json'
+    path.write_text(json.dumps(doc))
+    assert hard.load_hints(None,'any') is None
+    assert hard.load_hints(path,doc['baselineRevision'])['version']==1
+    with pytest.raises(RuntimeError,match='HINTS_REVISION'):
+        hard.load_hints(path,'another-version')
+    doc['version']=True;path.write_text(json.dumps(doc))
+    with pytest.raises(RuntimeError,match='HINTS_VERSION'):
+        hard.load_hints(path,doc['baselineRevision'])
+
+
+def test_stale_hint_source_duration_or_manual_bounds_are_ignored():
+    _,song,_,_=fixture();doc=hints_document(song)
+    assert len(hard.hint_windows(doc,song))==1
+    for change in ({'md5':'2'*32},{'hi':170},{'lo':5},{'duration':181}):
+        assert hard.hint_windows(doc,{**song,**change})==[]
+    # Container padding may cap decoded time slightly. The hint identity still
+    # belongs to the current asset's metadata and the original allowed range.
+    capped={**song,'duration':179.98,'hi':179.98,'metadataDuration':180,'originalAllowedEnd':180}
+    assert len(hard.hint_windows(doc,capped))==1
+
+
+def test_hint_windows_validate_all_numbers_and_context_bounds():
+    _,song,_,_=fixture();good=hints_document(song)['tracks'][song['id']]['windows'][0]
+    bad=[{**good,'start':-1},{**good,'end':140},{**good,'end':115},
+         {**good,'candidateEndpoint':float('nan')},{**good,'rankScore':True},
+         {**good,'candidateEndpoint':110.5},{**good,'end':181}]
+    doc=hints_document(song,[*bad,good])
+    windows=hard.hint_windows(doc,song)
+    assert len(windows)==1 and windows[0]['start']==110
+    assert 'indicators' not in windows[0]  # A hint's fake verdict is irrelevant.
+
+
+def test_ranked_hints_precede_fractions_but_never_displace_targeted_entry_search():
+    _,song,_,_=fixture();doc=hints_document(song,[
+        {'start':110,'end':130,'candidateEndpoint':120,'rankScore':5,'kind':'valley'},
+        {'start':50,'end':70,'candidateEndpoint':60,'rankScore':9,'kind':'new-metadata-kind'}])
+    hints=hard.hint_windows(doc,song)
+    detail=hard.fresh_context(song,[],hints=hints,details=True)
+    assert (detail['start'],detail['end'])==(50,70)
+    assert detail['reason']['rankScore']==9 and not detail['reason']['treatedAsProof']
+    entry=hard.fresh_context(song,[],target=100,hints=hints,details=True)
+    assert (entry['start'],entry['end'])==(90,110)
+    assert entry['reason']['source']=='targeted-entry'
+
+
+def test_actual_union_of_cached_interiors_blocks_nominally_new_hint():
+    _,song,_,_=fixture();hints=hard.hint_windows(hints_document(song,[
+        {'start':50,'end':70,'candidateEndpoint':60,'rankScore':9,'kind':'valley'}]),song)
+    # Neither raw window contains the proposed20s context. Together their
+    # actual guarded interiors cover it completely.
+    cached=[vector(49.75,10.5),vector(59.75,10.5)]
+    detail=hard.fresh_context(song,cached,hints=hints,details=True)
+    assert (detail['start'],detail['end'])!=(50,70)
+    assert detail['reason']['source']=='fraction-fallback'
+
+
+def test_hint_requires_eight_actual_new_seconds_and_unmeasured_three_second_core():
+    _,song,_,_=fixture();hints=hard.hint_windows(hints_document(song,[
+        {'start':50,'end':70,'candidateEndpoint':60,'rankScore':9,'kind':'valley'}]),song)
+    # A tiny old context covers the interesting3s core, despite16.5 new seconds
+    # elsewhere. Re-running the same centre does not answer a new question.
+    core=hard.fresh_context(song,[vector(58.25,3.5)],hints=hints,details=True)
+    assert core['reason']['source']=='fraction-fallback'
+    # The hint's claim of high novelty cannot hide only7.75 actual new seconds.
+    overlap=hard.fresh_context(song,[vector(49.75,12.5)],hints=hints,details=True)
+    assert overlap['reason']['source']=='fraction-fallback'
+    fresh=hard.fresh_context(song,[vector(49.75,10.5)],hints=hints,details=True)
+    assert fresh['reason']['source']=='curated-context-hint'
+    assert fresh['reason']['actualNewUsefulSeconds']==pytest.approx(9.75)
+
+
+def test_hints_choose_contexts_but_cannot_make_a_vocal_fragment_ready():
+    old,song,item,evidence=fixture();calls=[]
+    hints=hard.hint_windows(hints_document(song,[
+        {'start':110,'end':130,'candidateEndpoint':120,'rankScore':9,'kind':'valley'},
+        {'start':50,'end':70,'candidateEndpoint':60,'rankScore':8,'kind':'observed-ASR-gap'}]),song)
+    def probe(begin,end):
+        calls.append((begin,end));return vector(begin,end-begin,voice=.1,mix=.3)
+    result=hard.review(old,song,item,evidence,probe,hints=hints)
+    assert result['status']=='needs-review' and calls==[(110,130),(50,70)]
+    assert result['hardReviewBudget']['newContexts']==2
+    assert result['hardReviewAttempts'][0]['contextReason']['source']=='curated-context-hint'
+    assert result['hardReviewAttempts'][0]['contextReason']['actualNewUsefulSeconds']==19.5
+    assert not result['hardReviewAttempts'][0]['contextReason']['treatedAsProof']

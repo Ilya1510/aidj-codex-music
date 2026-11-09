@@ -80,6 +80,83 @@ def _ref(value):
     return {k: value[k] for k in ('cacheKey', 'sourceOffsetSeconds', 'durationSeconds', 'modelSha256') if k in value}
 
 
+def load_hints(path, baseline_revision):
+    """Private ranking inputs, never a boundary verdict or model evidence."""
+    if path is None:
+        return None
+    value = read_json(path)
+    if not isinstance(value, dict) or type(value.get('version')) is not int or value['version'] != 1 or not isinstance(value.get('tracks'), dict):
+        raise RuntimeError('HARD_REVIEW_HINTS_VERSION')
+    if value.get('baselineRevision') != baseline_revision:
+        raise RuntimeError('HARD_REVIEW_HINTS_REVISION')
+    return value
+
+
+def hint_windows(document, song):
+    """Ignore stale source/range suggestions rather than treating them as cuts."""
+    if document is None:
+        return []
+    row = document['tracks'].get(song['id'])
+    if not isinstance(row, dict) or row.get('sourceMD5') != song['md5']:
+        return []
+    allowed = row.get('allowedRange'); duration = row.get('sourceDuration')
+    original_hi = song.get('originalAllowedEnd', song['hi'])
+    metadata_duration = song.get('metadataDuration', song['duration'])
+    if not isinstance(allowed, (list, tuple)) or len(allowed) != 2 or not all(finite(v) for v in allowed) or not finite(duration):
+        return []
+    if abs(allowed[0]-song['lo']) > .001 or abs(allowed[1]-original_hi) > .001 or abs(duration-metadata_duration) > .001:
+        return []
+    windows = row.get('windows')
+    if not isinstance(windows, list):
+        return []
+    clean = []
+    for window in windows:
+        if not isinstance(window, dict) or any(not finite(window.get(k)) for k in ('start', 'end', 'candidateEndpoint', 'rankScore')):
+            continue
+        start, end, at = window['start'], window['end'], window['candidateEndpoint']
+        if not 8-1e-7 <= end-start <= 20+1e-7 or start < song['lo']-.0001 or end > min(original_hi, metadata_duration)+.0001 or not start+.25 <= at-1.5 < at+1.5 <= end-.25:
+            continue
+        # Only bounded explanatory data survives; arbitrary indicators never
+        # become accepted=True, a confidence score, or acoustic evidence.
+        clean.append({'start': start, 'end': end, 'candidateEndpoint': at,
+            'rankScore': window['rankScore'],
+            'baselineRevision': document['baselineRevision'], 'sourceMD5': song['md5'],
+            'allowedRange': list(allowed), 'sourceDuration': duration,
+            'kind': window.get('kind', 'curated-context')[:80] if isinstance(window.get('kind', 'curated-context'), str) else 'curated-context',
+            'reasons': [text[:180] for text in window.get('reasons', [])[:3] if isinstance(text, str)] if isinstance(window.get('reasons', []), list) else []})
+    return sorted(clean, key=lambda w: (-w['rankScore'], w['start'], w['end']))
+
+
+def measured_interiors(song, vectors):
+    rows = []
+    for value in vectors:
+        if value.get('md5') != song['md5']:
+            continue
+        prepared = _vectors(value, allow_warnings=True)
+        if prepared is None:
+            continue
+        begin = prepared[0]+.25; end = prepared[0]+prepared[2]-.25
+        if begin < end:
+            rows.append((begin, end))
+    # Actual cached intervals are unioned. Two old adjacent contexts can cover
+    # a proposed window even when neither context contains it on its own.
+    merged = []
+    for begin, end in sorted(rows):
+        if merged and begin <= merged[-1][1]+1e-8:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([begin, end])
+    return merged
+
+
+def context_novelty(begin, end, interiors, candidate=None):
+    lo, hi = begin+.25, end-.25
+    overlap = sum(max(0, min(hi, b)-max(lo, a)) for a, b in interiors)
+    seconds = max(0, hi-lo-overlap)
+    core_covered = candidate is not None and covered(interiors, candidate-1.5, candidate+1.5)
+    return seconds, core_covered
+
+
 def _endpoint(vocal, point, words, gain, reference, source_proof):
     check = check_endpoint(vocal, point, words, gain, reference,
         **({'source_proof': source_proof} if source_proof is not None else {}))
@@ -200,8 +277,26 @@ def pair(old, song, evidence, endpoints, vectors, owner=(), rejected=(), *, cert
     return select(scanned_entries(song, evidence, vectors, owner, rejected))
 
 
-def fresh_context(song, vectors, *, target=None, round_number=1):
+def fresh_context(song, vectors, *, target=None, round_number=1, hints=(), details=False):
     """Choose an unmeasured central/quarter section, or a needed entry window."""
+    interiors = measured_interiors(song, vectors)
+    def selected(begin, end, reason):
+        return {'start': begin, 'end': end, 'reason': reason} if details else (begin, end)
+    if target is None:
+        for hint in sorted(hints, key=lambda row: (-row['rankScore'], row['start'])):
+            begin = hint['start']; end = min(song['duration'], song['hi'], hint['end'])
+            at = hint['candidateEndpoint']
+            if end-begin < 8-1e-7 or not begin+.25 <= at-1.5 < at+1.5 <= end-.25:
+                continue
+            new_seconds, core_covered = context_novelty(begin, end, interiors, at)
+            if new_seconds < 8-1e-7 or core_covered:
+                continue
+            return selected(begin, end, {'source': 'curated-context-hint',
+                'kind': hint['kind'], 'rankScore': hint['rankScore'],
+                'candidateEndpoint': at, 'reasons': hint.get('reasons', []),
+                'baselineRevision': hint.get('baselineRevision'), 'sourceMD5': hint.get('sourceMD5'),
+                'actualNewUsefulSeconds': round(new_seconds, 6),
+                'treatedAsProof': False})
     if target is not None:
         centres = [target, target-20, target+15]
     else:
@@ -223,13 +318,20 @@ def fresh_context(song, vectors, *, target=None, round_number=1):
         # observed. Small shifting of identical windows is not new evidence.
         if any(a <= begin+.5 and b >= end-.5 for a,b in known):
             continue
-        return begin, end
+        if target is None:
+            new_seconds, core_covered = context_novelty(begin, end, interiors, centre)
+            if new_seconds < 8-1e-7 or core_covered:
+                continue
+        else:
+            new_seconds, _ = context_novelty(begin, end, interiors)
+        return selected(begin, end, {'source': 'targeted-entry' if target is not None else 'fraction-fallback',
+            'actualNewUsefulSeconds': round(new_seconds, 6), 'treatedAsProof': False})
     return None
 
 
 def review(old, song, checkpoint, evidence, probe_window, *, owner=(), rejected=(),
            existing=(), round_number=1, source_proof=None, max_seconds=MAX_TRACK_SECONDS,
-           entry_only=False, ensure_source_timing=None):
+           entry_only=False, ensure_source_timing=None, hints=()):
     result = copy.deepcopy(checkpoint); started = time.monotonic()
     vectors = {v['cacheKey']: v for v in existing if isinstance(v, dict) and v.get('cacheKey')}
     new_probes = 0; attempts = []; selected = None; timing_attempted = False
@@ -256,10 +358,10 @@ def review(old, song, checkpoint, evidence, probe_window, *, owner=(), rejected=
         # An independently quiet endpoint needs an entry, not another noisy
         # ending search. Otherwise inspect a genuinely unmeasured music section.
         target = endpoints[0]['point']['time']-62 if endpoints else None
-        context = fresh_context(song, values, target=target, round_number=round_number)
+        context = fresh_context(song, values, target=target, round_number=round_number, hints=hints, details=True)
         if context is None:
             break
-        begin, end = context
+        begin, end = context['start'], context['end']
         vocal = probe_window(begin, end); new_probes += 1
         if time.monotonic()-started > max_seconds:
             raise RuntimeError('HARD_REVIEW_TRACK_TIMEOUT')
@@ -267,7 +369,8 @@ def review(old, song, checkpoint, evidence, probe_window, *, owner=(), rejected=
         if not isinstance(key, str) or not re.fullmatch('[a-f0-9]{64}', key) or vocal.get('md5') != song['md5']:
             raise RuntimeError('HARD_REVIEW_SOURCE_PROOF')
         vectors[key] = vocal
-        attempts.append({'start': begin, 'end': end, 'cacheKey': key, 'valid': _vectors(vocal) is not None})
+        attempts.append({'start': begin, 'end': end, 'cacheKey': key, 'valid': _vectors(vocal) is not None,
+                         'contextReason': context['reason']})
     if selected:
         score, entry, candidate = selected; point = candidate['point']; check = candidate.get('check')
         outgoing = copy.deepcopy(checkpoint['exit']) if entry_only else _point(check, point, 'vocal-isolated-fade')
@@ -308,13 +411,14 @@ def review(old, song, checkpoint, evidence, probe_window, *, owner=(), rejected=
     return result
 
 
-def run(settings, work, decoder, model_path, limit=None, retry=False, round_number=1):
+def run(settings, work, decoder, model_path, limit=None, retry=False, round_number=1, hints_path=None):
     from .disk import Disk
     decoder = shutil.which(str(decoder)) or str(decoder)
     if not Path(decoder).is_file() or not os.access(decoder,os.X_OK):raise RuntimeError('HARD_REVIEW_DECODER')
     if (limit is not None and limit<0) or type(round_number) is not int or not 1<=round_number<=20:raise RuntimeError('HARD_REVIEW_LIMIT')
-    verify_model(model_path)
     plan = read_json(work/'baseline.json'); curation=settings.state/'research/dj1-curation'
+    hint_document = load_hints(hints_path, plan['revision'])
+    verify_model(model_path)
     owner=read_json(curation/'owner-entries.json');bad=read_json(curation/'owner-rejected.json')
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
     disk=Disk(replace(settings,max_bytes=min(settings.max_bytes,40*1024**2)));count=0
@@ -335,6 +439,7 @@ def run(settings, work, decoder, model_path, limit=None, retry=False, round_numb
             song=dict(asset);song['manualStart']=song['lo'] is not None;song['manualEnd']=song['hi'] is not None and song['hi']<song['duration']-.001
             song['lo']=song['lo'] or 0.;song['hi']=song['duration'] if song['hi'] is None else song['hi']
             song=source_timing(song,previous)
+            preferred_hints = hint_windows(hint_document, song)
             if not 0<song['bytes']<=40*1024**2 or not 0<song['duration']<=1800:raise RuntimeError('HARD_REVIEW_SOURCE_LIMIT')
             if shutil.disk_usage(work).free<512*1024**2:raise RuntimeError('HARD_REVIEW_DISK')
             raw=db.execute('SELECT payload FROM dj_evidence WHERE md5=?',(old['md5'],)).fetchone()
@@ -370,7 +475,7 @@ def run(settings, work, decoder, model_path, limit=None, retry=False, round_numb
                     result=review(old,song,working,evidence,probe,
                         owner=owner.get(old['trackId'],[]),rejected=bad.get(old['trackId'],[]),
                         existing=existing,round_number=round_number,source_proof=song.get('sourceProof'),entry_only=entry_only,
-                        ensure_source_timing=ensure_timing)
+                        ensure_source_timing=ensure_timing,hints=preferred_hints)
                     if timing:result.update(md5=old['md5'],eofEvidence=timing)
             except Exception as exc:
                 code=str(exc) if isinstance(exc,RuntimeError) and str(exc).startswith(('HARD_REVIEW_','VOCAL_REVIEW_')) else 'HARD_REVIEW_'+type(exc).__name__.upper()
@@ -387,8 +492,8 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--work',type=Path,required=True)
     parser.add_argument('--ffmpeg',required=True);parser.add_argument('--model',type=Path,required=True)
     parser.add_argument('--limit',type=int);parser.add_argument('--retry',action='store_true')
-    parser.add_argument('--round',type=int,default=1);args=parser.parse_args()
-    run(Settings(),args.work,args.ffmpeg,args.model,args.limit,args.retry,args.round)
+    parser.add_argument('--round',type=int,default=1);parser.add_argument('--hints',type=Path);args=parser.parse_args()
+    run(Settings(),args.work,args.ffmpeg,args.model,args.limit,args.retry,args.round,args.hints)
 
 
 if __name__=='__main__':
