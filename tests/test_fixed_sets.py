@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from aidj.fixed_set_prepare import occupied, points, source_rows
+from aidj.fixed_set_prepare import occupied, points, quiet_tail_end, source_rows
 from aidj.fixed_sets import publish, records, signature, validate
 
 
@@ -131,3 +131,18 @@ def test_owner_rejections_apply_to_both_entry_and_exit_candidates():
     graph = {'anchors': {'entries': [[5, .5]], 'exits': [[5, .5, .5]]}}
     entries, exits, _ = points(song, graph, {'words': []}, human=[5], rejected=[5])
     assert all(abs(row[0]-5) >= .3 for row in entries+exits)
+
+
+def test_quiet_tail_trimming_keeps_known_vocals_and_does_not_trim_active_music():
+    assert quiet_tail_end(50,62,[.5]*12,1,[],.01)==62
+    assert quiet_tail_end(50,62,[.5]*3+[0]*9,1,[],.01)==pytest.approx(53.12)
+    assert quiet_tail_end(50,62,[.5]*3+[0]*9,1,[[58,61]],.01)==pytest.approx(61.12)
+    assert quiet_tail_end(50,62,[0]*12,1,[[58,65]],.01)==62
+
+
+def test_owner_exit_is_explicit_candidate_and_still_obeys_rejected_point_veto():
+    song={'allowed_start':0,'allowed_end':80,'duration':80}
+    _,exits,_=points(song,{}, {'words':[]},human_exits=[60])
+    assert any(p[0]==60 and p[1]=='owner' for p in exits)
+    _,exits,_=points(song,{}, {'words':[]},human_exits=[60],rejected=[60])
+    assert not any(p[0]==60 for p in exits)

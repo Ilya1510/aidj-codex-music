@@ -225,6 +225,55 @@ def distance(a,b):
     return tempo*4+harmony*.9+energy*.45
 
 
+def quiet_tail_end(start,end,levels,hop,words,threshold):
+    """Remove sustained near-silence, retaining known words and a short tail."""
+    active=[i for i,value in enumerate(levels) if value>threshold]
+    last=start+(active[-1]+1)*hop if active else start
+    word_end=max((min(end,w[1]) for w in words if start<w[1] and w[0]<end),default=start)
+    return min(end,max(last+.12,word_end+.12))
+
+
+def refine_tails(settings,work,decoder):
+    """A second bounded pass only for selected excerpts with almost-silent tails."""
+    import numpy as np
+    from .disk import Disk
+    curated=json.loads((work/'curator-map.json').read_text());disk=Disk(settings)
+    db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
+    changed=0
+    for song in source_rows(db,curated['playlistId']):
+        path=work/'features'/(song['md5']+'.json');value=json.loads(path.read_text())
+        index=curated.get('optionOverrides',{}).get(song['id'],0);option=value['options'][index]
+        if option.get('tailChecked') or option['out']['energy']>=.08 or option['exitOrigin']=='owner':continue
+        if shutil.disk_usage(work).free<512*1024**2:raise RuntimeError('FIXED_SET_DISK')
+        ev=json.loads(db.execute('SELECT payload FROM dj_evidence WHERE md5=?',(song['md5'],)).fetchone()[0])
+        end=option['end'];start=max(option['start']+45,end-12)
+        if end-start<.5:continue
+        with tempfile.TemporaryDirectory(prefix='tail-',dir=work) as directory:
+            source=Path(directory)/('source'+Path(song['remote_path']).suffix);pcm=Path(directory)/'tail.f32'
+            disk.download(song['remote_path'],source,expected_md5=song['md5'])
+            process=subprocess.run([decoder,'-nostdin','-v','error','-threads','1','-filter_threads','1','-ss',str(start),'-i',str(source),'-t',str(end-start),'-ac','1','-ar',str(SR),'-f','f32le','-y',str(pcm)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
+            if process.returncode:raise RuntimeError('FIXED_SET_TAIL_DECODE')
+            samples=np.fromfile(pcm,dtype='<f4');width=110;n=len(samples)//width
+            rms=np.sqrt(np.mean(samples[:n*width].reshape(n,width)**2,axis=1))
+            threshold=max(.0008,float(np.quantile(rms,.95))*.04)
+            revised=quiet_tail_end(start,end,rms,width/SR,ev.get('words',[]),threshold)
+            option['tailChecked']=True
+            if end-revised>=.4:
+                # Never move onto an explicitly rejected physical boundary.
+                bad=json.loads((work/'owner-rejected.json').read_text()).get(song['id'],[])
+                if any(abs(revised-t)<.3 for t in bad):revised=min(end,revised+.65)
+                last_word=max((min(revised,w[1]) for w in ev.get('words',[]) if revised-2<w[1] and w[0]<revised),default=revised-.3)
+                option['originalEnd']=end;option['end']=round(revised,4)
+                option['fadeOut']=round(max(.025,min(.25,revised-last_word-.025)),4)
+                option['exitOrigin']='quiet-tail'
+                # The old tail's noise spectrum is unsuitable for harmonic cost.
+                option['out']['chroma']=value['chroma'];option['out']['chromaSource']='global-after-tail-trim'
+                changed+=1
+                print('TAIL',song['id'],round(end-revised,3),'seconds removed',flush=True)
+            atomic_json(path,value)
+    db.close();print('TAIL_REVIEW_COMPLETE',changed,flush=True)
+
+
 def compile_plan(work, playlist_id):
     curated=json.loads((work/'curator-map.json').read_text())
     wanted=set(curated['tracks'])
@@ -268,11 +317,14 @@ def compile_plan(work, playlist_id):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['extract','compile','publish'])
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['extract','refine','compile','publish'])
     parser.add_argument('--work',type=Path,required=True);parser.add_argument('--playlist',type=int,default=1);parser.add_argument('--limit',type=int)
     parser.add_argument('--ffmpeg')
     args=parser.parse_args();settings=Settings()
     if args.action=='extract':extract(settings,args.work,args.playlist,args.limit,args.ffmpeg)
+    elif args.action=='refine':
+        if not args.ffmpeg:raise RuntimeError('FIXED_SET_FFMPEG_REQUIRED')
+        refine_tails(settings,args.work,args.ffmpeg)
     elif args.action=='compile':compile_plan(args.work,args.playlist)
     else:
         from .store import connect
