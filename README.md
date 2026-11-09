@@ -163,3 +163,5 @@ Android 0.18.0 использует один обновляемый APK с дв�
 Существующие входы владельца мигрируют один раз; отсутствие записи о правах
 у новых сессий означает отказ в доступе. Проверки: `tests/test_listener_access.py`,
 `tests/browser_listener.py`, `tests/personal-playlists.test.mjs`, `tests/web-remix.test.mjs`.
+
+Режим «DJ 1»: [фиксированный порядок и переходы для Volleyball](docs/DJ_FIXED_SET.md).

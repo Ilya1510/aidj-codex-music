@@ -6,6 +6,13 @@ final class DjPlan {
     static boolean manual(JSONObject t){return t!=null&&(t.optDouble("rangeStart",0)>.001||t.optDouble("rangeEnd",t.optDouble("duration"))<t.optDouble("duration")-.1);}
     static double lower(JSONObject t){double total=t==null?0:t.optDouble("duration",0),start=t==null?0:t.optDouble("rangeStart",0);return Double.isFinite(total)&&Double.isFinite(start)?Math.max(0,Math.min(total,start)):0;}
     static double upper(JSONObject t){double total=t==null?0:t.optDouble("duration",0),end=t==null?0:t.optDouble("rangeEnd",total);return Double.isFinite(total)&&Double.isFinite(end)?Math.max(lower(t),Math.min(total,end)):lower(t);}
+    static JSONObject fixed(JSONObject t,JSONObject entry){
+        JSONObject c=entry==null?null:entry.optJSONObject("fixed");if(t==null||c==null||c.has("sourceMd5")&&!c.optString("sourceMd5").equals(t.optString("md5")))return null;
+        for(String k:new String[]{"start","end","fadeIn","fadeOut","transitionSeconds","rate"})if(!(c.opt(k) instanceof Number)||!Double.isFinite(c.optDouble(k)))return null;
+        double start=c.optDouble("start"),end=c.optDouble("end"),span=end-start,limit=Math.min(8,span/2),a=c.optDouble("fadeIn"),b=c.optDouble("fadeOut"),overlap=c.optDouble("transitionSeconds"),rate=c.optDouble("rate");String kind=c.optString("transitionKind");
+        if(start<lower(t)-.001||end>upper(t)+.001||span<.2||a<0||a>limit||b<0||b>limit||overlap<0||overlap>limit||rate<.97||rate>1.03||!("clean-cut".equals(kind)||"crossfade".equals(kind))||"clean-cut".equals(kind)&&overlap!=0)return null;
+        return c;
+    }
     static boolean timed(JSONObject track,JSONObject entry){
         if(track==null||!(track.opt("duration") instanceof Number)||entry==null||!entry.optBoolean("remix")||entry.optBoolean("djFull"))return false;
         JSONObject c=entry.optJSONObject("dj");if(c==null||!Boolean.TRUE.equals(c.opt("timedFallback"))||!"timed".equals(c.optString("quality"))||!Boolean.TRUE.equals(c.opt("needsReview"))||!Boolean.FALSE.equals(c.opt("entryVerified"))||!Boolean.FALSE.equals(c.opt("wordGuarded"))||c.optBoolean("acoustic"))return false;
@@ -35,11 +42,13 @@ final class DjPlan {
         return c;
     }
     static JSONObject track(JSONObject t,JSONObject entry,boolean enabled){
+        JSONObject f=enabled?fixed(t,entry):null;if(f!=null)try{return new JSONObject(t.toString()).put("rangeStart",f.getDouble("start")).put("rangeEnd",f.getDouble("end"));}catch(Exception ignored){}
         JSONObject c=cue(t,entry,enabled);if(c==null)return t;
         try{return new JSONObject(t.toString()).put("rangeStart",Math.max(lower(t),c.optBoolean("entryVerified")||acoustic(c)||timed(t,entry)?c.optDouble("start"):0)).put("rangeEnd",Math.min(upper(t),c.getDouble("end")));}catch(Exception e){return t;}
     }
     static long previewTail(JSONObject track,long duration,float rate){return Math.max(PlaybackRange.start(track,duration),PlaybackRange.end(track,duration)-(long)(10000*rate));}
     static float rate(JSONObject t,JSONObject entry,boolean enabled){
+        JSONObject f=enabled?fixed(t,entry):null;if(f!=null)return (float)f.optDouble("rate",1);
         JSONObject c=cue(t,entry,enabled);if(c!=null&&(c.optDouble("bpm")==0||timed(t,entry)))return 1f;double rate=c==null?1:c.optDouble("rate",1);
         return Double.isFinite(rate)&&rate>=.9699&&rate<=1.0301?(float)rate:1f;
     }
@@ -54,6 +63,7 @@ final class DjPlan {
         return (long)(Math.max(guarded(c)?1.5:.15,Math.min(4,seconds))*1000);
     }
     static long matchedOverlap(JSONObject out,JSONObject entry,JSONObject next,JSONObject nextEntry,float rate,float nextRate){
+        JSONObject f=fixed(out,entry);if(f!=null)return (long)(f.optDouble("transitionSeconds")*1000);
         long window=overlap(out,entry,true,rate);JSONObject left=cue(out,entry,true),right=cue(next,nextEntry,true);
         if(left==null||right==null||!left.has("grid")||!right.has("grid"))return window;
         double bpm=left.optDouble("bpm")*rate,other=right.optDouble("bpm")*nextRate;
@@ -64,7 +74,7 @@ final class DjPlan {
         double count=Math.floor(window/1000.0/beat-phase)+phase;
         return count>=.5&&(!guarded(left)||count*beat>=1.5)?(long)(count*beat*1000):window;
     }
-    static long safeFade(JSONObject t,JSONObject entry){JSONObject c=cue(t,entry,true);return c==null?1200:(long)(c.optDouble("fade",1.2)*1000);}
+    static long safeFade(JSONObject t,JSONObject entry){JSONObject f=fixed(t,entry);if(f!=null)return (long)(f.optDouble("fadeOut")*1000);JSONObject c=cue(t,entry,true);return c==null?1200:(long)(c.optDouble("fade",1.2)*1000);}
     static float gain(double progress,boolean incoming){return gain(progress,incoming,1);}
     static float gain(double progress,boolean incoming,double fadeFraction){
         double p=Math.max(0,Math.min(1,progress)),fraction=Math.max(.001,Math.min(1,fadeFraction)),hold=1-fraction;

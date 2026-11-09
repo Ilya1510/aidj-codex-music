@@ -1,6 +1,7 @@
 export class Queue {
   constructor(snapshot = {}) {
     this.playlistId = snapshot.playlistId ?? null;
+    this.fixedSet = snapshot.fixedSet && typeof snapshot.fixedSet.id==='string' ? {...snapshot.fixedSet} : null;
     this.entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
     this.currentId = snapshot.currentId || null;
     this.manualNextId = snapshot.manualNextId && snapshot.manualNextId!==this.currentId ? snapshot.manualNextId : null;
@@ -11,7 +12,7 @@ export class Queue {
   get current() { return this.entries[this.index] || null; }
   entry(trackId) { return { id: crypto.randomUUID(), trackId, ordinal: Math.max(-1, ...this.entries.map(x => x.ordinal)) + 1 }; }
   start(ids, index = 0, shuffle = false, random = Math.random) {
-    this.manualNextId=null;
+    this.manualNextId=null;this.fixedSet=null;
     this.entries = [];
     for (const id of ids) this.entries.push(this.entry(id));
     this.shuffle = shuffle;
@@ -76,5 +77,5 @@ export class Queue {
     return true;
   }
   clearUpcoming() { this.manualNextId=null;if (this.index >= 0) this.entries.splice(this.index + 1); else this.entries = []; }
-  snapshot() { return { playlistId:this.playlistId, entries: this.entries, currentId: this.currentId, shuffle: this.shuffle, repeat: this.repeat,...(this.manualNextId?{manualNextId:this.manualNextId}:{}) }; }
+  snapshot() { return { playlistId:this.playlistId, ...(this.fixedSet?{fixedSet:this.fixedSet}:{}), entries: this.entries, currentId: this.currentId, shuffle: this.shuffle, repeat: this.repeat,...(this.manualNextId?{manualNextId:this.manualNextId}:{}) }; }
 }

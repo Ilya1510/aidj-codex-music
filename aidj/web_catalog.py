@@ -72,7 +72,8 @@ def catalog(db):
     review['poolTrackIds']=[t['id'] for t in tracks if t['md5'] in pool]
     working=db.execute("SELECT j.asset_id,j.updated,a.title,a.artist FROM dj_analysis j JOIN web_assets a ON a.id=j.asset_id WHERE j.status='working' ORDER BY j.updated LIMIT 1").fetchone()
     job={'trackId':working['asset_id'],'title':working['title'],'artist':working['artist'],'started':working['updated']} if working else None
-    return {'tracks':tracks,'playlists':playlists,'combinedSupported':True,'review':review,'djWork':job,'djService':service_state(db)}
+    from .fixed_sets import records as fixed_sets
+    return {'tracks':tracks,'playlists':playlists,'djSets':fixed_sets(db),'combinedSupported':True,'review':review,'djWork':job,'djService':service_state(db)}
 
 
 def result_for(row,db=None):

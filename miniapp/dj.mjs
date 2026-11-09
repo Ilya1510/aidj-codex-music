@@ -1,5 +1,5 @@
 // Queue-only cues: originals, manual excerpts and playlist order stay independent.
-export const modeName=value=>({normal:'Обычное',smooth:'Плавное',dj:'DJ',remix:'DJ: ремикс'})[value?.mode]||'Обычное';
+export const modeName=value=>({normal:'Обычное',smooth:'Плавное',dj:'DJ',remix:'DJ: ремикс',fixed:'DJ 1'})[value?.mode]||'Обычное';
 export function timedCue(c){
   if(!c||c.timedFallback!==true||c.quality!=='timed'||c.needsReview!==true||c.wordGuarded!==false||c.entryVerified!==false||c.acoustic===true)return false;
   if(!['start','end','targetSeconds','sourceDuration','bpm','fade','mix'].every(k=>typeof c[k]==='number'&&Number.isFinite(c[k])))return false;
@@ -55,8 +55,25 @@ export function planDj(entries,tracks,length,{reorder=false,pin=null}={}){
   }
   finish();return result;
 }
+// A frozen set has explicit, versioned bounds. It never enters the dynamic cue selector.
+export function fixedCue(track,entry){
+  const c=entry?.fixed;if(!track||!c||c.sourceMd5&&c.sourceMd5!==track.md5)return null;
+  const lo=Number.isFinite(track.rangeStart)?track.rangeStart:0,hi=Number.isFinite(track.rangeEnd)?Math.min(track.duration,track.rangeEnd):track.duration;
+  if(!['start','end','fadeIn','fadeOut','transitionSeconds','rate'].every(k=>typeof c[k]==='number'&&Number.isFinite(c[k])))return null;
+  const span=c.end-c.start;
+  if(c.start<lo-.001||c.end>hi+.001||span<.2||c.fadeIn<0||c.fadeOut<0||c.fadeIn>Math.min(8,span/2)||c.fadeOut>Math.min(8,span/2)||c.transitionSeconds<0||c.transitionSeconds>Math.min(8,span/2)||c.rate<.97||c.rate>1.03||!['clean-cut','crossfade'].includes(c.transitionKind)||c.transitionKind==='clean-cut'&&c.transitionSeconds!==0)return null;
+  return c;
+}
+export function fixedSetEntries(set,tracks){
+  if(!set||typeof set.id!=='string'||!Array.isArray(set.tracks)||!set.tracks.length)throw new Error('Этот сет ещё не готов.');
+  const entries=set.tracks.map((item,i)=>({id:'fixed-'+set.id+'-'+i+'-'+crypto.randomUUID(),trackId:item.trackId,ordinal:i,fixed:{...(item.md5?{sourceMd5:item.md5}:{}),start:item.start,end:item.end,fadeIn:item.fadeIn,fadeOut:item.fadeOut,transitionSeconds:item.transitionSeconds,transitionKind:item.transitionKind,rate:item.rate}}));
+  if(entries.some(e=>!fixedCue(tracks.get(e.trackId),e)))throw new Error('Сет изменился: обнови библиотеку перед запуском.');
+  return entries;
+}
 export function playbackTrack(track,entry,enabled){
-  if(!track||!enabled||entry?.djFull||!entry?.dj)return track;
+  if(!track||!enabled)return track;
+  const fixed=fixedCue(track,entry);if(fixed)return {...track,rangeStart:fixed.start,rangeEnd:fixed.end};
+  if(entry?.djFull||!entry?.dj)return track;
   // A manual excerpt saved while the queue is running has priority too.
   if(!entry.remix&&(Number(track.rangeStart)>0||Number(track.rangeEnd)<track.duration-.1))return track;
     if((entry.dj.timedFallback===true||entry.dj.quality==='timed')&&(!entry.remix||!timedCue(entry.dj)||!Number.isFinite(track.duration)||Math.abs(entry.dj.sourceDuration-track.duration)>.001))return track;

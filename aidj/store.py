@@ -101,6 +101,7 @@ def connect(settings,*,dj_enrol=True):
     CREATE TABLE IF NOT EXISTS dj_runtime(id INTEGER PRIMARY KEY CHECK(id=1),heartbeat REAL NOT NULL,phase TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_priority(md5 TEXT PRIMARY KEY,rank INTEGER NOT NULL,requested REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_evidence(md5 TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS dj_fixed_sets(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_analysis(md5 TEXT PRIMARY KEY,asset_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_boundary_sources(md5 TEXT PRIMARY KEY,payload TEXT NOT NULL,updated REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS dj_boundary_points(id TEXT PRIMARY KEY,md5 TEXT NOT NULL,point_ms INTEGER NOT NULL,
