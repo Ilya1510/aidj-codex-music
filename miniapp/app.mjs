@@ -152,7 +152,7 @@ function toast(message) { clearTimeout(toastTimer); $('toast').textContent=messa
 function showError(error) { toast(error?.name==='QuotaExceededError'?'На устройстве не хватает места. Удали ненужные скачанные песни.':error?.message||'Не получилось. Попробуй ещё раз.'); }
 async function api(path, body) {
   let response;
-  try { response=native?await nativeFetch(path,body):await fetch('/api/'+path,body===undefined?{cache:'no-store',headers:{'X-AIDJ-Version':'36'}}:{method:'POST',headers:{'Content-Type':'application/json','X-AIDJ-App':'1','X-AIDJ-Version':'36'},body:JSON.stringify(body)}); }
+  try { response=native?await nativeFetch(path,body):await fetch('/api/'+path,body===undefined?{cache:'no-store',headers:{'X-AIDJ-Version':String(clientVersion)}}:{method:'POST',headers:{'Content-Type':'application/json','X-AIDJ-App':'1','X-AIDJ-Version':String(clientVersion)},body:JSON.stringify(body)}); }
   catch { serverUnavailable=true;if(!native)online=navigator.onLine;connection();throw new Error('Не удалось связаться с сервером. Скачанные песни доступны без сети.'); }
   const result=await response.json();
   serverUnavailable=false;online=true;connection();

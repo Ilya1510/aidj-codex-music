@@ -23,7 +23,10 @@ def main():
             body=wav.getvalue();start,end,partial=byte_range(route.request.headers.get('range'),len(body));headers={'Accept-Ranges':'bytes'}
             if partial:headers['Content-Range']=f'bytes {start}-{end}/{len(body)}'
             route.fulfill(status=206 if partial else 200,body=body[start:end+1],headers=headers,content_type='audio/wav')
-        elif path=='catalog':route.fulfill(json=catalog)
+        elif path=='catalog':
+            # Real catalog gates blended/rate-adjusted sets by this header.
+            assert route.request.headers.get('x-aidj-version')=='40'
+            route.fulfill(json=catalog)
         elif path=='android-version':route.fulfill(status=503,json={'error':'QA'})
         else:route.fulfill(json={'ok':True,'revision':'qa','access':catalog['access']})
     with sync_playwright() as p:
