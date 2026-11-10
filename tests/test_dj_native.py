@@ -227,7 +227,21 @@ public class DjServiceProbe {
  for(int j=0;j<q.getJSONArray("entries").length();j++)q.getJSONArray("entries").getJSONObject(j).put("fixed",new JSONObject().put("start",180).put("end",240).put("fadeIn",.05).put("fadeOut",.1).put("transitionSeconds",0).put("transitionKind","clean-cut").put("rate",1));
  s.setQueue(q);s.play();a=MediaPlayer.all.get(0);a.duration=actual;a.firePrepared();tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=actual-50;tick(s);check(a.playing&&!a.released&&!b.playing&&Math.abs(a.gain-.35)<.001,"positive full-file fade has half gain50ms before actual EOF despite metadata discrepancy");a.pos=actual-5;tick(s);check(!a.released&&!b.playing&&Math.abs(a.gain-.035)<.001,"full-file ramp retains actual last5ms until completion");a.pos=actual;a.fireDone();check(a.released&&b.playing,"positive source-ending fade promotes only on actual completion");s.onDestroy();
  }
- System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline source_ending_completion");
+ // A restored fixed queue loops even if an older APK saved repeat=off/one.
+ // The authored final clean ending stays clean; preloading remains inaudible.
+ for(boolean eof:new boolean[]{false,true}){
+ s=new PlaybackService();s.onCreate();MediaPlayer.all.clear();q=queue().put("fixedSet",new JSONObject().put("id","dj1")).put("currentId","e3").put("repeat",eof?"one":"off").put("shuffle",true);
+ for(int j=0;j<3;j++)q.getJSONArray("entries").getJSONObject(j).put("fixed",new JSONObject().put("start",40).put("end",100).put("fadeIn",5).put("fadeOut",.4).put("transitionSeconds",0).put("transitionKind","clean-cut").put("rate",1));
+ if(eof)q.getJSONObject("tracks").getJSONObject(q.getJSONArray("entries").getJSONObject(2).getString("trackId")).put("duration",100);
+ s.setQueue(q);s.play();a=MediaPlayer.all.get(0);if(eof)a.duration=100052;a.firePrepared();tick(s);b=MediaPlayer.all.get(1);b.firePrepared();check(b.pos==40000&&!b.playing,"last fixed song silently preloads the first at its authored cut");
+ s.pause();a.pos=eof?100052:100000;tick(s);if(eof)a.fireDone();check(!b.playing&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e3"),"pause at circular boundary cannot start first song");
+ a.pos=eof?100047:99900;s.play();a.pos=eof?100052:100000;if(eof)a.fireDone();else tick(s);
+ JSONObject wrapped=s.snapshot().getJSONObject("queue");check(a.released&&b.playing&&b.pos==40000&&wrapped.getString("currentId").equals("e1"),"final fixed cut/EOF wraps to first exactly once without a shortened or full-source fragment");
+ check(wrapped.getJSONArray("entries").length()==3&&wrapped.getJSONArray("entries").getJSONObject(2).getString("id").equals("e3"),"circular fixed playback preserves published order and every queue entry despite old shuffle flag");
+ a.fireDone();check(s.snapshot().getJSONObject("queue").getString("currentId").equals("e1")&&b.pos==40000,"late old completion cannot skip the first wrapped song");
+ s.pause();tick(s);check(!b.playing&&b.gain==0,"wrapped deck still pauses silently");s.onDestroy();
+ }
+ System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline source_ending_completion fixed_loop");
  }
 }''',
     }

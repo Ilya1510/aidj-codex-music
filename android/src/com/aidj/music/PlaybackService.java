@@ -84,7 +84,8 @@ public final class PlaybackService extends Service {
     private boolean remix(){return queue.optJSONObject("fixedSet")==null&&RemixPlan.enabled(queue);}
     private boolean audition(){return queue.optJSONObject("fixedSet")==null&&dj()&&!remix()&&queue.optBoolean("djAudition")&&entry()!=null&&!entry().optBoolean("djFull");}
     private JSONObject current(){return playingTrack!=null&&loaded.equals(queue.optString("currentId"))?playingTrack:DjPlan.track(source(entry()),entry(),dj());}
-    private JSONObject nextEntry(){if(queue.optJSONObject("fixedSet")==null&&!remix()&&"one".equals(queue.optString("repeat")))return null;int at=index()+1;if(at>=entries().length())at=queue.optJSONObject("fixedSet")==null&&!remix()&&"all".equals(queue.optString("repeat"))?0:-1;return at<0?null:entries().optJSONObject(at);}
+    private boolean loopQueue(){return queue.optJSONObject("fixedSet")!=null||!remix()&&"all".equals(queue.optString("repeat"));}
+    private JSONObject nextEntry(){if(queue.optJSONObject("fixedSet")==null&&!remix()&&"one".equals(queue.optString("repeat")))return null;int at=index()+1;if(at>=entries().length())at=loopQueue()?0:-1;return at<0?null:entries().optJSONObject(at);}
     private String nextSpec(){JSONObject e=nextEntry(),t=source(e);return e==null||t==null?"":e.optString("id")+"|"+e.optBoolean("djFull")+"|"+e.optBoolean("remix")+"|"+String.valueOf(e.optJSONObject("dj"))+"|"+String.valueOf(e.optJSONObject("fixed"))+"|"+t.optString("md5")+"|"+t.optDouble("rangeStart",0)+"|"+t.optDouble("rangeEnd",t.optDouble("duration"))+"|"+dj();}
     private void stampEpoch(){try{queue.put("playbackEpoch",playbackEpoch);}catch(Exception ignored){}}
     private void advanceEpoch(){if(playbackEpoch<Long.MAX_VALUE)playbackEpoch++;stampEpoch();}
@@ -327,7 +328,7 @@ public final class PlaybackService extends Service {
     }
     private void advance(int direction,boolean ended){
         JSONArray list=entries();int at=index();if(list.length()==0)return;
-        if(direction==1&&(remix()||!"one".equals(queue.optString("repeat")))&&incomingReady&&incomingId.equals(nextEntry()==null?"":nextEntry().optString("id"))){promote(!ended);play();return;}
+        if(direction==1&&(queue.optJSONObject("fixedSet")!=null||remix()||!"one".equals(queue.optString("repeat")))&&incomingReady&&incomingId.equals(nextEntry()==null?"":nextEntry().optString("id"))){promote(!ended);play();return;}
         if(remix()){
             if(direction<0){seek(0);play();return;}
             String finished=queue.optString("currentId");RemixPlan.finish(queue,finished,"",!ended);advanceEpoch();pendingSeek=0;
@@ -337,12 +338,12 @@ public final class PlaybackService extends Service {
         if(queue.optJSONObject("fixedSet")==null&&ended&&"one".equals(queue.optString("repeat"))){if(audition())try{entry().put("auditionIntro",true);}catch(Exception ignored){}seek(0);play();return;}
         int next=at+direction;
         if(next>=list.length()){
-            if(queue.optJSONObject("fixedSet")!=null||!"all".equals(queue.optString("repeat"))){pause();seek(0);return;}
-            if(queue.optBoolean("shuffle")){
+            if(!loopQueue()){pause();seek(0);return;}
+            if(queue.optJSONObject("fixedSet")==null&&queue.optBoolean("shuffle")){
                 ArrayList<JSONObject> values=new ArrayList<>();for(int i=0;i<list.length();i++)values.add(list.optJSONObject(i));Collections.shuffle(values);list=new JSONArray(values);try{queue.put("entries",list);}catch(Exception ignored){}
             }next=0;
         }
-        if(next<0)next=0;
+        if(next<0)next=queue.optJSONObject("fixedSet")!=null?list.length()-1:0;
         try{queue.put("currentId",list.getJSONObject(next).getString("id"));queue.put("time",0);}catch(Exception ignored){}
         advanceEpoch();
         pendingSeek=0;State.get(this).write("nativeQueue",queue.toString());prepare(true);

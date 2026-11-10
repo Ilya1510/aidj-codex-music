@@ -5,13 +5,19 @@ export class Queue {
     this.entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
     this.currentId = snapshot.currentId || null;
     this.manualNextId = snapshot.manualNextId && snapshot.manualNextId!==this.currentId ? snapshot.manualNextId : null;
-    this.shuffle = Boolean(snapshot.shuffle);
-    this.repeat = ['off', 'all', 'one'].includes(snapshot.repeat) ? snapshot.repeat : 'off';
+    this.shuffle = this.fixedSet ? false : Boolean(snapshot.shuffle);
+    this.repeat = this.fixedSet ? 'all' : ['off', 'all', 'one'].includes(snapshot.repeat) ? snapshot.repeat : 'off';
   }
   get index() { return this.entries.findIndex(x => x.id === this.currentId); }
   get current() { return this.entries[this.index] || null; }
+  get following() { return this.entries[this.index+1] || ((this.fixedSet||this.repeat==='all')?this.entries[0]:null) || null; }
+  get upcoming() {
+    const at=this.index;
+    return this.fixedSet&&at>=0 ? [...this.entries.slice(at+1),...this.entries.slice(0,at)] : this.entries.slice(Math.max(0,at+1));
+  }
   entry(trackId) { return { id: crypto.randomUUID(), trackId, ordinal: Math.max(-1, ...this.entries.map(x => x.ordinal)) + 1 }; }
   start(ids, index = 0, shuffle = false, random = Math.random) {
+    if(this.fixedSet)this.repeat='off';
     this.manualNextId=null;this.fixedSet=null;
     this.entries = [];
     for (const id of ids) this.entries.push(this.entry(id));
@@ -36,17 +42,17 @@ export class Queue {
   }
   select(id) { if (this.entries.some(x => x.id === id)) this.currentId = id;if(this.manualNextId===this.currentId)this.manualNextId=null; return this.current; }
   next(ended = false) {
-    if (ended && this.repeat === 'one') return this.current;
+    if (ended && !this.fixedSet && this.repeat === 'one') return this.current;
     const next = this.index + 1;
     if (next < this.entries.length) this.currentId = this.entries[next].id;
-    else if (this.repeat === 'all' && this.entries.length) {
-      if (this.shuffle) this.mix(this.entries, Math.random);
+    else if ((this.fixedSet || this.repeat === 'all') && this.entries.length) {
+      if (this.shuffle&&!this.fixedSet) this.mix(this.entries, Math.random);
       this.currentId = this.entries[0].id;
     } else return null;
     if(this.manualNextId===this.currentId)this.manualNextId=null;
     return this.current;
   }
-  previous() { if (this.index > 0) this.currentId = this.entries[this.index - 1].id; return this.current; }
+  previous() { if (this.index > 0) this.currentId = this.entries[this.index - 1].id; else if(this.fixedSet&&this.entries.length)this.currentId=this.entries.at(-1).id; return this.current; }
   append(id, next = false) {
     const item = this.entry(id);
     this.entries.splice(next && this.index >= 0 ? this.index + 1 : this.entries.length, 0, item);

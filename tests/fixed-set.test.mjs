@@ -15,6 +15,28 @@ test('fixed set keeps published order and explicit bounds through queue persiste
   assert.equal(playbackTrack(tracks.get('a'),entries[1],true).rangeEnd,100);
   assert.equal(playbackTrack(tracks.get('a'),entries[1],false).rangeStart,20);
   restored.start(['a']);assert.equal(restored.fixedSet,null);
+  assert.equal(restored.repeat,'off');
+});
+test('starting in the middle shows every other song once and wraps without shuffling or changing cuts',()=>{
+  const entries=['a','b','c','d'].map((trackId,i)=>({id:'e'+i,trackId,ordinal:i,fixed:{...cue}}));
+  const q=new Queue({fixedSet:{id:'dj1'},entries,currentId:'e2',repeat:'off',shuffle:true});
+  assert.equal(q.repeat,'all');assert.equal(q.shuffle,false);
+  assert.deepEqual(q.upcoming.map(e=>e.trackId),['d','a','b']);
+  assert.equal(q.following.trackId,'d');assert.equal(q.next(true).trackId,'d');
+  assert.equal(q.following.trackId,'a');assert.equal(q.next(true).trackId,'a');
+  assert.deepEqual(q.upcoming.map(e=>e.trackId),['b','c','d']);
+  assert.equal(q.previous().trackId,'d');
+  const restored=new Queue(JSON.parse(JSON.stringify(q.snapshot())));
+  assert.deepEqual(restored.upcoming.map(e=>e.trackId),['a','b','c']);
+  assert.deepEqual(restored.entries,entries);
+  assert.equal(restored.next(false).trackId,'a');
+});
+test('a one-song fixed set loops without duplicating queue entries',()=>{
+  const entry={id:'e',trackId:'a',fixed:{...cue}};
+  const q=new Queue({fixedSet:{id:'dj1'},entries:[entry],currentId:'e'});
+  assert.deepEqual(q.upcoming,[]);assert.equal(q.following,entry);
+  for(let i=0;i<4;i++)assert.equal(q.next(true),entry);
+  assert.equal(q.entries.length,1);
 });
 test('fixed plans fail validation instead of substituting full songs or ignoring manual limits',()=>{
   for(const patch of [{start:10},{end:201},{rate:2},{fadeIn:9},{transitionSeconds:1},{end:NaN},{fadeOut:-1},{transitionKind:'unknown'}])assert.equal(fixedCue(tracks.get('a'),{fixed:{...cue,...patch}}),null);

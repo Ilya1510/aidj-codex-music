@@ -80,7 +80,7 @@ let discoveryTimer=null,discoveryReading=false,discoveryRevision=0;
 let libraryRevision='',libraryRefreshing=false;
 let rangeOverrides={},rangeSyncing=false,rangeAdvancing=false;
 let playbackPreferences=normalisePlayback(null),playlistPlayback={},latestRelease=null,lastUpdateCheck=0;
-const clientVersion=native?.version?.()||40;
+const clientVersion=native?.version?.()||41;
 const djSupported=!native||clientVersion>=17;
 const preferencesFor=id=>normalisePlayback(id!=null?playlistPlayback[id]||(id===900000021?{...playbackPreferences,mode:'remix'}:playbackPreferences):playbackPreferences);
 const activePreferences=()=>queue.fixedSet?{...preferencesFor(queue.playlistId),mode:'fixed'}:preferencesFor(queue.playlistId);
@@ -103,7 +103,7 @@ async function syncLibrary(revision=null){
 let audio=native?new NativeAudio():$('audio');
 const main=$('main');
 const browserBlend=native?null:new FixedBlend({
-  snapshot:()=>({enabled:!!queue.fixedSet,audio,entry:queue.current,track:tracks.get(queue.current?.trackId),next:queue.entries[queue.index+1],nextTrack:tracks.get(queue.entries[queue.index+1]?.trackId)}),
+  snapshot:()=>({enabled:!!queue.fixedSet,audio,entry:queue.current,track:tracks.get(queue.current?.trackId),next:queue.following,nextTrack:tracks.get(queue.following?.trackId)}),
   resolve:async track=>{const content=await storage.blob(track.md5);if(!content&&!online)throw new Error('OFFLINE');const url=content?URL.createObjectURL(content):null;return {url,src:url||'/api/audio/'+track.id};},
   volume:browserTrackVolume,
   promote:(deck,url,entry)=>{
@@ -273,7 +273,7 @@ async function startFixedSet(set){
   if(!native)pauseAudio();
   const entries=fixedSetEntries(set,tracks);
   if(!online&&entries.some(e=>!isSaved(tracks.get(e.trackId))))throw new Error('Для этого сета скачай все его песни или подключись к сети.');
-  queue=new Queue({playlistId:set.playlistId,fixedSet:{id:set.id,name:set.name||'DJ 1',revision:set.revision},entries,currentId:entries[0].id,repeat:'off',shuffle:false});
+  queue=new Queue({playlistId:set.playlistId,fixedSet:{id:set.id,name:set.name||'DJ 1',revision:set.revision},entries,currentId:entries[0].id,repeat:'all',shuffle:false});
   queueForecast=null;reviewing=false;restoredTime=0;restoreEntry=null;loadedEntry=null;
   await loadCurrent(true,true);await persist();render();toast((set.name||'DJ 1')+' · фиксированный сет');
 }
@@ -381,10 +381,10 @@ function savedPage() {
 function queuePage() {
   const fragment=document.createDocumentFragment();fragment.append(heading('Очередь',count(queue.entries.length)));
   if(!queue.entries.length){fragment.append(empty('Что послушаем?','Выбери песню или включи плейлист.',button('К музыке','music',()=>navigate('home'),'button primary')));return fragment;}
-  fragment.append(el('p',{class:'dj-work-status'},queue.fixedSet?(queue.fixedSet.name+' · фиксированные порядок и фрагменты'):djWorkText()),!queue.fixedSet&&el('div',{class:'toolbar'},button('Шафл','shuffle',()=>{queueForecast=null;queue.toggleShuffle();render();persist();},'button'+(queue.shuffle?' primary':'')),!remixMode(activePreferences())&&button(queue.repeat==='one'?'Повтор песни':queue.repeat==='all'?'Повтор очереди':'Без повтора','repeat',()=>{cycleRepeat();render();},'button')));
+  fragment.append(el('p',{class:'dj-work-status'},queue.fixedSet?(queue.fixedSet.name+' · фиксированные порядок и фрагменты · по кругу'):djWorkText()),!queue.fixedSet&&el('div',{class:'toolbar'},button('Шафл','shuffle',()=>{queueForecast=null;queue.toggleShuffle();render();persist();},'button'+(queue.shuffle?' primary':'')),!remixMode(activePreferences())&&button(queue.repeat==='one'?'Повтор песни':queue.repeat==='all'?'Повтор очереди':'Без повтора','repeat',()=>{cycleRepeat();render();},'button')));
   const current=queue.current;
   if(current&&tracks.has(current.trackId))fragment.append(el('section',{class:'queue-current'},el('span',{class:'eyebrow'},'СЕЙЧАС ИГРАЕТ'),songRow(tracks.get(current.trackId),0,[],{entry:current})));
-  const rest=queue.entries.slice(Math.max(0,queue.index+1));
+  const rest=queue.upcoming;
   const positions=new Map(rest.map((entry,index)=>[entry.id,index+1]));
   const words=normalize(query).trim().split(/\s+/).filter(Boolean),matches=rest.filter(entry=>{const track=tracks.get(entry.trackId);return track&&words.every(word=>normalize(track.title+' '+track.artist).includes(word));});
   fragment.append(el('div',{class:'queue-tools'},el('h2',{},'Далее · '+rest.length),!queue.fixedSet&&button('Очистить',null,()=>{queueForecast=null;queue.clearUpcoming();render();persist();},'text-button')));
@@ -399,7 +399,7 @@ function queuePage() {
     if(!queue.fixedSet)row.insertBefore(button('Поставить следующей','top',()=>moveUpcoming(entry.id,queue.entries[queue.index+1]?.id),'icon-button small queue-next',{disabled:entry.id===rest[0]?.id}),row.querySelector('[aria-label="Убрать из очереди"]'));
     rows.append(row);
   }
-  fragment.append(el('p',{id:'queue-drag-help',class:'subtitle queue-drag-help'},queue.fixedSet?'Фиксированный сет. Можно выбрать песню или пропустить её. Для исходного порядка запусти DJ 1 заново.':'Зажми для переноса. ⇈ — следующей. План на 10 фрагментов, он может меняться.'));
+  fragment.append(el('p',{id:'queue-drag-help',class:'subtitle queue-drag-help'},queue.fixedSet?'Сет играет по кругу: после последней песни — первая. Здесь все остальные песни в порядке воспроизведения.':'Зажми для переноса. ⇈ — следующей. План на 10 фрагментов, он может меняться.'));
   if(!queue.fixedSet)sortableQueue(rows,{onMove:moveUpcoming,onActive:active=>{queueDragging=active;if(!active)queueMicrotask(()=>{if(view==='queue'&&!queueDragging)render();});}});
   fragment.append(rows);
   if(!matches.length&&words.length)fragment.append(empty('Ничего не найдено','Попробуй название песни или исполнителя.'));
@@ -1075,7 +1075,7 @@ function playbackOptions(playlistId=view==='playlist'?selectedPlaylist:queue.pla
   const choose=async mode=>{await savePlaybackPreferences({...preferencesFor(playlistId),mode},playlistId);playbackOptions(playlistId);};
   const buttons=['normal','smooth',...(djSupported?['dj']:[]),...(clientVersion>=19?['remix']:[])].map(mode=>button(modeName({mode}),preferences.mode===mode?'check':'music',()=>choose(mode),'button full'+(preferences.mode===mode?' primary':''),{'aria-pressed':String(preferences.mode===mode)}));
   const nodes=[el('div',{class:'playback-modes',role:'group','aria-label':'Режим воспроизведения'},...buttons)];
-  const fixed=fixedSetFor(playlistId);if(fixed)nodes.unshift(button('Слушать '+(fixed.name||'DJ 1'),'play',async()=>{$('sheet').close();await startFixedSet(fixed);},'button full primary'),el('p',{class:'subtitle'},`Фиксированные порядок и фрагменты · ${count(fixed.tracks.length)}. Переходы сохранены в сете. Настройки обычного ремикса на него не влияют.`));
+  const fixed=fixedSetFor(playlistId);if(fixed)nodes.unshift(button('Слушать '+(fixed.name||'DJ 1'),'play',async()=>{$('sheet').close();await startFixedSet(fixed);},'button full primary'),el('p',{class:'subtitle'},`Фиксированные порядок и фрагменты · ${count(fixed.tracks.length)}. Играет по кругу, в том числе при выборе песни из середины. Настройки обычного ремикса на него не влияют.`));
   if(djMode(preferences)){
     const p=data.playlists.find(p=>p.id===playlistId),ids=p?.trackIds||queue.entries.map(e=>e.trackId),stats=progressFor(ids,preferences),ready=stats.ready;
     nodes.push(el('p',{},remixMode(preferences)?'Фрагменты с возвратами к песням. Следующая выбирается в пределах настроенной глубины очереди. Песня уходит из очереди после выбранного числа фрагментов или раньше, если подходящие куски закончились.':'Сокращённые песни и наложение переходов. Темп близких песен подстраивается в пределах 3%. Ручные фрагменты сохраняются.'),

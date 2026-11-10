@@ -45,6 +45,25 @@ def main():
                 assert not page.get_by_role('button',name='Шафл',exact=True).count()
                 assert not page.get_by_role('button',name='Поставить следующей',exact=True).count()
                 if not native:
+                    # Jump to the last published song from inside the queue.
+                    # Every other song remains visible, including the head.
+                    page.locator('[data-queue-entry]').filter(has_text='Fixed song 1').locator('.song-main').click()
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 1"&&!document.querySelector("audio").paused')
+                    page.locator('#mini-play').click()
+                    assert page.locator('[data-queue-entry] .song-text strong').all_text_contents()==['Fixed song 2','Fixed song 0']
+                    assert 'Далее · 2' in page.locator('main').inner_text()
+                    assert 'по кругу' in page.locator('main').inner_text()
+                    # A paused boundary cannot start the first song by itself.
+                    page.evaluate('document.querySelector("audio").currentTime=6.01')
+                    page.wait_for_timeout(100)
+                    assert page.locator('#mini-title').inner_text()=='Fixed song 1'
+                    assert page.evaluate('document.querySelector("audio").paused')
+                    page.locator('#mini-play').click()
+                    page.wait_for_function('()=>!document.querySelector("audio").paused')
+                    page.evaluate('document.querySelector("audio").currentTime=5.99')
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused')
+                    assert page.evaluate('document.querySelector("audio").currentTime>=1&&document.querySelector("audio").currentTime<2')
+                    page.locator('#mini-play').click()
                     # A background DJ1 publication updates the available set,
                     # while an already-started queue keeps its own cuts/order.
                     previous_catalog=copy.deepcopy(catalog)

@@ -25,7 +25,7 @@ def main():
             route.fulfill(status=206 if partial else 200,body=body[start:end+1],headers=headers,content_type='audio/wav')
         elif path=='catalog':
             # Real catalog gates blended/rate-adjusted sets by this header.
-            assert route.request.headers.get('x-aidj-version')=='40'
+            assert route.request.headers.get('x-aidj-version')=='41'
             route.fulfill(json=catalog)
         elif path=='android-version':route.fulfill(status=503,json={'error':'QA'})
         else:route.fulfill(json={'ok':True,'revision':'qa','access':catalog['access']})
