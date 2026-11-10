@@ -48,6 +48,9 @@ def selection_error(item):
     """Revalidate checkpoint evidence before it can enter a public set."""
     if item.get('status')!='ready':return 'unresolved'
     row=item.get('row',{});point=item.get('exit',{});method=point.get('method')
+    if method=='approximate-quiet-vocal-short-out':
+        from .fixed_set_short_out import saved_selection_error
+        return saved_selection_error(item)
     if method in ('stored-file-ending','stored-owner-clip-ending'):
         from .fixed_set_closing import saved_selection_error
         return saved_selection_error(item)
@@ -338,6 +341,15 @@ def assemble(settings,work):
         except (ValueError,TypeError,KeyError):raise RuntimeError('REPAIR_INVALID_DURATION_EXCEPTION') from None
         entry_error=entry_selection_error(item,entry_source,owner=owner_entries.get(aid,[]),evidence_folder=work/'vocal-evidence')
         if entry_error:raise RuntimeError('REPAIR_'+entry_error)
+        if item['exit']['method']=='approximate-quiet-vocal-short-out':
+            from .fixed_set_short_out import selection_error as short_out_error
+            rejected_path=owner_path.parent/'owner-rejected.json'
+            if not rejected_path.is_file():raise RuntimeError('REPAIR_SHORT_OUT_OWNER_REJECTIONS_MISSING')
+            rejected=set(json.loads(rejected_path.read_text()).get(aid,[]))
+            for vote in db.execute('SELECT p.point_ms FROM dj_boundary_points p JOIN dj_boundary_votes v ON p.id=v.point_id WHERE p.md5=? AND v.value=-1',(asset['md5'],)):
+                rejected.add(vote[0]/1000)
+            error=short_out_error(item,entry_source,evidence_folder=work/'vocal-evidence',rejected=sorted(rejected))
+            if error:raise RuntimeError('REPAIR_'+error)
         if item['exit']['method'] in ('stored-file-ending','stored-owner-clip-ending'):
             from .fixed_set_closing import selection_error as closing_error,clip_lineage
             error=closing_error(item,entry_source,clip_lineage=clip_lineage(db,aid))
