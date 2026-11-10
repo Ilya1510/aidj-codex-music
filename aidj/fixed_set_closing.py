@@ -233,8 +233,11 @@ def selection_error(item, current_source, *, clip_lineage=None):
     if proof.get('metadataDuration')!=end or proof.get('decodedDuration')!=timing['decodedDuration'] or proof.get('metadataMinusDecodedSeconds')!=end-timing['decodedDuration']:return 'closing-duration-provenance'
     if any(not finite(row.get(k)) for k in ('start','end','fadeIn','fadeOut','rate','transitionSeconds')):return 'closing-row-fields'
     span=end-row['start'];minimum=min(45.,end-lo)
+    from .fixed_set_duration_exception import maximum_span
+    try:maximum=maximum_span(item,current_source)
+    except (ValueError,TypeError):return 'closing-duration-exception-invalid'
     if row['end']!=end or point.get('time')!=end or row['end']!=proof['metadataDuration']:return 'closing-not-exact-stored-end'
-    if row['trackId']!=item['trackId'] or not lo<=row['start']<end or not minimum-1e-7<=span<=100 or span<8:return 'closing-row-bounds'
+    if row['trackId']!=item['trackId'] or not lo<=row['start']<end or not minimum-1e-7<=span<=maximum or span<8:return 'closing-row-bounds'
     if row['transitionKind']!='clean-cut' or row['transitionSeconds']!=0 or row['rate']!=1:return 'closing-overlap-or-rate'
     if row['fadeIn']<0 or row['fadeOut']<0 or row['fadeIn']+row['fadeOut']>=span:return 'closing-fade-budget'
     if point.get('fade')!=row['fadeOut'] or point.get('fadeStart')!=end-row['fadeOut']:return 'closing-fade-mismatch'

@@ -229,7 +229,9 @@ def selection_error(item,song,*,owner=(),evidence_folder,rejected=None):
         if not check['accepted']:return 'relative-entry-'+check['reason']
         if proof!=check:return 'relative-entry-proof-mismatch'
         span=row['end']-row['start']
-        if (not 45<=span<=100 or row['fadeIn']!=check['fadeInSeconds'] or
+        from .fixed_set_duration_exception import maximum_span
+        maximum=maximum_span(item,song)
+        if (not 45<=span<=maximum or row['fadeIn']!=check['fadeInSeconds'] or
                 not song['lo']<=row['start']<row['end']<=song['hi']+.0001 or
                 not finite(row.get('fadeOut')) or row['fadeOut']<0 or row['fadeIn']+row['fadeOut']>=span):
             return 'relative-entry-row'

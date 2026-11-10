@@ -329,6 +329,13 @@ def assemble(settings,work):
         level=db.execute('SELECT integrated_lufs AS lufs,true_peak_dbtp AS peak,method AS loudnessMethod,status AS loudnessStatus FROM audio_loudness WHERE md5=?',(asset['md5'],)).fetchone()
         entry_source={**asset,**(dict(level) if level else {'lufs':None,'peak':None}),
                       'lo':lo,'hi':hi,'manualStart':raw_lo is not None}
+        from .fixed_set_duration_exception import maximum_span
+        try:
+            maximum=maximum_span(item,entry_source)
+            span=item['row']['end']-item['row']['start']
+            if type(span) not in (int,float) or not math.isfinite(span) or not 0<span<=maximum:
+                raise ValueError('span-outside-duration-contract')
+        except (ValueError,TypeError,KeyError):raise RuntimeError('REPAIR_INVALID_DURATION_EXCEPTION') from None
         entry_error=entry_selection_error(item,entry_source,owner=owner_entries.get(aid,[]),evidence_folder=work/'vocal-evidence')
         if entry_error:raise RuntimeError('REPAIR_'+entry_error)
         if item['exit']['method'] in ('stored-file-ending','stored-owner-clip-ending'):
