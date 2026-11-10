@@ -275,6 +275,31 @@ def stereo_error(item, song, evidence):
     return None
 
 
+def replacement_metadata(replacement,item,evidence,position):
+    """Keep source-observation lineage/raw refs while invalidating entry verdicts."""
+    if replacement.get('md5')!=item.get('md5') or replacement.get('trackId')!=item.get('trackId'):
+        raise RuntimeError('STEREO_REPLACEMENT_SOURCE')
+    result=copy.deepcopy(replacement)
+    fields=('cacheKey','sourceOffsetSeconds','durationSeconds','requestedEndSeconds','modelSha256')
+    for name in ('entryVocalEvidence','vocalEvidence'):
+        references=[];seen=set()
+        selected=[item.get('entryProof',{})] if name=='entryVocalEvidence' else []
+        for ref in [*selected,*item.get(name,[]),*result.get(name,[])]:
+            if not isinstance(ref,dict):continue
+            key=ref.get('cacheKey')
+            if isinstance(key,str) and len(key)==64 and all(c in '0123456789abcdef' for c in key) and key not in seen:
+                seen.add(key);references.append({k:copy.deepcopy(ref[k]) for k in fields if k in ref})
+        if references:result[name]=references
+    result.update({k:copy.deepcopy(v) for k,v in item.items() if k.startswith('entryResolve')})
+    result.update(observedWords=copy.deepcopy(evidence.get('words',[])),
+        observedCoverage=copy.deepcopy(evidence.get('coverage',[])),
+        repairProbes=copy.deepcopy(evidence.get('repairProbes',[])),
+        inputHash=item.get('inputHash'),position=position)
+    for name in ('entryProof','entryReviewInputHash','entryReviewVersion','entryReviewStatus','entryReviewError'):
+        result.pop(name,None)
+    return result
+
+
 def run(settings, work, decoder, limit=None, retry=False):
     import numpy as np
     from .disk import Disk
@@ -350,9 +375,7 @@ def run(settings, work, decoder, limit=None, retry=False):
                             replacement = choose(old, song, evidence, rms,
                                 owner.get(old['trackId'], []), bad.get(old['trackId'], []), gold.get(old['trackId']))
                             if replacement.get('status') == 'ready' and replacement.get('exit', {}).get('method') in PHYSICAL:
-                                replacement.update(observedWords=evidence.get('words', []),
-                                    observedCoverage=evidence.get('coverage', []), repairProbes=evidence.get('repairProbes', []),
-                                    inputHash=item.get('inputHash'), position=position)
+                                replacement=replacement_metadata(replacement,item,evidence,position)
                                 revised = verify(replacement, song, evidence, rms, decoded_duration)
                                 if revised['accepted']:
                                     result = attach(replacement, revised)

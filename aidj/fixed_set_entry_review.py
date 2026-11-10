@@ -21,7 +21,7 @@ from dataclasses import replace
 from .config import Settings, atomic_json
 from .fixed_set_repair import covered, word_clear
 from .fixed_set_resolve import read_json, restore_evidence
-from .fixed_set_vocal_review import CachedProbe, _vectors, finite, gain_db, quantile
+from .fixed_set_vocal_review import CachedProbe, VERSION as CACHE_VERSION, _vectors, finite, gain_db, quantile
 from .vocal_probe import MODEL_SHA256, verify_model
 
 VERSION = 3
@@ -40,6 +40,59 @@ ONSET_PARAMETERS = {'preStartSeconds':-.15,'preEndSeconds':-.02,
                     'minimumRiseDb':8.,'quietP95Dbfs':-43.,'absoluteMaxDbfs':-37.,
                     'suppressedP95Db':-30.,'maximumFadeInSeconds':.08,
                     'fadeBeforeOnsetSeconds':.03,'minimumFadeInSeconds':.005}
+MAX_CACHED_EVIDENCE_BYTES=2*1024**2
+
+
+def discover_cached_references(folder):
+    """Index one bounded JSON at a time; retain small refs, never raw arrays.
+
+    This repairs lost checkpoint references without changing their evidence.
+    The normal CachedProbe adapter still reloads/validates every selected raw
+    file, and the final entry gate independently replays its measurements.
+    """
+    index={}
+    if not Path(folder).is_dir():return index
+    with os.scandir(folder) as files:
+        for entry in files:
+            if not re.fullmatch('[a-f0-9]{64}\\.json',entry.name):continue
+            try:
+                if not entry.is_file(follow_symlinks=False) or not 0<entry.stat(follow_symlinks=False).st_size<=MAX_CACHED_EVIDENCE_BYTES:continue
+                with open(entry.path,'rb') as stream:
+                    encoded=stream.read(MAX_CACHED_EVIDENCE_BYTES+1)
+                if len(encoded)>MAX_CACHED_EVIDENCE_BYTES:continue
+                value=json.loads(encoded)
+                if not isinstance(value,dict):continue
+                key=entry.name[:-5];digest=value.get('md5')
+                if (value.get('cacheKey')!=key or not isinstance(digest,str) or
+                        not re.fullmatch('[a-f0-9]{32}',digest) or value.get('modelSha256')!=MODEL_SHA256):continue
+                begin,end=value.get('sourceOffsetSeconds'),value.get('requestedEndSeconds')
+                duration=value.get('durationSeconds')
+                if (not finite(begin) or not finite(end) or not finite(duration) or
+                        not 0<=begin<end<=1800 or not .1-1e-7<=end-begin<=30+1e-7 or
+                        abs(duration-(end-begin))>.05+1e-7):continue
+                expected=hashlib.sha256(json.dumps([CACHE_VERSION,digest,begin,end,MODEL_SHA256],separators=(',',':')).encode()).hexdigest()
+                if expected!=key or _vectors(value,allow_warnings=True) is None:continue
+                reference={field:value[field] for field in ('cacheKey','sourceOffsetSeconds',
+                    'durationSeconds','requestedEndSeconds','modelSha256')}
+                index.setdefault(digest,[]).append(reference)
+            except (OSError,ValueError,RuntimeError,UnicodeError,RecursionError):
+                continue
+            finally:
+                # No previous raw arrays survive while parsing the next file.
+                value=None;encoded=None
+    return index
+
+
+def entry_cached_references(item,discovered=()):
+    """Keep the selected proof first, then checkpoint refs and recovered refs."""
+    refs=[];seen=set()
+    for reference in [item.get('entryProof',{}),*item.get('entryVocalEvidence',[]),
+                      *item.get('vocalEvidence',[]),*discovered]:
+        if not isinstance(reference,dict):continue
+        key=reference.get('cacheKey')
+        if isinstance(key,str) and re.fullmatch('[a-f0-9]{64}',key) and key not in seen:
+            refs.append(reference);seen.add(key)
+    return refs
 
 
 def exemption(point, song, owner=()):
@@ -342,6 +395,7 @@ def run(settings, work, decoder, model_path, limit=None, retry=False):
     verify_model(model_path)
     baseline = read_json(work/'baseline.json'); curation=settings.state/'research/dj1-curation'
     owners=read_json(curation/'owner-entries.json'); rejected=read_json(curation/'owner-rejected.json')
+    cached_index=discover_cached_references(work/'vocal-evidence')
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
     disk=Disk(replace(settings,max_bytes=min(settings.max_bytes,40*1024**2)));count=0
     try:
@@ -369,9 +423,8 @@ def run(settings, work, decoder, model_path, limit=None, retry=False):
                 with tempfile.TemporaryDirectory(prefix='entry-original-',dir=work) as directory:
                     source=Path(directory)/('source'+Path(song['remote_path']).suffix)
                     probe=CachedProbe(source,song,work/'vocal-evidence',decoder,model_path)
-                    keys=[*item.get('entryVocalEvidence',[]),*item.get('vocalEvidence',[])]
-                    if item.get('entryProof',{}).get('cacheKey'):keys.append(item['entryProof'])
-                    existing=probe.existing(keys)
+                    keys=entry_cached_references(item,cached_index.get(song['md5'],()))
+                    existing=probe.existing(keys,limit=None)
                     def observe(a,b):
                         if shutil.disk_usage(work).free<512*1024**2:raise RuntimeError('ENTRY_REVIEW_DISK')
                         disk.download(song['remote_path'],source,expected_md5=old['md5'])

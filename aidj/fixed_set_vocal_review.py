@@ -490,9 +490,12 @@ class CachedProbe:
         self.decoder, self.model_path = decoder, model_path
         folder.mkdir(parents=True, exist_ok=True)
 
-    def existing(self,references):
+    def existing(self,references,limit=12):
+        if limit is not None and (type(limit) is not int or limit<0):
+            raise ValueError('Vocal reference limit must be nonnegative or None')
         values=[];seen=set()
-        for reference in references[:12]:
+        for reference in references if limit is None else references[:limit]:
+            if not isinstance(reference,dict):continue
             key=reference.get('cacheKey','')
             if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key) or key in seen:continue
             seen.add(key);path=self.folder/(key+'.json')

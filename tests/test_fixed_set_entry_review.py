@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -274,3 +275,67 @@ def test_onset_final_gate_replays_all_metrics_fade_coverage_and_current_gain(tmp
     v['vocalRms'][269]=.04;v['vocalToMixDb'][269]=20*math.log10(.04/.3)
     path.write_text(json.dumps(v))
     assert review.selection_error(result,song,evidence_folder=tmp_path)=='entry-proof-entry-new-voice-preroll'
+
+
+def cached_vector(folder,offset=37.3,digest=MD5):
+    from aidj.fixed_set_vocal_review import VERSION as CACHE_VERSION
+    value=vectors(offset);value['md5']=digest
+    value['requestedEndSeconds']=offset+value['durationSeconds']
+    key=hashlib.sha256(json.dumps([CACHE_VERSION,digest,offset,value['requestedEndSeconds'],MODEL_SHA256],
+        separators=(',',':')).encode()).hexdigest()
+    value['cacheKey']=key;path=folder/(key+'.json');path.write_text(json.dumps(value))
+    return value,path
+
+
+def test_discovered_source_pinned_raw_cache_recovers_lost_refs_without_audio(tmp_path):
+    from aidj.fixed_set_vocal_review import CachedProbe
+    item,song=fixtures();raw,path=cached_vector(tmp_path)
+    index=review.discover_cached_references(tmp_path)
+    assert set(index)=={MD5} and index[MD5][0]['cacheKey']==raw['cacheKey']
+    assert set(index[MD5][0])=={'cacheKey','sourceOffsetSeconds','durationSeconds','requestedEndSeconds','modelSha256'}
+    refs=review.entry_cached_references(item,index[MD5])
+    probe=CachedProbe(Path('not-downloaded'),song,tmp_path,'not-used','not-used')
+    existing=probe.existing(refs,limit=None)
+    result=review.review_checkpoint(item,song,[],lambda *a:pytest.fail('lost refs must not force audio work'),
+        coverage=COVERAGE,existing_evidence=existing)
+    assert result['entryProof']['accepted'] and result['entryReviewBudget']['newProbes']==0
+    assert result['entryProof']['cacheKey']==raw['cacheKey']
+
+
+@pytest.mark.parametrize('change',['wrong-source','wrong-key','wrong-model','bad-offset','bad-end','bad-duration','bad-array'])
+def test_cached_reference_discovery_drops_forged_identity_bounds_or_arrays(tmp_path,change):
+    value,path=cached_vector(tmp_path)
+    if change=='wrong-source':value['md5']='2'*32
+    elif change=='wrong-key':value['cacheKey']='f'*64
+    elif change=='wrong-model':value['modelSha256']='f'*64
+    elif change=='bad-offset':value['sourceOffsetSeconds']=-1.
+    elif change=='bad-end':value['requestedEndSeconds']=1801.
+    elif change=='bad-duration':value['durationSeconds']=1.
+    else:value['vocalRms'][0]=float('nan')
+    path.write_text(json.dumps(value))
+    assert review.discover_cached_references(tmp_path)=={}
+
+
+def test_discovery_skips_oversized_malformed_names_and_keeps_sources_separate(tmp_path,monkeypatch):
+    import builtins
+    first,_=cached_vector(tmp_path);second,_=cached_vector(tmp_path,offset=50.,digest='2'*32)
+    huge=tmp_path/('f'*64+'.json')
+    with huge.open('wb') as stream:stream.truncate(review.MAX_CACHED_EVIDENCE_BYTES+1)
+    (tmp_path/'malformed-name.json').write_text('{}')
+    (tmp_path/('e'*64+'.json')).write_text('not json')
+    old_open=builtins.open
+    def guarded_open(file,*args,**kwargs):
+        assert str(file)!=str(huge),'oversized JSON must never be opened'
+        return old_open(file,*args,**kwargs)
+    monkeypatch.setattr(builtins,'open',guarded_open)
+    index=review.discover_cached_references(tmp_path)
+    assert set(index)=={MD5,'2'*32}
+    assert index[MD5][0]['cacheKey']==first['cacheKey']
+    assert index['2'*32][0]['cacheKey']==second['cacheKey']
+
+
+def test_selected_entry_proof_raw_reference_has_priority_and_is_not_duplicated():
+    selected={'cacheKey':'f'*64};other={'cacheKey':'a'*64}
+    refs=review.entry_cached_references({'entryProof':selected,'entryVocalEvidence':[other],
+        'vocalEvidence':[selected]},[other,selected,{'cacheKey':'b'*64}])
+    assert [r['cacheKey'] for r in refs]==['f'*64,'a'*64,'b'*64]

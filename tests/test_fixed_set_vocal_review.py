@@ -136,6 +136,23 @@ def test_cached_numeric_probe_reuses_exact_source_window_without_decoder_or_mode
     assert probe(a,b)==cached
 
 
+def test_cached_probe_default_twelve_is_unchanged_but_entry_can_request_all(tmp_path,monkeypatch):
+    import hashlib
+    refs=[];song={'md5':'1'*32,'duration':180.}
+    for i in range(15):
+        a=float(i*6);b=a+5.4
+        key=hashlib.sha256(json.dumps([review.VERSION,song['md5'],a,b,MODEL_SHA256],separators=(',',':')).encode()).hexdigest()
+        cached={**vectors(a,b-a),'cacheKey':key,'md5':song['md5'],'requestedEndSeconds':b}
+        (tmp_path/(key+'.json')).write_text(json.dumps(cached));refs.append({'cacheKey':key})
+    def forbidden(*a,**k):raise AssertionError('existing vectors never invoke decoder/model')
+    monkeypatch.setattr(review.subprocess,'run',forbidden);monkeypatch.setattr(review,'probe_vocals',forbidden)
+    probe=review.CachedProbe(Path('unused'),song,tmp_path,'unused','unused')
+    assert len(probe.existing(refs))==12
+    assert len(probe.existing(refs,limit=None))==15
+    assert probe.existing(refs,limit=0)==[]
+    with pytest.raises(ValueError):probe.existing(refs,limit=-1)
+
+
 def test_bad_decoded_excerpt_is_removed_before_loading_model(tmp_path,monkeypatch):
     from types import SimpleNamespace
     def decode(cmd,**kwargs):Path(cmd[-1]).write_bytes(b'bad');return SimpleNamespace(returncode=0)

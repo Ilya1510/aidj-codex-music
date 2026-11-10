@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from aidj.fixed_set_stereo_verify import (attach, input_hash, needs_verification,
-    proof_hash, stereo_energy_envelope, stereo_error, verify)
+    proof_hash, replacement_metadata, stereo_energy_envelope, stereo_error, verify)
 
 
 def fixture():
@@ -135,3 +135,29 @@ def test_short_digital_eof_is_rechecked_with_actual_stereo_tail():
 def test_duplicate_coverage_intervals_do_not_trigger_an_extra_source_download():
     item, song, evidence, _ = fixture()
     assert input_hash(item, song, evidence) == input_hash(item, song, {**evidence, 'coverage': [[0, 100], [0, 50], [50, 100]]})
+
+
+def test_stereo_replacement_keeps_raw_refs_and_asr_lineage_but_discards_stale_entry_verdict():
+    old,_,evidence,_=fixture();old.update(inputHash='source-input',
+        entryProof={'accepted':True,'cacheKey':'b'*64,'sourceStart':10},
+        entryVocalEvidence=[{'cacheKey':'a'*64,'sourceOffsetSeconds':7.3}],
+        vocalEvidence=[{'cacheKey':'c'*64,'sourceOffsetSeconds':67.4}],
+        entryResolveVersion=1,entryResolveInput={'md5':old['md5'],'words':[]},
+        entryResolveOperations=[{'operation':'observed-context','start':7}],
+        entryResolveOutputHash='observations-hash')
+    new=copy.deepcopy(old);new['row']['end']+=.03
+    new['entryVocalEvidence']=[{'cacheKey':'d'*64}]
+    new.pop('vocalEvidence')
+    new.update(entryReviewInputHash='stale',entryReviewVersion=3,entryReviewStatus='ready')
+    result=replacement_metadata(new,old,evidence,17)
+    assert result['row']['end']==70.98 and result['position']==17
+    assert [r['cacheKey'] for r in result['entryVocalEvidence']]==['b'*64,'a'*64,'d'*64]
+    assert result['vocalEvidence']==old['vocalEvidence']
+    assert result['entryResolveOperations']==old['entryResolveOperations']
+    assert result['entryResolveOutputHash']=='observations-hash'
+    assert result['observedWords']==evidence['words'] and result['observedCoverage']==evidence['coverage']
+    assert 'entryProof' not in result and 'entryReviewInputHash' not in result and 'entryReviewVersion' not in result
+    result['entryResolveInput']['words'].append([1,2,True])
+    assert old['entryResolveInput']['words']==[] and new['entryProof']['accepted']
+    with pytest.raises(RuntimeError,match='STEREO_REPLACEMENT_SOURCE'):
+        replacement_metadata({**new,'md5':'f'*32},old,evidence,17)
