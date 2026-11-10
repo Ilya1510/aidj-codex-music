@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from aidj.fixed_set_stereo_verify import (attach, input_hash, needs_verification,
-    proof_hash, replacement_metadata, stereo_energy_envelope, stereo_error, verify)
+    proof_hash, replacement_metadata, reselect, stereo_energy_envelope, stereo_error, verify)
 
 
 def fixture():
@@ -161,3 +161,65 @@ def test_stereo_replacement_keeps_raw_refs_and_asr_lineage_but_discards_stale_en
     assert old['entryResolveInput']['words']==[] and new['entryProof']['accepted']
     with pytest.raises(RuntimeError,match='STEREO_REPLACEMENT_SOURCE'):
         replacement_metadata({**new,'md5':'f'*32},old,evidence,17)
+
+
+def incoming_reselection_fixture():
+    np=pytest.importorskip('numpy')
+    source={'id':'a'*24,'md5':'1'*32,'lo':0.,'hi':210.,'duration':210.,
+            'lufs':None,'artist':'QA','title':'Current incoming'}
+    baseline={'trackId':source['id'],'md5':source['md5'],'start':107.92,'end':162.51,
+              'fadeIn':.0982,'fadeOut':.515,'transitionSeconds':0,'transitionKind':'clean-cut','rate':1}
+    row={**baseline,'start':154.1,'end':202.41,'fadeIn':.0715,'fadeOut':.8}
+    item={'trackId':source['id'],'md5':source['md5'],'row':row,
+          'entry':{'time':154.1,'kind':'vocal-free-entry-breath','fade':.0715}}
+    evidence={'words':[[100,145.69,True],[147.87,153.79,True],[154.58,199.9,True]],
+              'coverage':[[0,210]],'repairProbes':[]}
+    rms=np.full(21000,.1);rms[20150:20350]=.004
+    return item,baseline,source,evidence,rms
+
+
+def test_real_quiet_chooser_seeded_from_current_row_keeps_certified_incoming_on_40ms_exit_repair():
+    from aidj.fixed_set_repair import choose
+    item,baseline,song,evidence,rms=incoming_reselection_fixture();saved=copy.deepcopy(baseline)
+    obsolete=choose(baseline,song,evidence,rms)
+    assert obsolete['row']['start']==pytest.approx(147.52)
+    result=reselect(item,baseline,song,evidence,rms)
+    assert result['row']['start']==154.1 and result['row']['fadeIn']==.0715
+    assert result['row']['end']==pytest.approx(202.45)
+    assert result['entry']==item['entry'] and baseline==saved
+    assert verify(result,song,evidence,rms,210)['accepted']
+
+
+def test_outgoing_reselection_does_not_certify_an_incoming_point_with_new_word_conflict():
+    item,baseline,song,evidence,rms=incoming_reselection_fixture()
+    evidence['words'].append([154.,154.3,False])
+    result=reselect(item,baseline,song,evidence,rms)
+    assert result['row']['start']==154.1  # Separate ENTRY must handle this conflict.
+    assert 'entryProof' not in result
+    result=replacement_metadata(result,{**item,'entryProof':{'accepted':True}},evidence,8)
+    assert 'entryProof' not in result and 'entryReviewInputHash' not in result
+
+
+@pytest.mark.parametrize('case',['span','manual','negative','fade'])
+def test_infeasible_current_incoming_retention_falls_back_to_normal_guarded_chooser(case):
+    item,baseline,song,evidence,rms=incoming_reselection_fixture();rejected=[]
+    if case=='span':item['row']['start']=160.  # Only42.45s remain.
+    elif case=='manual':song['lo']=155.  # Prior incoming is outside the allowed range.
+    elif case=='negative':rejected=[154.1]
+    else:item['row']['fadeIn']=10.
+    result=reselect(item,baseline,song,evidence,rms,rejected=rejected)
+    if result.get('status')=='ready':
+        assert (result['row']['start'],result['row']['fadeIn'])!=(item['row']['start'],item['row']['fadeIn'])
+        assert song['lo']<=result['row']['start']<result['row']['end']<=song['hi']
+    else:
+        assert case=='manual'
+
+
+def test_reselection_preserves_owner_gold_and_source_identity_checks():
+    item,baseline,song,evidence,rms=incoming_reselection_fixture()
+    gold={'end':202.5,'fadeOut':.65,'quietWindow':{'start':201.5,'end':203.5}}
+    result=reselect(item,baseline,song,evidence,rms,gold=gold)
+    assert result['row']['start']==154.1 and result['row']['end']==202.5
+    assert result['exit']['method']=='owner-listened-quiet'
+    with pytest.raises(RuntimeError,match='STEREO_REPLACEMENT_SOURCE'):
+        reselect(item,{**baseline,'md5':'f'*32},song,evidence,rms)

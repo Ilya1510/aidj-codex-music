@@ -300,6 +300,33 @@ def replacement_metadata(replacement,item,evidence,position):
     return result
 
 
+def reselect(item,baseline,song,evidence,rms,owner=(),rejected=(),gold=None):
+    """Repair outgoing audio locally; incoming certification remains separate.
+
+    Seed the quiet-exit chooser from the current row, never the obsolete initial
+    excerpt. A feasible current incoming point survives even if it still needs
+    an ENTRY check: retaining a timestamp does not certify a word boundary.
+    """
+    row=item.get('row',{})
+    if (row.get('trackId')!=baseline.get('trackId') or row.get('md5')!=baseline.get('md5') or
+            row.get('trackId')!=song.get('id') or row.get('md5')!=song.get('md5')):
+        raise RuntimeError('STEREO_REPLACEMENT_SOURCE')
+    seed={**baseline,**row}
+    result=choose(seed,song,evidence,rms,owner,rejected,gold)
+    if result.get('status')!='ready':return result
+    new=result.get('row',{});start=row.get('start');fade=row.get('fadeIn');end=new.get('end');out=new.get('fadeOut')
+    numeric=lambda v:type(v) in (int,float) and math.isfinite(v)
+    minimum=min(45.,song['hi']-song['lo']-.1)
+    feasible=(all(numeric(v) for v in (start,fade,end,out)) and
+        song['lo']<=start<end<=song['hi']+.0001 and minimum-1e-7<=end-start<=100+1e-7 and
+        0<=fade<=min(4.,(end-start)/2) and 0<=out<=min(4.,(end-start)/2) and fade+out<end-start and
+        not any(min(abs(start-t),abs(end-t))<.35 for t in rejected))
+    if feasible:
+        new.update(start=start,fadeIn=fade)
+        result['entry']={**copy.deepcopy(item.get('entry',{})),'time':start,'fade':fade}
+    return result
+
+
 def run(settings, work, decoder, limit=None, retry=False):
     import numpy as np
     from .disk import Disk
@@ -372,7 +399,7 @@ def run(settings, work, decoder, limit=None, retry=False):
                             # A stereo failure is not permission to switch to a
                             # loud ASR-only fade. Rechoose only another physical
                             # quiet point and reverify its actual measured bins.
-                            replacement = choose(old, song, evidence, rms,
+                            replacement = reselect(item, old, song, evidence, rms,
                                 owner.get(old['trackId'], []), bad.get(old['trackId'], []), gold.get(old['trackId']))
                             if replacement.get('status') == 'ready' and replacement.get('exit', {}).get('method') in PHYSICAL:
                                 replacement=replacement_metadata(replacement,item,evidence,position)
