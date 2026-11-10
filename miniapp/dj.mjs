@@ -69,6 +69,12 @@ export function endsAtSourceEnd(track,entry){
   return !!(cue&&cue.transitionKind==='clean-cut'&&cue.transitionSeconds===0&&Number.isFinite(track.duration)&&track.duration>0&&
     (!Number.isFinite(track.rangeEnd)||track.rangeEnd>=track.duration)&&Math.abs(cue.end-track.duration)<=.001);
 }
+export function fixedGain(track,entry,position,decodedDuration){
+  const cue=fixedCue(track,entry);if(!cue)return null;
+  const end=endsAtSourceEnd(track,entry)&&Number.isFinite(decodedDuration)&&decodedDuration>0?decodedDuration:cue.end;
+  return Math.min(1,cue.fadeIn>0?Math.max(0,(position-cue.start)/cue.fadeIn):1,
+    cue.fadeOut>0?Math.max(0,(end-position)/cue.fadeOut):1)*.7;
+}
 export function fixedSetEntries(set,tracks){
   if(!set||typeof set.id!=='string'||!Array.isArray(set.tracks)||!set.tracks.length)throw new Error('Этот сет ещё не готов.');
   const entries=set.tracks.map((item,i)=>({id:'fixed-'+set.id+'-'+i+'-'+crypto.randomUUID(),trackId:item.trackId,ordinal:i,fixed:{...(item.md5?{sourceMd5:item.md5}:{}),start:item.start,end:item.end,fadeIn:item.fadeIn,fadeOut:item.fadeOut,transitionSeconds:item.transitionSeconds,transitionKind:item.transitionKind,rate:item.rate}}));

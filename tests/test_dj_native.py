@@ -180,6 +180,13 @@ public class DjServiceProbe {
  // EOF with a late successor must wait; a pause during that wait must survive
  // the incoming prepared callback and a repeated completion notification.
  s=new PlaybackService();s.onCreate();MediaPlayer.all.clear();q.put("currentId","e1").put("time",0);s.setQueue(q);s.play();a=MediaPlayer.all.get(0);a.firePrepared();tick(s);b=MediaPlayer.all.get(1);a.pos=240000;a.fireDone();check(!b.playing&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e1"),"actual ending waits for a genuinely prepared successor");s.pause();b.firePrepared();a.fireDone();tick(s);check(!a.playing&&!b.playing&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e1"),"late prepare or completion after pause cannot leak playback or advance");s.play();check(b.playing&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e2"),"explicit resume promotes the ready successor after EOF");s.onDestroy();
+ // A positive full-file fade also follows the actual decoder length, in both
+ // directions of metadata error, without changing authored internal fades.
+ for(int actual:new int[]{240052,239948}){
+ s=new PlaybackService();s.onCreate();MediaPlayer.all.clear();q=queue().put("fixedSet",new JSONObject().put("id","dj1"));
+ for(int j=0;j<q.getJSONArray("entries").length();j++)q.getJSONArray("entries").getJSONObject(j).put("fixed",new JSONObject().put("start",180).put("end",240).put("fadeIn",.05).put("fadeOut",.1).put("transitionSeconds",0).put("transitionKind","clean-cut").put("rate",1));
+ s.setQueue(q);s.play();a=MediaPlayer.all.get(0);a.duration=actual;a.firePrepared();tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=actual-50;tick(s);check(a.playing&&!a.released&&!b.playing&&Math.abs(a.gain-.35)<.001,"positive full-file fade has half gain50ms before actual EOF despite metadata discrepancy");a.pos=actual-5;tick(s);check(!a.released&&!b.playing&&Math.abs(a.gain-.035)<.001,"full-file ramp retains actual last5ms until completion");a.pos=actual;a.fireDone();check(a.released&&b.playing,"positive source-ending fade promotes only on actual completion");s.onDestroy();
+ }
  System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline source_ending_completion");
  }
 }''',

@@ -1,4 +1,4 @@
-import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues as computeRemixCues,remixAnchors as computeRemixAnchors,remixAcousticAnchors as computeRemixAcousticAnchors,planRemix,packRemixEntries,timedCue,fixedCue,fixedSetEntries,endsAtSourceEnd} from './dj.mjs';
+import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues as computeRemixCues,remixAnchors as computeRemixAnchors,remixAcousticAnchors as computeRemixAcousticAnchors,planRemix,packRemixEntries,timedCue,fixedCue,fixedSetEntries,endsAtSourceEnd,fixedGain} from './dj.mjs';
 import {Queue} from './player.mjs';
 import {sortablePeople,sortableQueue} from './reorder.mjs';
 import {PlaylistChanges} from './playlist-changes.mjs';
@@ -1013,7 +1013,7 @@ function applyBrowserVolume(){
   const part=segment(playbackTrack(track,queue.current,djMode(activePreferences()))),preferences=activePreferences();
   const fixed=fixedCue(track,queue.current);
   let gain=fadeGain(audio.currentTime,part.start,part.end,preferences.mode==='smooth'?preferences.seconds:djMode(preferences)?Math.min(.5,queue.current?.dj?.fade||.3):0)*(djMode(preferences)?.7:1);
-  if(fixed)gain=Math.min(1,fixed.fadeIn>0?Math.max(0,(audio.currentTime-part.start)/fixed.fadeIn):1,fixed.fadeOut>0?Math.max(0,(part.end-audio.currentTime)/fixed.fadeOut):1)*.7;
+  if(fixed)gain=fixedGain(track,queue.current,audio.currentTime,audio.duration);
   const m=track.loudness;let correction=0;
   if(m?.method==='ebu-r128-v1'&&[m.integratedLufs,m.truePeakDbtp].every(Number.isFinite)&&m.integratedLufs>=-70&&m.integratedLufs<=0&&m.truePeakDbtp>=-60&&m.truePeakDbtp<=6)correction=Math.min(12,-16-m.integratedLufs,-1-m.truePeakDbtp);
   gain*=Math.pow(10,Math.min(0,correction)/20);

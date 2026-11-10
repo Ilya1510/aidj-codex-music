@@ -174,7 +174,7 @@ public final class PlaybackService extends Service {
         JSONObject fixed=DjPlan.fixed(source(entry()),entry());
         if(dj()&&fixed!=null){
             double progress=mixing?Math.max(0,Math.min(1,(double)(position()-mixStart)/mixSpan)):0;
-            double inSeconds=fixed.optDouble("fadeIn"),outSeconds=fixed.optDouble("fadeOut"),start=PlaybackRange.start(current(),length),end=PlaybackRange.end(current(),length);
+            double inSeconds=fixed.optDouble("fadeIn"),outSeconds=fixed.optDouble("fadeOut"),start=PlaybackRange.start(current(),length),end=DjPlan.endsAtSourceEnd(source(entry()),entry())&&length>0?length:PlaybackRange.end(current(),length);
             double intro=inSeconds>0?Math.max(0,Math.min(1,(position()-start)/(inSeconds*1000*speed))):1;
             double tail=outSeconds>0?Math.max(0,Math.min(1,(end-position())/(outSeconds*1000*speed))):1;
             gain=(float)(.70*intro*(mixing?Math.cos(progress*Math.PI/2):tail))*duckGain;

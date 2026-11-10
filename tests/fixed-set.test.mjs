@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {fixedCue,fixedSetEntries,playbackTrack,endsAtSourceEnd} from '../miniapp/dj.mjs';
+import {fixedCue,fixedSetEntries,playbackTrack,endsAtSourceEnd,fixedGain} from '../miniapp/dj.mjs';
 import {Queue} from '../miniapp/player.mjs';
 const tracks=new Map([['a',{id:'a',duration:240,rangeStart:20,rangeEnd:200}],['b',{id:'b',duration:180}]]);
 const cue={start:40,end:100,fadeIn:.2,fadeOut:.4,transitionSeconds:0,transitionKind:'clean-cut',rate:1};
@@ -34,4 +34,14 @@ test('only validated fixed clean cuts at the uncropped source ending wait for th
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,transitionKind:'crossfade'}}),false);
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,sourceMd5:'changed'}}),false);
   assert.equal(endsAtSourceEnd(track,{dj:{...entry.fixed}}),false);
+});
+test('full-file fade follows decoded ending in either direction while internal fades keep authored bounds',()=>{
+  const track={duration:240},entry={fixed:{...cue,end:240,fadeIn:0,fadeOut:.1}};
+  for(const actual of [240.052,239.948]){
+    assert.ok(Math.abs(fixedGain(track,entry,actual-.05,actual)-.35)<1e-9);
+    assert.equal(fixedGain(track,entry,actual,actual),0);
+    assert.equal(fixedGain(track,{fixed:{...entry.fixed,fadeOut:0}},actual-.001,actual),.7);
+  }
+  assert.ok(Math.abs(fixedGain(track,{fixed:{...cue,fadeOut:.4}},99.8,240.052)-.35)<1e-9);
+  assert.ok(Math.abs(fixedGain(track,entry,239.95,NaN)-.35)<1e-9);
 });
