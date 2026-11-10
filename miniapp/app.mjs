@@ -561,6 +561,7 @@ async function loadCurrent(play,replaceQueue=false) {
   pauseAudio(true);const previousURL=objectURL;
   objectURL=content?URL.createObjectURL(content):null;
   audio.src=objectURL||'/api/audio/'+track.id;loadedEntry=entry.id;
+  audio.preservesPitch=true;
   audio.playbackRate=djMode(activePreferences())?(fixedCue(original,entry)?.rate||entry.dj?.rate||1):1;
   applyBrowserVolume();
   if(previousURL)URL.revokeObjectURL(previousURL);

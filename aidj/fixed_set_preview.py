@@ -25,7 +25,7 @@ def clip_arguments(item,song,source,output,apply_envelopes=True):
     if (item.get('md5')!=song.get('md5') or not finite(total) or not 0<total<=1800 or
             not all(finite(v) for v in numbers) or not finite(lo) or not finite(hi) or
             not 0<=lo<=item['start']<item['end']<=min(total,hi)+.001 or item['end']-item['start']<.2 or
-            item['rate']!=1 or item.get('transitionKind') not in ('clean-cut','crossfade') or
+            not .97<=item['rate']<=1.03 or item.get('transitionKind') not in ('clean-cut','crossfade') or
             not 0<=item['transitionSeconds']<=min(8,(item['end']-item['start'])/2) or
             (item.get('transitionKind')=='clean-cut' and item['transitionSeconds']!=0) or
             (item.get('transitionKind')=='crossfade' and item['transitionSeconds']==0) or
@@ -37,13 +37,22 @@ def clip_arguments(item,song,source,output,apply_envelopes=True):
     measured=(finite(lufs) and -70<=lufs<=0 and finite(peak) and -60<=peak<=6 and
               song.get('loudness_method')=='ebu-r128-v1' and song.get('loudness_status')=='complete')
     gain=min(12.,-16-lufs,-1-peak) if measured else 0.
+    rate=item['rate']
     filters=[f'volume={gain:.5f}dB','volume=0.7']
-    if apply_envelopes and item['fadeIn']>0:filters.append(f'afade=t=in:st=0:d={item["fadeIn"]:.5f}')
+    # atempo changes time without changing pitch, matching Android's explicit
+    # pitch=1 and the browser's preservesPitch. Cuts/fades stay in source time;
+    # overlap is authored in wall seconds and must not be divided by rate.
+    if rate!=1:filters.append(f'atempo={rate:.8f}')
+    if apply_envelopes and item['fadeIn']>0:filters.append(f'afade=t=in:st=0:d={item["fadeIn"]/rate:.5f}')
     # Full-file positive endings need their actual decoded duration first. A
     # second streaming pass applies only that tail envelope, never gain twice.
-    if apply_envelopes and item['fadeOut']>0 and not completion:filters.append(f'afade=t=out:st={duration-item["fadeOut"]:.5f}:d={item["fadeOut"]:.5f}')
-    args=['-ss',item['start'],'-i',source]
-    if not completion:args.extend(['-t',duration])
+    if apply_envelopes and item['fadeOut']>0 and not completion:filters.append(f'afade=t=out:st={(duration-item["fadeOut"])/rate:.5f}:d={item["fadeOut"]/rate:.5f}')
+    args=['-ss',item['start']]
+    # For a time-stretched clip, -t must limit the INPUT source interval.
+    # An output -t would truncate a slowed clip or decode past a sped-up cut.
+    if not completion and rate!=1:args.extend(['-t',duration])
+    args.extend(['-i',source])
+    if not completion and rate==1:args.extend(['-t',duration])
     args.extend(['-vn','-af',','.join(filters),'-ar',str(SAMPLE_RATE),'-ac','2','-c:a','pcm_s16le','-y',output])
     return args,completion
 
@@ -70,7 +79,7 @@ def timeline_row(item,song,position,clock_frames,frames,completion):
     return {'position':position,'artist':song['artist'],'title':song['title'],
             'start':clock_frames/SAMPLE_RATE,'end':(clock_frames+frames)/SAMPLE_RATE,
             'sourceStart':item['start'],'sourceEnd':item['end'],'sourceCompletion':completion,
-            'renderedFrames':frames,'sampleRate':SAMPLE_RATE}
+            'renderedFrames':frames,'sampleRate':SAMPLE_RATE,'rate':item['rate']}
 
 
 def blend_gain(position,duration,fade_in,fade_out,incoming,outgoing):
@@ -117,7 +126,7 @@ def mix_paths(items,paths,output):
                     outgoing=overlaps[i]/SAMPLE_RATE
                     for frame in range(hi-lo):
                         gain=blend_gain((local+frame)/SAMPLE_RATE,lengths[i]/SAMPLE_RATE,
-                            items[i]['fadeIn'],items[i]['fadeOut'],incoming,outgoing)
+                            items[i]['fadeIn']/items[i]['rate'],items[i]['fadeOut']/items[i]['rate'],incoming,outgoing)
                         offset=(lo-base+frame)*2
                         mixed[offset]+=pcm[frame*2]*gain;mixed[offset+1]+=pcm[frame*2+1]*gain
                 result=array('h')
@@ -171,7 +180,7 @@ def render(settings, work, decoder, count=6):
     plan=json.loads((work/'plan.json').read_text());items=plan['tracks'][:count]
     if not 2<=len(items)<=10 or shutil.disk_usage(work).free<512*1024**2:
         raise RuntimeError('FIXED_PREVIEW_BUDGET')
-    if any(r['rate']!=1 for r in items):
+    if any(type(r.get('rate')) not in (int,float) or not math.isfinite(r['rate']) or not .97<=r['rate']<=1.03 for r in items):
         raise RuntimeError('FIXED_PREVIEW_UNSUPPORTED_TRANSITION')
     blended=any(r['transitionSeconds']>0 for r in items[:-1])
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
@@ -197,7 +206,7 @@ def render(settings, work, decoder, count=6):
             frames=rendered_frames(output)
             if not blended and completion and item['fadeOut']>0:
                 ramped=scratch/f'{i:02}-ending.wav'
-                run(ending_fade_arguments(output,ramped,frames,item['fadeOut']))
+                run(ending_fade_arguments(output,ramped,frames,item['fadeOut']/item['rate']))
                 if rendered_frames(ramped)!=frames:raise RuntimeError('FIXED_PREVIEW_END_FADE_LENGTH')
                 ramped.replace(output)
             paths.append(output)

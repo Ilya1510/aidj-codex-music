@@ -26,7 +26,7 @@ export class FixedBlend {
   }
   pause(){const s=this.state;if(s){s.deck.volume=0;s.deck.pause();}}
   async prepare(context){
-    const serial=++this.serial,deck=this.create();deck.volume=0;deck.preload='auto';
+    const serial=++this.serial,deck=this.create();deck.volume=0;deck.preload='auto';deck.preservesPitch=true;
     const state={key:context.key,deck,url:null,ready:false,mixing:false,starting:false,serial};this.state=state;
     const valid=()=>this.state===state&&this.serial===serial&&this.context()?.key===state.key;
     deck.addEventListener('loadedmetadata',()=>{if(!valid())return;deck.playbackRate=context.nextCue.rate;deck.currentTime=context.nextCue.start;if(context.nextCue.start===0)state.ready=true;});

@@ -30,7 +30,7 @@ def validate(value, assets, ranges=None):
         lo, hi = ranges.get(aid, (0, asset['duration']))
         if not (0 <= lo <= start < end <= min(hi, asset['duration']) + .05 and end-start >= 8):
             raise ValueError('FIXED_SET_BOUNDS')
-        if not (.97 <= rate <= 1.03 and 0 <= overlap <= 8 and 0 <= fade_in <= 4 and 0 <= fade_out <= 4 and fade_in+fade_out < end-start):
+        if not (.97 <= rate <= 1.03 and 0 <= overlap <= 8 and 0 <= fade_in <= 8 and 0 <= fade_out <= 4 and fade_in+fade_out < end-start):
             raise ValueError('FIXED_SET_TRANSITION')
         kind = row.get('transitionKind')
         if kind not in ('crossfade', 'clean-cut') or (kind == 'clean-cut' and overlap != 0):

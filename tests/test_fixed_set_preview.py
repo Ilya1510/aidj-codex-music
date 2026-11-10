@@ -38,7 +38,7 @@ def test_manual_crops_internal_cuts_and_invalid_plans_cannot_gain_source_complet
     args,completion=preview.clip_arguments({**item,'end':9.5,'fadeIn':.1,'fadeOut':.5},song,'a','b')
     assert not completion and args[args.index('-t')+1]==8.5
     assert 'afade=t=in:st=0:d=0.10000,afade=t=out:st=8.00000:d=0.50000' in args[args.index('-af')+1]
-    for patch in ({'md5':'changed'},{'rate':1.01},{'transitionSeconds':1},{'end':10.01},
+    for patch in ({'md5':'changed'},{'rate':1.031},{'transitionSeconds':1},{'end':10.01},
                   {'transitionKind':'crossfade'},{'fadeOut':float('nan')}):
         with pytest.raises(RuntimeError):preview.clip_arguments({**item,**patch},song,'a','b')
 
@@ -55,6 +55,24 @@ def test_positive_source_end_fade_uses_actual_pcm_duration_without_double_gain()
     unmeasured['loudness_status']='failed'
     args,_=preview.clip_arguments(item,unmeasured,'a','b')
     assert args[args.index('-af')+1].startswith('volume=0.00000dB,volume=0.7')
+
+
+@pytest.mark.parametrize('rate',[.97,1.03])
+def test_tempo_matching_trims_source_before_pitch_preserving_stretch(rate):
+    item,song=inputs();item.update(start=1.,end=9.,rate=rate,fadeIn=3.,fadeOut=.4)
+    args,completion=preview.clip_arguments(item,song,'original.mp3','clip.wav')
+    assert not completion
+    assert args.index('-t')<args.index('-i')  # input duration, never output cap
+    assert args[args.index('-t')+1]==8.
+    filters=args[args.index('-af')+1]
+    assert f'atempo={rate:.8f}' in filters and 'asetrate' not in filters
+    assert f'afade=t=in:st=0:d={3/rate:.5f}' in filters
+    assert f'afade=t=out:st={7.6/rate:.5f}:d={.4/rate:.5f}' in filters
+    item['end']=song['duration']
+    args,completion=preview.clip_arguments(item,song,'original.mp3','clip.wav')
+    assert completion and '-t' not in args and '-to' not in args
+    assert 'afade=t=out' not in args[args.index('-af')+1]
+    assert f'atempo={rate:.8f}' in args[args.index('-af')+1]
 
 
 def write_wav(path,frames):
@@ -172,6 +190,23 @@ def test_layout_rejects_triple_overlap_and_mixer_rejects_clipping(tmp_path):
     for path in paths:write_constant_wav(path,3*22050,30000,30000)
     with pytest.raises(RuntimeError,match='CLIPPING'):
         preview.mix_paths([overlap,item],paths,tmp_path/'clipped.wav')
+
+
+def test_rate_adjusted_mix_keeps_overlap_in_wall_time_but_fades_in_source_time(tmp_path):
+    sr=preview.SAMPLE_RATE;paths=[tmp_path/'a.wav',tmp_path/'b.wav']
+    # These are already time-stretched decoded outputs. Their actual length,
+    # not source-span/rate arithmetic, is the authoritative playback clock.
+    for path in paths:write_constant_wav(path,3*sr,1000,2000)
+    item,_=inputs()
+    a={**item,'rate':.97,'fadeIn':0.,'fadeOut':0.,'transitionSeconds':1.,'transitionKind':'crossfade'}
+    b={**item,'rate':1.03,'fadeIn':1.03,'fadeOut':0.}
+    out=tmp_path/'mixed.wav'
+    starts,overlaps,total=preview.mix_paths([a,b],paths,out)
+    assert starts==[0,2*sr] and overlaps==[sr,0] and total==5*sr
+    # Half a wall second is exactly half of the 1.03 source-second fade at
+    # rate1.03. No other division of the one-second overlap is permitted.
+    coefficient=math.sqrt(.5)*(1+.5)
+    assert pcm_sample(out,starts[1]+sr//2)==[round(1000*coefficient),round(2000*coefficient)]
 
 
 def test_overlap_render_timeline_and_seams_follow_actual_mix_and_eof(tmp_path,monkeypatch):

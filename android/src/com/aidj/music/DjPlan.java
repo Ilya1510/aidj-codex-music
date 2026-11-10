@@ -24,7 +24,9 @@ final class DjPlan {
     static double fixedEnvelope(JSONObject source,JSONObject entry,long position,long duration,float rate){
         JSONObject c=fixed(source,entry);if(c==null)return 1;
         double start=c.optDouble("start")*1000,end=endsAtSourceEnd(source,entry)&&duration>0?duration:c.optDouble("end")*1000;
-        double fadeIn=c.optDouble("fadeIn")*1000*rate,fadeOut=c.optDouble("fadeOut")*1000*rate;
+        // Reviewed fade budgets describe source samples, just like start/end.
+        // Their wall duration is fade/rate; overlap alone is in wall seconds.
+        double fadeIn=c.optDouble("fadeIn")*1000,fadeOut=c.optDouble("fadeOut")*1000;
         double intro=fadeIn>0?Math.max(0,Math.min(1,(position-start)/fadeIn)):1;
         double tail=fadeOut>0?Math.max(0,Math.min(1,(end-position)/fadeOut)):1;
         return intro*tail;
