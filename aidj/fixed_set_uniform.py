@@ -224,7 +224,7 @@ def _approximate_phase(left, right, observations, target, tolerance):
 
 
 def uniform_program(value, assets, observations, ranges=None, features=None, *, opening_id=None,
-                    target_seconds=5., tolerance_seconds=.25, lookahead=16):
+                    target_seconds=5., tolerance_seconds=.25, lookahead=16, preserve_order=False):
     """Use the selected long-blend style at every boundary, regardless of confidence.
 
     Source cuts and authored ending fades are immutable. Unknown tempo, weak
@@ -235,7 +235,8 @@ def uniform_program(value, assets, observations, ranges=None, features=None, *, 
     if (not isinstance(observations, dict) or features is not None and not isinstance(features, dict) or not _number(target_seconds) or
             not 4.75 <= target_seconds <= 5.25 or not _number(tolerance_seconds) or
             not 0 <= tolerance_seconds <= .25 or target_seconds-tolerance_seconds < 4.75 or
-            target_seconds+tolerance_seconds > 5.25 or type(lookahead) is not int or not 1 <= lookahead <= 64):
+            target_seconds+tolerance_seconds > 5.25 or type(lookahead) is not int or not 1 <= lookahead <= 64 or
+            type(preserve_order) is not bool):
         raise ValueError('UNIFORM_PARAMETERS')
     rows = [dict(row) for row in original['tracks']]
     if any(row['end']-row['start'] < 2*(target_seconds+tolerance_seconds) for row in rows):
@@ -245,7 +246,13 @@ def uniform_program(value, assets, observations, ranges=None, features=None, *, 
                             for role in ('entry', 'exit')} for row in rows}
     tempos = {row['trackId']: {role: _tempo(row, role, fits[row['trackId']][role], observations, assets, features)
                               for role in ('entry', 'exit')} for row in rows}
-    ordered, decisions = _order(rows, assets, tempos, fits, features, opening_id, lookahead)
+    if preserve_order:
+        keys = [artist_keys(assets[r['trackId']]) for r in rows]
+        if any(not k for k in keys) or any(a & b & c for a, b, c in zip(keys, keys[1:], keys[2:])):
+            raise ValueError('UNIFORM_ARTIST_LIMIT_IMPOSSIBLE')
+        ordered, decisions = rows, []
+    else:
+        ordered, decisions = _order(rows, assets, tempos, fits, features, opening_id, lookahead)
     bands = _rates(ordered, tempos)
     pairs = []
     for i, row in enumerate(ordered):

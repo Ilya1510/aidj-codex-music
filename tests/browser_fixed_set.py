@@ -45,6 +45,29 @@ def main():
                 assert not page.get_by_role('button',name='Шафл',exact=True).count()
                 assert not page.get_by_role('button',name='Поставить следующей',exact=True).count()
                 if not native:
+                    # A background DJ1 publication updates the available set,
+                    # while an already-started queue keeps its own cuts/order.
+                    previous_catalog=copy.deepcopy(catalog)
+                    updated=copy.deepcopy(catalog['djSets'][0]);updated['revision']='qa2'
+                    updated['tracks']=updated['tracks'][1:]+updated['tracks'][:1]
+                    for cue in updated['tracks']:cue.update(start=1.5,end=5.5)
+                    catalog['djSets']=[updated]
+                    page.evaluate("window.dispatchEvent(new Event('online'))")
+                    page.wait_for_timeout(150)
+                    assert page.locator('#mini-title').inner_text()=='Fixed song 2'
+                    assert page.evaluate('document.querySelector("audio").paused')
+                    assert '1 · 0:01–0:06' in page.locator('main').inner_text()
+                    page.locator('.bottom-nav [data-view="home"]').click();page.locator('.playlist-card').click()
+                    page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 0"&&document.querySelector("audio").currentTime>=1.5')
+                    page.locator('#mini-play').click()
+                    catalog.clear();catalog.update(previous_catalog)
+                    page.evaluate("window.dispatchEvent(new Event('online'))")
+                    page.wait_for_timeout(150)
+                    page.locator('.bottom-nav [data-view="home"]').click();page.locator('.playlist-card').click()
+                    page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused')
+                    page.locator('#mini-play').click()
                     page.reload(wait_until='networkidle');page.locator('.bottom-nav [data-view="queue"]').click();page.wait_for_function("()=>document.querySelector('main').textContent.includes('DJ 1 · фиксированные')")
                     page.locator('#mini-play').click();page.wait_for_function('()=>!document.querySelector("audio").paused')
                     page.evaluate('document.querySelector("audio").currentTime=5.99');page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 0"');page.wait_for_function('()=>document.querySelector("audio").currentTime>=1')

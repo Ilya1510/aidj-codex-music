@@ -96,6 +96,21 @@ def test_serve_resumes_existing_full_campaign_without_touching_other_mac_work(en
     assert db.execute('SELECT state FROM dj_batch_jobs WHERE md5=?',(mac['md5'],)).fetchone()[0]=='running'
 
 
+def test_ready_fixed_set_update_runs_before_unrelated_backfill(env,monkeypatch):
+    settings,db,*_=env;seed(db,2);run=start(db)['runId'];stop=threading.Event();seen=[]
+    def local(settings,db,selected,job,python,ffmpeg,stopped,cpu_threads=1):
+        return {'state':'done',**dispatch(db,{'op':'finish','runId':selected,'md5':job['md5'],
+                    'token':job['token'],'result':{'evidence':evidence()}})}
+    def update(settings,db,python,ffmpeg,stopped):
+        assert db.execute("SELECT count(*) FROM dj_batch_jobs WHERE state='pending'").fetchone()[0]==1
+        seen.append('updated');stopped.set();return True
+    monkeypatch.setattr('aidj.dj_batch.local_job',local)
+    monkeypatch.setattr('aidj.fixed_set_auto.process_next',update)
+    monkeypatch.setattr('aidj.dj_batch.shutil.disk_usage',lambda path:N(free=2*1024**3))
+    serve(settings,'python','ffmpeg',run=run,stopped=stop)
+    assert seen==['updated']
+
+
 def test_launcher_starts_light_controller_with_separate_heavy_interpreter(monkeypatch):
     from aidj import dj_launcher
     called=[]

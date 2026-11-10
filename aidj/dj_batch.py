@@ -407,6 +407,8 @@ def serve(settings,analysis_python,ffmpeg,run=None,once=False,stopped=None,pause
                     if not stopped.is_set():
                         from .loudness import process_next
                         if process_next(settings,db,ffmpeg):continue
+                        from .fixed_set_auto import process_next as update_fixed_set
+                        if update_fixed_set(settings,db,analysis_python,ffmpeg,stopped):continue
                     pause(10);continue
                 outcome=local_job(settings,db,selected,job,analysis_python,ffmpeg,stopped,cpu_threads=cpu_threads)
                 # Logs contain bounded counts, numeric observations and error
@@ -416,6 +418,12 @@ def serve(settings,analysis_python,ffmpeg,run=None,once=False,stopped=None,pause
                 failures=failures+1 if outcome['state']=='failed' else 0
                 if failures>=3:raise BatchError('CONSECUTIVE_FAILURES_REVIEW')
                 if once:break
+                # A newly ready playlist song need not wait for unrelated
+                # library backfill. This still runs serially after its source
+                # analysis and loudness measurement have committed.
+                if outcome['state']=='done' and not stopped.is_set():
+                    from .fixed_set_auto import process_next as update_fixed_set
+                    update_fixed_set(settings,db,analysis_python,ffmpeg,stopped)
         finally:
             db.rollback();recover_local(settings,db);runtime_heartbeat(db,'stopped');db.close()
 

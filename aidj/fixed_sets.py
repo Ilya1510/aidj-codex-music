@@ -101,7 +101,7 @@ def records(db):
     return result
 
 
-def publish(db, value):
+def publish(db, value, *, commit=True):
     assets = {r['id']: dict(r) for r in db.execute('SELECT id,md5,duration FROM web_assets')}
     ranges = {r['track_id']: (r['start'], r['end']) for r in db.execute('SELECT * FROM playback_ranges')}
     clean = validate(value, assets, ranges)
@@ -112,5 +112,5 @@ def publish(db, value):
     if actual != {r['trackId'] for r in clean['tracks']}:
         raise ValueError('FIXED_SET_INCOMPLETE')
     db.execute('INSERT INTO dj_fixed_sets(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload', (clean['id'], json.dumps(clean)))
-    db.commit()
+    if commit:db.commit()
     return clean
