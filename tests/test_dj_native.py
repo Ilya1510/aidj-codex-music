@@ -241,7 +241,15 @@ public class DjServiceProbe {
  a.fireDone();check(s.snapshot().getJSONObject("queue").getString("currentId").equals("e1")&&b.pos==40000,"late old completion cannot skip the first wrapped song");
  s.pause();tick(s);check(!b.playing&&b.gain==0,"wrapped deck still pauses silently");s.onDestroy();
  }
- System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline source_ending_completion fixed_loop");
+ // A graph cycle may have an authored overlap on its closing edge. Rotating
+ // the queue for a future-route shuffle must retain the two live decks.
+ s=new PlaybackService();s.onCreate();MediaPlayer.all.clear();q=queue().put("fixedSet",new JSONObject().put("id","dj1").put("route","graph").put("graphRevision","g1")).put("currentId","e3");
+ for(int j=0;j<3;j++)q.getJSONArray("entries").getJSONObject(j).put("fixed",new JSONObject().put("start",40).put("end",100).put("fadeIn",5).put("fadeOut",.4).put("transitionSeconds",5).put("transitionKind","crossfade").put("rate",1));
+ s.setQueue(q);s.play();a=MediaPlayer.all.get(0);a.firePrepared();tick(s);b=MediaPlayer.all.get(1);b.firePrepared();a.pos=95000;tick(s);check(b.playing&&b.pos==40000,"graph closing overlap starts its first node at the authored five-second boundary");a.pos=97000;b.pos=42000;tick(s);s.pause();
+ JSONObject graphQueue=new JSONObject(s.snapshot().getJSONObject("queue").toString()).put("uiRevision",2);JSONArray oldGraph=graphQueue.getJSONArray("entries");graphQueue.put("entries",new JSONArray().put(oldGraph.getJSONObject(2)).put(oldGraph.getJSONObject(0)).put(oldGraph.getJSONObject(1)));
+ check(s.applyQueue(graphQueue,false)&&!a.released&&!b.released&&!a.playing&&!b.playing&&a.pos==97000&&b.pos==42000&&a.gain==0&&b.gain==0,"paused graph route rotation retains current and incoming decks, positions and silence");
+ s.play();check(a.playing&&b.playing&&b.pos==42000,"graph resume does not restart its already mixed first node");a.pos=100000;b.pos=45000;tick(s);check(a.released&&b.playing&&b.pos==45000&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e1"),"graph wrap promotes exactly once with its full mixed intro and original node rate");a.fireDone();check(b.pos==45000&&s.snapshot().getJSONObject("queue").getString("currentId").equals("e1"),"late graph completion cannot truncate the newly current fragment");s.onDestroy();
+ System.out.println("PROBE_PASSED overlap pause resume skip seek cancel stale full fallback offline source_ending_completion fixed_loop graph_loop");
  }
 }''',
     }

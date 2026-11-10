@@ -189,3 +189,31 @@ def test_native_cli_persists_safe_preparation_error_for_controller(env, monkeypa
     with pytest.raises(SystemExit):auto.main()
     assert get(db, STATUS)['state'] == 'failed'
     assert get(db, STATUS)['error'] == 'AUTO_NO_USABLE_CUT'
+
+
+def test_automatic_playlist_update_rebuilds_graph_at_the_final_new_node_rates(env):
+    settings,db,original=initialized(env);config=get(db,CONFIG);config['graphVersion']=1;put(db,CONFIG,config);db.commit()
+    song(db,3)
+    update(settings,db,snapshot(db,1)['inputHash'],'decoder',prepare=lambda a,b,s,*args:prepared(s))
+    live=json.loads(db.execute('SELECT payload FROM dj_fixed_sets').fetchone()[0])
+    assert live['graph']['baseRevision']==live['revision']!=original['revision']
+    assert set(live['graph']['edges'])=={r['trackId'] for r in live['tracks']}
+    assert all(len(e)==2 for e in live['graph']['edges'].values())
+
+
+def test_reseeding_preserves_graph_maintenance_and_does_not_hide_pending_members(env,tmp_path):
+    import hashlib
+    from aidj.fixed_set_auto import seed
+    settings,db,plan=initialized(env)
+    config=get(db,CONFIG);config['graphVersion']=1;put(db,CONFIG,config);db.commit()
+    work=tmp_path/'seed';work.mkdir();atomic_json(work/'plan.json',plan)
+    manifest={}
+    for row in plan['tracks']:
+        path=work/(row['trackId']+'.json')
+        obs=json.loads(cache_path(settings,{'id':row['trackId']}).read_text())['observations']
+        atomic_json(path,{**obs,'md5':row['md5'],'sourceStart':row['start'],'sourceEnd':row['end'],'status':'complete'})
+        manifest[row['trackId']]={'file':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+    atomic_json(work/'observation-manifest.json',manifest);atomic_json(work/'feature-manifest.json',{})
+    song(db,3,ready=False)
+    seed(settings,db,work)
+    assert get(db,CONFIG)['graphVersion']==1 and get(db,STATUS)['state']=='queued'

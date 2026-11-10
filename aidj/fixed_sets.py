@@ -49,6 +49,9 @@ def validate(value, assets, ranges=None):
     if signature(out['tracks']) != out['revision']:
         raise ValueError('FIXED_SET_REVISION_CHANGED')
     out['duration'] = round(sum((r['end']-r['start'])/r['rate']-r['transitionSeconds'] for r in out['tracks']), 3)
+    if value.get('graph') is not None:
+        from .fixed_set_graph import validate_graph
+        out['graph'] = validate_graph(value['graph'], out)
     return out
 
 
@@ -64,6 +67,7 @@ def revise_boundary(value, correction, assets, ranges=None):
     fit inside that window. No absence-of-ASR claim is inferred here.
     """
     value=validate(value,assets,ranges)
+    value.pop('graph', None)  # A corrected cut needs newly measured edge timing.
     if not isinstance(correction,dict):raise ValueError('FIXED_CORRECTION')
     proof=correction.get('quietWindow')
     if not isinstance(proof,dict):raise ValueError('FIXED_CORRECTION_QUIET')
@@ -93,7 +97,13 @@ def records(db):
     result = []
     for row in db.execute('SELECT payload FROM dj_fixed_sets ORDER BY id'):
         try:
-            value = validate(json.loads(row['payload']), assets, ranges)
+            raw = json.loads(row['payload'])
+            try:value = validate(raw, assets, ranges)
+            except ValueError as error:
+                if not str(error).startswith('FIXED_GRAPH_'):raise
+                # A damaged/stale optional graph cannot remove an otherwise
+                # valid authored set from the library.
+                raw.pop('graph', None);value = validate(raw, assets, ranges)
             playlist = db.execute('SELECT 1 FROM playlists WHERE id=?', (value['playlistId'],)).fetchone()
             if playlist:result.append(value)
         except (ValueError, TypeError, KeyError):

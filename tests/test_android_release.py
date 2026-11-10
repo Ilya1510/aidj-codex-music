@@ -49,9 +49,11 @@ def test_android_shell_allows_every_local_frontend_module_import():
     native=(root/'android/src/com/aidj/music/MainActivity.java').read_text()
     block=native.split('Set<String> allowed=',1)[1].split('if(!allowed.contains',1)[0]
     allowed=set(re.findall(r'"(/[^" ]+)"',block))
+    from aidj.webapp import FILES
     for file in (root/'miniapp').glob('*.mjs'):
         for module in re.findall(r"from ['\"]\./([^'\"]+)['\"]",file.read_text()):
             assert '/'+module in allowed,(file.name,module)
+            assert '/'+module in FILES,(file.name,module)
             assert (root/'miniapp'/module).is_file()
 
 
@@ -80,6 +82,18 @@ def test_rhythm_rates_and_long_attacks_require_native40(monkeypatch):
     assert [s['id'] for s in client_catalog(None,'39')['djSets']]==['old']
     for version in (None,'40','41'):
         assert len(client_catalog(None,version)['djSets'])==4
+
+
+def test_graph_choices_are_only_sent_to_clients_with_graph_controls(monkeypatch):
+    from aidj.webapp import client_catalog
+    import copy
+    value={'tracks':[], 'playlists':[], 'djSets':[{'id':'dj1','tracks':[{'rate':1.,'fadeIn':5.,'transitionSeconds':5.}], 'graph':{'version':1}}]}
+    monkeypatch.setattr('aidj.webapp.catalog',lambda db:copy.deepcopy(value))
+    for version in ('40','41'):
+        sets=client_catalog(None,version)['djSets']
+        assert len(sets)==1 and 'graph' not in sets[0]
+    assert client_catalog(None,'42')['djSets'][0]['graph']=={'version':1}
+    assert client_catalog(None,None)['djSets'][0]['graph']=={'version':1}
 
 
 def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_path,monkeypatch):

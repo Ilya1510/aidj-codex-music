@@ -232,6 +232,7 @@ def uniform_program(value, assets, observations, ranges=None, features=None, *, 
     outcomes while the audible transition remains approximately five seconds.
     """
     original = validate(value, assets, ranges)
+    original.pop('graph', None)  # Any new cuts/order/rates require new edges.
     if (not isinstance(observations, dict) or features is not None and not isinstance(features, dict) or not _number(target_seconds) or
             not 4.75 <= target_seconds <= 5.25 or not _number(tolerance_seconds) or
             not 0 <= tolerance_seconds <= .25 or target_seconds-tolerance_seconds < 4.75 or

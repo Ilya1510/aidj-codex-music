@@ -137,6 +137,9 @@ def seed(settings, db, work):
     """Explicitly enable from the already published, source-pinned release."""
     plan = json.loads((work/'plan.json').read_text())
     config = {'enabled': True, 'version': VERSION, 'playlistId': plan['playlistId']}
+    existing = get(db, CONFIG)
+    if plan.get('graph') or existing.get('playlistId') == plan['playlistId'] and existing.get('graphVersion') == 1:
+        config['graphVersion'] = 1
     snap = snapshot(db, config['playlistId'])
     if snap['baseline'] != plan:raise ValueError('AUTO_SEED_STALE')
     sources = {s['id']: s for s in snap['songs']}
@@ -165,7 +168,8 @@ def seed(settings, db, work):
     if snapshot(db, config['playlistId'])['inputHash'] != snap['inputHash']:
         db.rollback();raise ValueError('AUTO_SEED_STALE')
     put(db, CONFIG, config)
-    put(db, STATUS, {'state': 'complete', 'inputHash': snap['inputHash'], 'revision': plan['revision'],
+    state = 'complete' if set(sources) == {r['trackId'] for r in plan['tracks']} else 'queued'
+    put(db, STATUS, {'state': state, 'inputHash': snap['inputHash'], 'revision': plan['revision'],
                      'tracks': len(plan['tracks']), 'updated': time.time()})
     db.commit()
 
@@ -275,6 +279,7 @@ def update(settings, db, expected, decoder, prepare=None, planner=None):
         rows = [dict(r, transitionSeconds=5. if i<len(rows)-1 else 0.,
                      transitionKind='crossfade' if i<len(rows)-1 else 'clean-cut') for i, r in enumerate(rows)]
         value = {**original, 'tracks': rows, 'revision': signature(rows)}
+        value.pop('graph', None)
         result = planner(value, assets, {k: v['observations'] for k, v in prepared.items()},
                          {s['id']: (s['allowed_start'], s['allowed_end']) for s in snap['songs']},
                          {k: v['features'] for k, v in prepared.items()},
@@ -284,6 +289,12 @@ def update(settings, db, expected, decoder, prepare=None, planner=None):
         if (not artist_limit(plan['tracks'], assets) or len(plan['tracks']) != len(snap['songs']) or
                 any(not 4.75 <= r['transitionSeconds'] <= 5.25 for r in plan['tracks'][:-1])):
             raise ValueError('AUTO_PLAN_INVALID')
+        if config.get('graphVersion') == 1:
+            from .fixed_set_graph import compile_graph
+            graph = compile_graph(plan, assets, {k: v['observations'] for k, v in prepared.items()},
+                                  {k: v['features'] for k, v in prepared.items()}, fits=result['fits'])
+            result['plan'] = {**plan, 'graph': graph['graph']}
+            result['graphAudit'] = graph
     db.execute('BEGIN IMMEDIATE')
     try:
         if get(db, CONFIG) != config or snapshot(db, config['playlistId'])['inputHash'] != expected:
