@@ -24,12 +24,22 @@ from .fixed_set_resolve import read_json, restore_evidence
 from .fixed_set_vocal_review import CachedProbe, _vectors, finite, gain_db, quantile
 from .vocal_probe import MODEL_SHA256, verify_model
 
-VERSION = 2
+VERSION = 3
 PARAMETERS = {'beforeSeconds': .15, 'afterSeconds': .05, 'excerptGuardSeconds': .25,
               'quietP95Dbfs': -43., 'absoluteMaxDbfs': -37., 'suppressedP95Db': -30.,
               'asrMarginSeconds': .1, 'asrPaddingSeconds': .2,
               'asrCoverageMarginSeconds': .3, 'searchRadiusSeconds': 2.}
 EXEMPTIONS = {'physical-source-start', 'manual-range-start', 'owner-approved'}
+ONSET_METHOD = 'vocal-breath-before-new-word'
+ONSET_PARAMETERS = {'preStartSeconds':-.15,'preEndSeconds':-.02,
+                    'postStartSeconds':.025,'postEndSeconds':.35,
+                    'coverageBeforeSeconds':.3,'coverageAfterSeconds':.35,
+                    'excerptGuardSeconds':.25,'wordCrossingMarginSeconds':.02,
+                    'priorWordBreathSeconds':.08,'minimumPrerollSeconds':.1,
+                    'preferredPrerollSeconds':.12,'maximumWordDelaySeconds':.35,
+                    'minimumRiseDb':8.,'quietP95Dbfs':-43.,'absoluteMaxDbfs':-37.,
+                    'suppressedP95Db':-30.,'maximumFadeInSeconds':.08,
+                    'fadeBeforeOnsetSeconds':.03,'minimumFadeInSeconds':.005}
 
 
 def exemption(point, song, owner=()):
@@ -94,6 +104,88 @@ def fingerprint(item, song, owner):
     return hashlib.sha256(json.dumps(values,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
+def check_entry_onset(vocal,point,words,playback_gain_db,source_md5,*,coverage=(),fade_in=.08):
+    """A measured breath BEFORE a new word, separate from the strict quiet tier.
+
+    This is not a phoneme/word detector: all-confidence ASR crossings veto it.
+    Preroll also leaves time for the player's50ms volume tick before the attack.
+    """
+    reject=lambda reason:{'accepted':False,'reason':reason,'method':ONSET_METHOD}
+    if not finite(point) or not finite(playback_gain_db) or not finite(fade_in) or fade_in<.005:
+        return reject('invalid-entry-point')
+    if not isinstance(source_md5,str) or not re.fullmatch('[a-f0-9]{32}',source_md5) or vocal.get('md5')!=source_md5:
+        return reject('entry-source-mismatch')
+    prepared=_vectors(vocal)
+    if prepared is None:return reject('invalid-entry-vocal-evidence')
+    offset,hop,duration,values=prepared
+    a,b=point-.3,point+.35
+    if a<offset+.25-1e-7 or b>offset+duration-.25+1e-7:
+        return reject('incomplete-entry-context')
+    if not covered(coverage,a,b):return reject('entry-asr-unobserved')
+    observed=[]
+    for word in words:
+        if (not isinstance(word,(list,tuple)) or len(word)<3 or
+                not finite(word[0]) or not finite(word[1]) or word[0]>word[1]):
+            return reject('invalid-entry-words')
+        observed.append(word)
+    if any(x<point+.02-1e-7 and y>point-.02+1e-7 for x,y,*_ in observed):
+        return reject('entry-word-crosses-point')
+    previous=[y for x,y,*_ in observed if y<=point-.02+1e-7]
+    if previous and max(previous)>point-.08+1e-7:return reject('entry-prior-word-too-close')
+    upcoming=sorted((w for w in observed if w[0]>=point+.02-1e-7),key=lambda w:w[0])
+    if not upcoming:return reject('entry-new-word-unobserved')
+    next_start=upcoming[0][0]
+    if any(w[2] is not True for w in upcoming if abs(w[0]-next_start)<1e-7):
+        return reject('entry-new-word-not-confident')
+    word_delay=next_start-point
+    if not .1-1e-7<=word_delay<=.35+1e-7:return reject('entry-new-word-preroll')
+    def region(lo,hi):
+        first=max(0,math.floor((lo-offset)/hop+1e-8))
+        last=min(len(values[0]),math.ceil((hi-offset)/hop-1e-8))
+        if first>=last or offset+first*hop>lo+1e-6 or offset+last*hop<hi-1e-6:return None
+        mix,voice,_,ratio=[v[first:last] for v in values]
+        db=lambda value:20*math.log10(max(1e-10,value))+playback_gain_db
+        return {'start':lo,'end':hi,'frameFirst':first,'frameLastExclusive':last,
+                'vocalMaxDbfs':db(max(voice)),'vocalP95Dbfs':db(quantile(voice,.95)),
+                'vocalToMixP95Db':quantile(ratio,.95),'mixMaxDbfs':db(max(mix))}
+    pre=region(point-.15,point-.02);post=region(point+.025,point+.35)
+    if pre is None or post is None:return reject('incomplete-entry-frames')
+    criterion=('absolute-quiet' if pre['vocalMaxDbfs']<=-37 and pre['vocalP95Dbfs']<=-43 else
+               'suppressed-vocal' if pre['vocalMaxDbfs']<=-37 and pre['vocalToMixP95Db']<=-30 else None)
+    if not criterion:return reject('entry-prebreath-not-quiet')
+    rise=post['vocalP95Dbfs']-pre['vocalP95Dbfs']
+    if rise<8-1e-7:return reject('entry-new-voice-rise-too-small')
+    # Every touching frame counts, including one brief early voice frame. Never
+    # locate onset using only a high post-window percentile.
+    threshold=pre['vocalP95Dbfs']+8
+    first=max(0,math.floor((point-.02-offset)/hop+1e-8))
+    last=min(len(values[1]),math.ceil((point+.35-offset)/hop-1e-8))
+    rising=[i for i in range(first,last) if
+            20*math.log10(max(1e-10,values[1][i]))+playback_gain_db>=threshold]
+    if not rising:return reject('entry-new-voice-unobserved')
+    rising_time=offset+rising[0]*hop
+    delay=rising_time-point
+    if delay<.1-1e-7:return reject('entry-new-voice-preroll')
+    cap=min(.08,delay-.03,word_delay-.03)
+    chosen=round(min(fade_in,cap),4)
+    if chosen>cap+1e-10:chosen=round(chosen-.0001,4)
+    if chosen<.005:return reject('entry-fade-in-cannot-finish-before-word')
+    return {'accepted':True,'reason':'accepted','method':ONSET_METHOD,'criterion':criterion,
+            'parameters':dict(ONSET_PARAMETERS),'modelSha256':MODEL_SHA256,
+            'sourceMD5':source_md5,'sourceStart':point,'proofStart':point-.15,'proofEnd':point+.35,
+            'sourceOffsetSeconds':offset,'sourceEndSeconds':offset+duration,
+            'playbackGainDb':playback_gain_db,'pre':pre,'post':post,'vocalRiseDb':rise,
+            'risingVoiceTime':rising_time,'risingVoiceDelaySeconds':delay,
+            'risingVoiceFrame':rising[0],'risingThresholdDbfs':threshold,
+            'nextWordStart':next_start,'nextWordEnd':upcoming[0][1],
+            'nextWordConfident':True,'nextWordDelaySeconds':word_delay,
+            'priorWordEnd':max(previous) if previous else None,
+            'fadeInCapSeconds':cap,'fadeInSeconds':chosen,
+            'asrCoverageStart':a,'asrCoverageEnd':b,'asrCoverageComplete':True,
+            'asrWordCrossingClear':True,'verifiedWordBoundary':False,
+            'naturalSilenceClaimed':False,'lowSpeechProbabilityUsed':False}
+
+
 def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(), rejected=(), existing_evidence=()):
     result = copy.deepcopy(item); row = result.get('row')
     if not row or item.get('md5') != song.get('md5'):
@@ -126,6 +218,20 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
                 for vector in vectors:
                     checked = check_entry(vector,t,words,gain_db(song),song['md5'],coverage=coverage)
                     if t == original and checked['reason'] != 'incomplete-entry-context':attempts.append(checked)
+                    if not checked['accepted']:
+                        onset=check_entry_onset(vector,t,words,gain_db(song),song['md5'],
+                            coverage=coverage,fade_in=row.get('fadeIn',.08))
+                        if onset['accepted']:
+                            # When possible keep120ms of measured preroll, not
+                            # merely100ms, without escaping source/span/vetoes.
+                            delay=min(onset['risingVoiceDelaySeconds'],onset['nextWordDelaySeconds'])
+                            refined=round(t-max(0.,.12-delay),4)
+                            if refined!=t and abs(refined-original)<=2 and valid(refined):
+                                longer=check_entry_onset(vector,refined,words,gain_db(song),song['md5'],
+                                    coverage=coverage,fade_in=row.get('fadeIn',.08))
+                                if longer['accepted']:onset=longer
+                            checked=onset
+                        elif t==original:attempts.append(onset)
                     if checked['accepted']:
                         selected,chosen_vector = checked,vector
                         return True
@@ -141,10 +247,13 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
                                   'sourceMD5':song['md5'],'reason':'no-observed-vocal-free-entry-breath'})
     else:
         t = selected['sourceStart']; changed = abs(t-original) > .0001
+        previous_fade=row.get('fadeIn',0)
+        if selected['method']==ONSET_METHOD:row['fadeIn']=selected['fadeInSeconds']
+        fade_changed=abs(row.get('fadeIn',0)-previous_fade)>1e-7
         result.pop('entryReviewError',None)
-        if changed:
+        if changed or fade_changed:
             row['start'] = t
-            result['entry'] = {**result.get('entry',{}),'time':t,'kind':'vocal-free-entry-breath',
+            result['entry'] = {**result.get('entry',{}),'time':t,'kind':selected['method'],
                                'originalTime':original}
             # The measured outgoing audio remains, but its row fingerprint is
             # stale. The final stereo verifier must explicitly renew it.
@@ -184,16 +293,25 @@ def selection_error(item, song, *, owner=(), evidence_folder):
     if proof.get('method') in EXEMPTIONS:
         return None if (exemption(row['start'],song,owner) == proof['method'] and
                         proof.get('acousticProofClaimed') is False) else 'entry-exemption-invalid'
-    if proof.get('method') != 'vocal-free-entry-breath' or proof.get('parameters') != PARAMETERS:
+    if proof.get('method') not in ('vocal-free-entry-breath',ONSET_METHOD):
         return 'entry-proof-method'
+    expected_parameters=ONSET_PARAMETERS if proof.get('method')==ONSET_METHOD else PARAMETERS
+    if proof.get('parameters')!=expected_parameters:return 'entry-proof-method'
     key = proof.get('cacheKey')
     if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):return 'entry-proof-key'
     try:
         raw = read_json(Path(evidence_folder)/(key+'.json'))
     except (OSError,ValueError,RuntimeError):return 'entry-proof-unavailable'
     if raw.get('cacheKey') != key:return 'entry-proof-key'
-    check = check_entry(raw,row['start'],item.get('observedWords',[]),gain_db(song),song['md5'],
-                        coverage=item.get('observedCoverage',[]))
+    if proof['method']==ONSET_METHOD:
+        check=check_entry_onset(raw,row['start'],item.get('observedWords',[]),gain_db(song),song['md5'],
+            coverage=item.get('observedCoverage',[]),fade_in=row.get('fadeIn'))
+        if not check['accepted']:return 'entry-proof-'+check['reason']
+        expected={**check,'cacheKey':key}
+        if proof!=expected or row.get('fadeIn')!=check['fadeInSeconds']:return 'entry-proof-mismatch'
+        return None
+    check=check_entry(raw,row['start'],item.get('observedWords',[]),gain_db(song),song['md5'],
+        coverage=item.get('observedCoverage',[]))
     if not check['accepted']:return 'entry-proof-'+check['reason']
     for field in ('modelSha256','sourceMD5','sourceStart','proofStart','proofEnd','frameFirst','frameLastExclusive',
                   'asrCoverageStart','asrCoverageEnd','asrCoverageComplete'):

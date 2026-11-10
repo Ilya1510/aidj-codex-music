@@ -163,3 +163,101 @@ def test_final_gate_rejects_removed_coverage_and_replays_the_observation_bounds(
     # Even a recomputed fingerprint cannot launder an unobserved ASR window.
     changed['entryReviewInputHash']=review.fingerprint(changed,song,[])
     assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-entry-asr-unobserved'
+
+
+def onset_vectors(at=40.12,pre=.0005,post=.04):
+    return vectors(voice=[pre if 37.3+i*.01<at-1e-7 else post for i in range(540)])
+
+
+def test_asymmetric_entry_allows_new_word_after_measured_breath_without_symmetric_future_veto():
+    v=onset_vectors();words=[[40.16,40.7,True]]
+    assert not review.check_entry(v,40,words,-3.098,MD5,coverage=COVERAGE)['accepted']
+    check=review.check_entry_onset(v,40,words,-3.098,MD5,coverage=COVERAGE,fade_in=.1)
+    assert check['accepted'] and check['method']=='vocal-breath-before-new-word'
+    assert check['risingVoiceDelaySeconds']==pytest.approx(.12)
+    assert check['nextWordDelaySeconds']==pytest.approx(.16)
+    assert check['fadeInSeconds']==.08 and check['fadeInCapSeconds']==.08
+    assert check['vocalRiseDb']>30 and check['pre']['vocalMaxDbfs']<-43
+    assert not check['verifiedWordBoundary'] and not check['lowSpeechProbabilityUsed']
+
+
+@pytest.mark.parametrize('extra,reason',[
+    ([[39.9,40.08,True]],'entry-word-crosses-point'),
+    ([[39.99,40.01,False]],'entry-word-crosses-point'),
+    ([[39.8,39.95,True]],'entry-prior-word-too-close'),
+    ([[40.1,40.13,False]],'entry-new-word-not-confident')])
+def test_onset_tier_never_overrides_crossing_unknown_or_recent_prior_words(extra,reason):
+    check=review.check_entry_onset(onset_vectors(),40,extra+[[40.16,40.7,True]],
+        -3.098,MD5,coverage=COVERAGE)
+    assert not check['accepted'] and check['reason']==reason
+
+
+def test_onset_tier_rejects_low_rise_loud_prevoice_and_one_early_voice_frame():
+    words=[[40.16,40.7,True]]
+    for v,reason in [(onset_vectors(pre=.0005,post=.0008),'entry-new-voice-rise-too-small'),
+                     (onset_vectors(pre=.025,post=.041),'entry-prebreath-not-quiet')]:
+        checked=review.check_entry_onset(v,40,words,-3.098,MD5,coverage=COVERAGE)
+        assert not checked['accepted'] and checked['reason']==reason
+    v=onset_vectors();v['vocalRms'][269]=.04
+    v['vocalToMixDb'][269]=20*math.log10(.04/.3)
+    checked=review.check_entry_onset(v,40,words,-3.098,MD5,coverage=COVERAGE)
+    assert checked['reason']=='entry-new-voice-preroll'
+
+
+def test_onset_tier_requires_real_coverage_and_native_tick_preroll():
+    v=onset_vectors()
+    for words,cov,reason in [([[40.052,40.7,True]],COVERAGE,'entry-new-word-preroll'),
+                             ([[40.16,40.7,True]],[[39.7,40.3]],'entry-asr-unobserved'),
+                             ([],COVERAGE,'entry-new-word-unobserved')]:
+        checked=review.check_entry_onset(v,40,words,-3.098,MD5,coverage=cov)
+        assert not checked['accepted'] and checked['reason']==reason
+    assert review.check_entry_onset(onset_vectors(at=40.09),40,[[40.16,40.7,True]],
+        -3.098,MD5,coverage=COVERAGE)['reason']=='entry-new-voice-preroll'
+
+
+def test_onset_fade_cap_finishes_before_actual_voice_and_asr_word():
+    checked=review.check_entry_onset(onset_vectors(at=40.1),40,[[40.105,40.7,True]],
+        -3.098,MD5,coverage=COVERAGE,fade_in=.2)
+    assert checked['accepted'] and checked['fadeInSeconds']==pytest.approx(.07)
+    assert checked['fadeInSeconds']<=checked['risingVoiceDelaySeconds']-.03+1e-9
+    assert checked['fadeInSeconds']<=checked['nextWordDelaySeconds']-.03+1e-9
+
+
+def test_entry_search_prefers_longer_preroll_and_discards_stereo_for_fade_only_change(tmp_path):
+    item,song=fixtures();item['stereoEvidence']={'rowStart':40};item['stereoVersion']=1
+    item['exit']['stereoVerified']=True
+    v=onset_vectors();words=[[40.16,40.7,True]]
+    result=review.review_checkpoint(item,song,words,lambda *a:pytest.fail('cached'),
+        coverage=COVERAGE,existing_evidence=[v])
+    assert result['row']['start']==40 and result['row']['fadeIn']==.08
+    assert result['entryProof']['method']==review.ONSET_METHOD
+    assert result['entryReviewVersion']==3 and 'stereoEvidence' not in result
+    assert 'stereoVerified' not in result['exit']
+    path=tmp_path/('a'*64+'.json');path.write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path) is None
+    # Exactly100ms can move20ms earlier when the same observed breath supports it.
+    result2=review.review_checkpoint(item,song,[[40.14,40.7,True]],lambda *a:None,
+        coverage=COVERAGE,existing_evidence=[onset_vectors(at=40.1)])
+    assert result2['row']['start']==pytest.approx(39.98)
+    assert result2['entryProof']['risingVoiceDelaySeconds']==pytest.approx(.12)
+
+
+def test_onset_final_gate_replays_all_metrics_fade_coverage_and_current_gain(tmp_path):
+    item,song=fixtures();v=onset_vectors();words=[[40.16,40.7,True]]
+    result=review.review_checkpoint(item,song,words,lambda *a:v,coverage=COVERAGE)
+    path=tmp_path/('a'*64+'.json');path.write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path) is None
+    changed=copy.deepcopy(result);changed['entryProof']['vocalRiseDb']+=.1
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-mismatch'
+    changed=copy.deepcopy(result);changed['row']['fadeIn']=.1
+    changed['entryReviewInputHash']=review.fingerprint(changed,song,[])
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-mismatch'
+    louder={**song,'lufs':-25.}
+    changed=copy.deepcopy(result);changed['entryReviewInputHash']=review.fingerprint(changed,louder,[])
+    assert review.selection_error(changed,louder,evidence_folder=tmp_path)=='entry-proof-mismatch'
+    changed=copy.deepcopy(result);changed['observedCoverage']=[[0,40.3]]
+    changed['entryReviewInputHash']=review.fingerprint(changed,song,[])
+    assert review.selection_error(changed,song,evidence_folder=tmp_path)=='entry-proof-entry-asr-unobserved'
+    v['vocalRms'][269]=.04;v['vocalToMixDb'][269]=20*math.log10(.04/.3)
+    path.write_text(json.dumps(v))
+    assert review.selection_error(result,song,evidence_folder=tmp_path)=='entry-proof-entry-new-voice-preroll'
