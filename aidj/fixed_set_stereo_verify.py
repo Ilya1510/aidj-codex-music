@@ -74,7 +74,8 @@ def proof_hash(snapshot):
 
 def needs_verification(item, retry=False):
     return item.get('exit', {}).get('method') in PHYSICAL and (
-        item.get('status') == 'ready' or bool(retry and item.get('stereoEvidence')))
+        item.get('status') == 'ready' or bool(item.get('entryReviewOnly')) or
+        bool(retry and item.get('stereoEvidence')))
 
 
 def verify(item, song, evidence, rms, decoded_duration):
@@ -371,6 +372,10 @@ def run(settings, work, decoder, limit=None, retry=False):
                 error = selection_error(result)
                 if error:
                     result.update(status='needs-review', stereoError='STEREO_PROOF_'+error)
+            if not result.get('stereoError') and not result.get('entryProof',{}).get('accepted'):
+                # Outgoing stereo verification cannot certify an incoming
+                # word boundary, including a newly chosen replacement cut.
+                result.update(status='needs-review',entryReviewOnly=True,entryReviewStatus='needs-review')
             result['stereoVersion'] = VERSION
             atomic_json(target, result); count += 1
             print('STEREO_VERIFIED', position, result['status'], old['trackId'],

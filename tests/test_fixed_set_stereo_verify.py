@@ -100,6 +100,15 @@ def test_vocal_stem_methods_are_skipped_instead_of_gaining_fake_physical_proofs(
         assert not needs_verification(item)
     item['exit']['method'] = 'strict-quiet'; assert needs_verification(item)
     item['status'] = 'needs-review'; assert not needs_verification(item)
+    item['entryReviewOnly'] = True
+    assert needs_verification(item)
+
+
+def test_outgoing_stereo_proof_can_be_saved_without_certifying_a_pending_incoming_entry():
+    item,song,evidence,rms=fixture();item.update(status='needs-review',entryReviewOnly=True)
+    result=attach(item,verify(item,song,evidence,rms,80))
+    assert result['stereoEvidence']['accepted']
+    assert result['status']=='needs-review' and result['entryReviewOnly']
 
 
 def test_unknown_ordinary_quiet_music_is_not_certified_from_missing_coverage():

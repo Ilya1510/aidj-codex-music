@@ -270,6 +270,8 @@ def saved_selection_error(item):
 
 def preserve_existing_exit(item):
     """An entry-only failure never authorizes replacing a confirmed exit."""
+    if item.get('stereoError') or item.get('stereoEvidence',{}).get('accepted') is False:
+        return False
     return (item.get('exit',{}).get('method') not in METHODS | {'reobserved-instrumental-fade','instrumental-fade'} and
             exit_error({**item,'status':'ready'}) is None)
 

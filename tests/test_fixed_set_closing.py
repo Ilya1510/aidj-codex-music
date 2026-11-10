@@ -198,6 +198,14 @@ def test_asr_only_instrumental_exit_still_requires_model_review_or_source_comple
         assert not closing.preserve_existing_exit({'exit':{'method':method}})
 
 
+def test_stereo_rejection_invalidates_an_otherwise_structurally_valid_mono_exit(monkeypatch):
+    monkeypatch.setattr(closing,'exit_error',lambda item:None)
+    item={'exit':{'method':'strict-quiet'}}
+    assert closing.preserve_existing_exit(item)
+    assert not closing.preserve_existing_exit({**item,'stereoError':'music-not-quiet-in-stereo'})
+    assert not closing.preserve_existing_exit({**item,'stereoEvidence':{'accepted':False}})
+
+
 def test_current_clip_lineage_is_derived_from_clip_record_not_display_title():
     old,source,previous,evidence,timing,tail,lineage=clip_fixture()
     db=sqlite3.connect(':memory:');db.execute('create table web_assets(id,track_key,duration,md5)')
