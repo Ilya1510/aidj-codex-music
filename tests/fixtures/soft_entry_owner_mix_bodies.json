@@ -1,0 +1,67 @@
+{
+  "description": "Real native owner GOOD200ms body probabilities. Unit tests place these unchanged bodies in an explicitly synthetic source/context scaffold; these compact traces alone are not native whole-entry proofs or a quality guarantee.",
+  "cases": [
+    {
+      "title": "Mr. Saxobeat",
+      "ownerTrackId": "9c59feb9f458aeb308bd2223",
+      "sourceMD5": "bbdd0284964fddfc8971ce371f618003",
+      "ownerPoint": 8.048,
+      "ownerLabel": 1,
+      "originalNativeNumericCacheSHA256": "09b75349c544706fc1c4a7d1ed717daba0ccde42a45d4355cf3f57a531ff723e",
+      "bodyIntervalRelativeSeconds": [
+        -0.15,
+        0.05
+      ],
+      "leftSpeechProbability": [
+        0.009657621383666992,
+        0.008654773235321045,
+        0.03352397680282593,
+        0.013161808252334595,
+        0.02377256751060486,
+        0.03741878271102905,
+        0.027678489685058594
+      ],
+      "rightSpeechProbability": [
+        0.003359079360961914,
+        0.003381103277206421,
+        0.030379384756088257,
+        0.004609555006027222,
+        0.0038510560989379883,
+        0.01842758059501648,
+        0.03220570087432861
+      ],
+      "actualBothChannelsMax": 0.03741878271102905
+    },
+    {
+      "title": "Pump It Up",
+      "ownerTrackId": "513a991c694a115518125a53",
+      "sourceMD5": "26e61eb17cdbff949b03a7e06fa10e64",
+      "ownerPoint": 78.328,
+      "ownerLabel": 1,
+      "originalNativeNumericCacheSHA256": "c419ee0553d03262e676d81b26e5fae9869961c4048b8e187573a5fa145f4428",
+      "bodyIntervalRelativeSeconds": [
+        -0.15,
+        0.05
+      ],
+      "leftSpeechProbability": [
+        0.0006376802921295166,
+        0.0003878176212310791,
+        0.0005172193050384521,
+        0.0007568597793579102,
+        0.0008627176284790039,
+        0.007814079523086548,
+        0.009886175394058228
+      ],
+      "rightSpeechProbability": [
+        0.0009670257568359375,
+        0.0006171464920043945,
+        0.000559687614440918,
+        0.0004191398620605469,
+        0.0016569793224334717,
+        0.014438360929489136,
+        0.009352713823318481
+      ],
+      "actualBothChannelsMax": 0.014438360929489136
+    }
+  ]
+}

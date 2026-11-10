@@ -5,6 +5,10 @@ stereo MIX speech probabilities. Every known ASR span remains a veto, including
 low-confidence spans. This module neither runs models nor selects/publishes a
 cut. Flat low model output is explicitly an approximate observation, never a
 claim that a word boundary or absence of singing has been proved.
+
+Version 1 remains the default with a .01 MIX cap. Explicit version 2 uses .05
+with every other condition unchanged. Its small owner-label calibration is
+descriptive evidence, not a guarantee about future boundaries or singing.
 """
 import hashlib
 import json
@@ -37,6 +41,19 @@ PARAMETERS = {
     'maximumFadeInSeconds': .05, 'minimumFadeInSeconds': .005,
     'finishBeforeWordOrRiseSeconds': .03, 'negativeOwnerRadiusSeconds': .35,
 }
+VERSION_V2 = 2
+PARAMETERS_V2 = {**PARAMETERS, 'mixSpeechMax': .05}
+
+
+def _policy(version):
+    """Only two named contracts exist; no caller-supplied runtime threshold."""
+    if type(version) is not int:
+        return None
+    if version == VERSION:
+        return PARAMETERS
+    if version == VERSION_V2:
+        return PARAMETERS_V2
+    return None
 
 
 def digest(value):
@@ -122,8 +139,23 @@ def _validated_mix(mix, song):
 
 
 def check_entry(vocal, mix, point, song, words, coverage, *, rejected=(), fade_in=.05):
+    """Default version 1; existing proofs and callers retain the .01 MIX cap."""
+    return _check_entry(vocal, mix, point, song, words, coverage,
+        rejected=rejected, fade_in=fade_in, version=VERSION)
+
+
+def check_entry_v2(vocal, mix, point, song, words, coverage, *, rejected=(), fade_in=.05):
+    """Explicit version 2: .05 MIX cap, all UVR/ASR/preroll guards unchanged."""
+    return _check_entry(vocal, mix, point, song, words, coverage,
+        rejected=rejected, fade_in=fade_in, version=VERSION_V2)
+
+
+def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in, version):
     """Reconstruct both raw proofs; do not infer text, erase words or run audio."""
     reject = lambda reason: {'accepted': False, 'method': METHOD, 'reason': reason}
+    parameters = _policy(version)
+    if parameters is None:
+        return reject('unknown-soft-policy-version')
     if (not _source_valid(song) or not finite(point) or
             not song['lo'] <= point < song['hi'] or
             not finite(fade_in) or fade_in < .005):
@@ -204,10 +236,10 @@ def check_entry(vocal, mix, point, song, words, coverage, *, rejected=(), fade_i
         return reject('incomplete-real-mix-frames')
     left = max(speech['leftSpeechProbability'][i] for i in indexes)
     right = max(speech['rightSpeechProbability'][i] for i in indexes)
-    if max(left, right) > .01:
+    if max(left, right) > parameters['mixSpeechMax']:
         return reject('raw-mix-speech-at-entry')
-    return {'accepted': True, 'method': METHOD, 'reason': 'accepted', 'version': VERSION,
-        'parameters': dict(PARAMETERS), 'sourceMD5': song['md5'], 'sourceStart': point,
+    return {'accepted': True, 'method': METHOD, 'reason': 'accepted', 'version': version,
+        'parameters': dict(parameters), 'sourceMD5': song['md5'], 'sourceStart': point,
         'sourceSignature': source_signature(song), 'observationsHash': digest([words, coverage]),
         'negativeOwnerInputHash': digest(list(rejected)), 'proofStart': a, 'proofEnd': b,
         'sourceOffsetSeconds': offset, 'sourceEndSeconds': offset+duration,
@@ -234,7 +266,7 @@ def check_entry(vocal, mix, point, song, words, coverage, *, rejected=(), fade_i
         'mixSourceEndSeconds': speech['sourceEndSeconds'],
         'mixRequestedStartSeconds': mix_begin, 'mixRequestedEndSeconds': mix_end,
         'mixPointLeadSeconds': point-mix_begin, 'mixPointTrailSeconds': mix_end-point,
-        'mixWindowPolicy': PARAMETERS['mixWindowPolicy'],
+        'mixWindowPolicy': parameters['mixWindowPolicy'],
         'mixNormalizedInputSHA256': mix['normalizedInputSHA256'],
         'mixPCMInputSHA256': mix['decode']['pcmSHA256'],
         'asrCoverageStart': point-.3, 'asrCoverageEnd': point+.35,
@@ -260,6 +292,9 @@ def selection_error(item, song, *, owner=(), evidence_folder, rejected=None):
         if (item.get('entryReviewVersion') != ENTRY_VERSION or proof.get('method') != METHOD or
                 not proof.get('accepted') or item.get('entryReviewInputHash') != fingerprint(item, song, owner)):
             return 'soft-entry-input-changed'
+        parameters = _policy(proof.get('version'))
+        if parameters is None or proof.get('parameters') != parameters:
+            return 'soft-entry-policy-version-or-parameters'
         if row.get('trackId') != song['id'] or row.get('md5') != song['md5'] or item.get('md5') != song['md5']:
             return 'soft-entry-source-mismatch'
         if rejected is None:
@@ -274,9 +309,9 @@ def selection_error(item, song, *, owner=(), evidence_folder, rejected=None):
         mix = read_json(folder.parent/'mix-vad-probes'/(mixkey+'.json'))
         if raw.get('cacheKey') != key or mix.get('cacheKey') != mixkey:
             return 'soft-entry-cache-key'
-        check = check_entry(raw, mix, row.get('start'), song,
+        check = _check_entry(raw, mix, row.get('start'), song,
             item.get('observedWords', []), item.get('observedCoverage', []),
-            rejected=rejected, fade_in=row.get('fadeIn'))
+            rejected=rejected, fade_in=row.get('fadeIn'), version=proof['version'])
         if not check['accepted']:
             return 'soft-entry-'+check['reason']
         if proof != {**check, 'cacheKey': key, 'mixCacheKey': mixkey}:
