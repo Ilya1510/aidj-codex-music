@@ -177,8 +177,17 @@ public final class PlaybackService extends Service {
             double inSeconds=fixed.optDouble("fadeIn"),outSeconds=fixed.optDouble("fadeOut"),start=PlaybackRange.start(current(),length),end=DjPlan.endsAtSourceEnd(source(entry()),entry())&&length>0?length:PlaybackRange.end(current(),length);
             double intro=inSeconds>0?Math.max(0,Math.min(1,(position()-start)/(inSeconds*1000*speed))):1;
             double tail=outSeconds>0?Math.max(0,Math.min(1,(end-position())/(outSeconds*1000*speed))):1;
-            gain=(float)(.70*intro*(mixing?Math.cos(progress*Math.PI/2):tail))*duckGain;
-            if(mixing&&incomingReady&&incoming!=null){float g=(float)(.70*Math.sin(progress*Math.PI/2))*duckGain;try{float actual=incomingLevel==null?g:incomingLevel.gain(g);incoming.setVolume(actual,actual);}catch(Exception ignored){}}
+            // Blending may attenuate earlier, but never undo the authored
+            // final fade. The incoming source has its own slow attack, which
+            // continues at the same source position when it becomes current.
+            gain=(float)(.70*intro*Math.min(tail,mixing?Math.cos(progress*Math.PI/2):1))*duckGain;
+            if(mixing&&incomingReady&&incoming!=null){
+                try{
+                    double envelope=DjPlan.fixedEnvelope(source(nextEntry()),nextEntry(),incoming.getCurrentPosition(),incoming.getDuration(),incomingSpeed);
+                    float g=(float)(.70*Math.sin(progress*Math.PI/2)*envelope)*duckGain;
+                    float actual=incomingLevel==null?g:incomingLevel.gain(g);incoming.setVolume(actual,actual);
+                }catch(Exception ignored){}
+            }
         }else if(dj()){
             double progress=mixing?(double)(position()-mixStart)/mixSpan:0;
             gain=(mixing?DjPlan.gain(progress,false,(double)mixFade/mixSpan)*Math.min(1,mixOutStart/.70f):.70f)*duckGain;
@@ -270,7 +279,7 @@ public final class PlaybackService extends Service {
         if(waitingNext){if(incomingReady&&wantPlay){promote();play();}return;}
         boolean sourceEnding=dj()&&DjPlan.endsAtSourceEnd(source(entry()),entry());
         if(dj()&&isPlaying()){
-            long end=PlaybackRange.end(current(),duration());
+            long end=sourceEnding?duration():PlaybackRange.end(current(),duration());
             if(audition()&&entry().optBoolean("auditionIntro")&&position()>=PlaybackRange.start(current(),duration())+(long)(10000*speed)&&end-position()>15000*speed){
                 try{entry().put("auditionIntro",false);}catch(Exception ignored){}previewSeek();return;
             }

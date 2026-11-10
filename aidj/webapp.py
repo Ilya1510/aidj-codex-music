@@ -33,7 +33,7 @@ from .review_web import request as review_request
 PORT=18782
 STATIC=Path(__file__).resolve().parent.parent/'miniapp'
 FILES={'/':'index.html','/index.html':'index.html','/app.css':'app.css','/app.mjs':'app.mjs',
-       '/native.mjs':'native.mjs','/personal-playlists.mjs':'personal-playlists.mjs','/web-remix.mjs':'web-remix.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/dj.mjs':'dj.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
+       '/native.mjs':'native.mjs','/personal-playlists.mjs':'personal-playlists.mjs','/web-remix.mjs':'web-remix.mjs','/fixed-blend.mjs':'fixed-blend.mjs','/playlist-changes.mjs':'playlist-changes.mjs','/transfer.mjs':'transfer.mjs','/segments.mjs':'segments.mjs','/playback.mjs':'playback.mjs','/dj.mjs':'dj.mjs','/ratings.mjs':'ratings.mjs','/reorder.mjs':'reorder.mjs','/android-connect':'android-connect.html','/android-connect.mjs':'android-connect.mjs',
        '/player.mjs':'player.mjs','/storage.mjs':'storage.mjs','/sw.js':'sw.js',
        '/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/telegram-web-app.js':'telegram-web-app.js'}
 STREAMS=threading.BoundedSemaphore(6)
@@ -52,6 +52,11 @@ def client_catalog(db,version,principal=None):
     if version and (not re.fullmatch(r'[0-9]{1,6}',version) or int(version)<27):
         value['playlists']=[p for p in value['playlists'] if not p.get('combined')]
         value['combinedSupported']=False
+    # Old embedded shells accept fixed cues but ignore the incoming envelope.
+    # Serve a blended set only to players that preserve both deck envelopes.
+    if version and (not re.fullmatch(r'[0-9]{1,6}', version) or int(version)<39) and 'djSets' in value:
+        value['djSets'] = [s for s in value['djSets']
+                           if not any(r.get('transitionSeconds', 0)>0 for r in s.get('tracks', []))]
     modern=bool(re.fullmatch(r'[0-9]{1,6}',version or '')) and int(version)>=20
     hidden=('djV3','djV2','dj') if modern else ('djV4',)
     for track in value['tracks']:

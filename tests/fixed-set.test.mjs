@@ -22,7 +22,7 @@ test('fixed plans fail validation instead of substituting full songs or ignoring
   assert.throws(()=>fixedSetEntries({...set,tracks:[]},tracks));
   assert.equal(fixedCue(tracks.get('a'),{fixed:{...cue,transitionSeconds:1,transitionKind:'crossfade'}}).transitionSeconds,1);
 });
-test('only validated fixed clean cuts at the uncropped source ending wait for the actual decoder',()=>{
+test('only validated fixed cues at the uncropped source ending wait for the actual decoder',()=>{
   const track={duration:240,md5:'a'},entry={fixed:{...cue,end:240,fadeOut:0}};
   assert.equal(endsAtSourceEnd(track,entry),true);
   assert.equal(endsAtSourceEnd({...track,rangeStart:20},entry),true);
@@ -30,8 +30,8 @@ test('only validated fixed clean cuts at the uncropped source ending wait for th
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,end:239.998}}),false);
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,end:239.9995}}),true);
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,fadeOut:4}}),true);
-  assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,transitionKind:'crossfade',transitionSeconds:1}}),false);
-  assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,transitionKind:'crossfade'}}),false);
+  assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,transitionKind:'crossfade',transitionSeconds:1}}),true);
+  assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,transitionKind:'crossfade'}}),true);
   assert.equal(endsAtSourceEnd(track,{fixed:{...entry.fixed,sourceMd5:'changed'}}),false);
   assert.equal(endsAtSourceEnd(track,{dj:{...entry.fixed}}),false);
 });

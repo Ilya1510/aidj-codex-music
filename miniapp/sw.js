@@ -1,5 +1,5 @@
-const CACHE = 'aidj-shell-v38';
-const SHELL = ['/', '/index.html', '/app.css', '/app.mjs', '/native.mjs', '/personal-playlists.mjs', '/web-remix.mjs', '/playlist-changes.mjs', '/transfer.mjs', '/segments.mjs', '/playback.mjs', '/dj.mjs', '/ratings.mjs', '/reorder.mjs', '/player.mjs', '/storage.mjs', '/icon.svg', '/manifest.webmanifest', '/telegram-web-app.js'];
+const CACHE = 'aidj-shell-v39';
+const SHELL = ['/', '/index.html', '/app.css', '/app.mjs', '/native.mjs', '/personal-playlists.mjs', '/web-remix.mjs', '/fixed-blend.mjs', '/playlist-changes.mjs', '/transfer.mjs', '/segments.mjs', '/playback.mjs', '/dj.mjs', '/ratings.mjs', '/reorder.mjs', '/player.mjs', '/storage.mjs', '/icon.svg', '/manifest.webmanifest', '/telegram-web-app.js'];
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))));
 self.addEventListener('activate', event => event.waitUntil((async () => {
   for (const key of await caches.keys()) if (key.startsWith('aidj-shell-') && key !== CACHE) await caches.delete(key);

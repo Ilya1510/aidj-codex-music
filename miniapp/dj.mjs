@@ -66,7 +66,7 @@ export function fixedCue(track,entry){
 }
 export function endsAtSourceEnd(track,entry){
   const cue=fixedCue(track,entry);
-  return !!(cue&&cue.transitionKind==='clean-cut'&&cue.transitionSeconds===0&&Number.isFinite(track.duration)&&track.duration>0&&
+  return !!(cue&&Number.isFinite(track.duration)&&track.duration>0&&
     (!Number.isFinite(track.rangeEnd)||track.rangeEnd>=track.duration)&&Math.abs(cue.end-track.duration)<=.001);
 }
 export function fixedGain(track,entry,position,decodedDuration){

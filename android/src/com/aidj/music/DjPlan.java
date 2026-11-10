@@ -14,11 +14,20 @@ final class DjPlan {
         return c;
     }
     static boolean endsAtSourceEnd(JSONObject source,JSONObject entry){
-        JSONObject c=fixed(source,entry);if(c==null||!"clean-cut".equals(c.optString("transitionKind"))||c.optDouble("transitionSeconds")!=0)return false;
+        JSONObject c=fixed(source,entry);if(c==null)return false;
         if(!(source.opt("duration") instanceof Number))return false;
         double duration=source.optDouble("duration");
         // A hand-trimmed end remains an internal cut even if very close to EOF.
         return Double.isFinite(duration)&&duration>0&&upper(source)>=duration&&Math.abs(c.optDouble("end")-duration)<=.001;
+    }
+    /** Each deck keeps its authored fades before, during, and after a blend. */
+    static double fixedEnvelope(JSONObject source,JSONObject entry,long position,long duration,float rate){
+        JSONObject c=fixed(source,entry);if(c==null)return 1;
+        double start=c.optDouble("start")*1000,end=endsAtSourceEnd(source,entry)&&duration>0?duration:c.optDouble("end")*1000;
+        double fadeIn=c.optDouble("fadeIn")*1000*rate,fadeOut=c.optDouble("fadeOut")*1000*rate;
+        double intro=fadeIn>0?Math.max(0,Math.min(1,(position-start)/fadeIn)):1;
+        double tail=fadeOut>0?Math.max(0,Math.min(1,(end-position)/fadeOut)):1;
+        return intro*tail;
     }
     static boolean timed(JSONObject track,JSONObject entry){
         if(track==null||!(track.opt("duration") instanceof Number)||entry==null||!entry.optBoolean("remix")||entry.optBoolean("djFull"))return false;

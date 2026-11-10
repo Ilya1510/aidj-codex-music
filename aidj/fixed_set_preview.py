@@ -1,11 +1,13 @@
 """Render the exact first minutes and selected seams, without altering originals."""
 import argparse
+from array import array
 import json
 import math
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import wave
 
@@ -14,8 +16,8 @@ from .config import Settings, atomic_json
 SAMPLE_RATE=22050
 
 
-def clip_arguments(item,song,source,output):
-    """Construct a source-pinned fixed clean-cut render matching runtime bounds."""
+def clip_arguments(item,song,source,output,apply_envelopes=True):
+    """Decode pinned bounds; the overlap mixer applies envelopes sample by sample."""
     finite=lambda v:type(v) in (int,float) and math.isfinite(v)
     numbers=[item.get(k) for k in ('start','end','fadeIn','fadeOut','rate','transitionSeconds')]
     total=song.get('duration');lo=song.get('range_start') or 0.
@@ -23,7 +25,10 @@ def clip_arguments(item,song,source,output):
     if (item.get('md5')!=song.get('md5') or not finite(total) or not 0<total<=1800 or
             not all(finite(v) for v in numbers) or not finite(lo) or not finite(hi) or
             not 0<=lo<=item['start']<item['end']<=min(total,hi)+.001 or item['end']-item['start']<.2 or
-            item['rate']!=1 or item['transitionSeconds']!=0 or item.get('transitionKind')!='clean-cut' or
+            item['rate']!=1 or item.get('transitionKind') not in ('clean-cut','crossfade') or
+            not 0<=item['transitionSeconds']<=min(8,(item['end']-item['start'])/2) or
+            (item.get('transitionKind')=='clean-cut' and item['transitionSeconds']!=0) or
+            (item.get('transitionKind')=='crossfade' and item['transitionSeconds']==0) or
             any(not 0<=item[k]<=min(8,(item['end']-item['start'])/2) for k in ('fadeIn','fadeOut'))):
         raise RuntimeError('FIXED_PREVIEW_SOURCE_OR_BOUNDS')
     completion=hi>=total and abs(item['end']-total)<=.001
@@ -33,10 +38,10 @@ def clip_arguments(item,song,source,output):
               song.get('loudness_method')=='ebu-r128-v1' and song.get('loudness_status')=='complete')
     gain=min(12.,-16-lufs,-1-peak) if measured else 0.
     filters=[f'volume={gain:.5f}dB','volume=0.7']
-    if item['fadeIn']>0:filters.append(f'afade=t=in:st=0:d={item["fadeIn"]:.5f}')
+    if apply_envelopes and item['fadeIn']>0:filters.append(f'afade=t=in:st=0:d={item["fadeIn"]:.5f}')
     # Full-file positive endings need their actual decoded duration first. A
     # second streaming pass applies only that tail envelope, never gain twice.
-    if item['fadeOut']>0 and not completion:filters.append(f'afade=t=out:st={duration-item["fadeOut"]:.5f}:d={item["fadeOut"]:.5f}')
+    if apply_envelopes and item['fadeOut']>0 and not completion:filters.append(f'afade=t=out:st={duration-item["fadeOut"]:.5f}:d={item["fadeOut"]:.5f}')
     args=['-ss',item['start'],'-i',source]
     if not completion:args.extend(['-t',duration])
     args.extend(['-vn','-af',','.join(filters),'-ar',str(SAMPLE_RATE),'-ac','2','-c:a','pcm_s16le','-y',output])
@@ -68,13 +73,107 @@ def timeline_row(item,song,position,clock_frames,frames,completion):
             'renderedFrames':frames,'sampleRate':SAMPLE_RATE}
 
 
+def blend_gain(position,duration,fade_in,fade_out,incoming,outgoing):
+    """Runtime envelope: incoming sine plus its intro; tail caps outgoing cosine."""
+    intro=min(1.,max(0.,position/fade_in)) if fade_in else 1.
+    tail=min(1.,max(0.,(duration-position)/fade_out)) if fade_out else 1.
+    rise=math.sin(min(1.,max(0.,position/incoming))*math.pi/2) if incoming else 1.
+    fall=math.cos(min(1.,max(0.,(position-duration+outgoing)/outgoing))*math.pi/2) if outgoing else 1.
+    return intro*min(tail,fall)*rise
+
+
+def blend_layout(items,frames):
+    """Use actual PCM lengths, including stored-file endings; no triple overlap."""
+    if len(items)!=len(frames) or not frames:raise RuntimeError('FIXED_PREVIEW_BLEND_LAYOUT')
+    overlaps=[round(row['transitionSeconds']*SAMPLE_RATE) for row in items[:-1]]+[0]
+    starts=[];clock=0
+    for i,length in enumerate(frames):
+        incoming=overlaps[i-1] if i else 0
+        if type(length) is not int or length<=incoming+overlaps[i]:
+            raise RuntimeError('FIXED_PREVIEW_BLEND_OVERLAP')
+        starts.append(clock);clock+=length-overlaps[i]
+    return starts,overlaps,clock
+
+
+def mix_paths(items,paths,output):
+    """Stream stereo PCM with bounded memory; retain original gain and sample count."""
+    lengths=[rendered_frames(path) for path in paths]
+    starts,overlaps,total=blend_layout(items,lengths)
+    sources=[];clipped=0
+    try:
+        sources=[wave.open(str(path),'rb') for path in paths]
+        with wave.open(str(output),'wb') as target:
+            target.setparams((2,2,SAMPLE_RATE,0,'NONE','not compressed'))
+            for base in range(0,total,2048):
+                count=min(2048,total-base);mixed=[0.]*(count*2)
+                for i,source in enumerate(sources):
+                    lo=max(base,starts[i]);hi=min(base+count,starts[i]+lengths[i])
+                    if lo>=hi:continue
+                    local=lo-starts[i];source.setpos(local)
+                    pcm=array('h',source.readframes(hi-lo))
+                    if sys.byteorder!='little':pcm.byteswap()
+                    if len(pcm)!=(hi-lo)*2:raise RuntimeError('FIXED_PREVIEW_BLEND_SHORT_PCM')
+                    incoming=overlaps[i-1]/SAMPLE_RATE if i else 0.
+                    outgoing=overlaps[i]/SAMPLE_RATE
+                    for frame in range(hi-lo):
+                        gain=blend_gain((local+frame)/SAMPLE_RATE,lengths[i]/SAMPLE_RATE,
+                            items[i]['fadeIn'],items[i]['fadeOut'],incoming,outgoing)
+                        offset=(lo-base+frame)*2
+                        mixed[offset]+=pcm[frame*2]*gain;mixed[offset+1]+=pcm[frame*2+1]*gain
+                result=array('h')
+                for sample in mixed:
+                    value=round(sample)
+                    if value < -32768 or value > 32767:clipped+=1
+                    result.append(max(-32768,min(32767,value)))
+                if sys.byteorder!='little':result.byteswap()
+                target.writeframesraw(result.tobytes())
+    finally:
+        for source in sources:source.close()
+    if clipped:raise RuntimeError('FIXED_PREVIEW_BLEND_CLIPPING')
+    return starts,overlaps,total
+
+
+def render_blended_outputs(items,paths,timeline,work,scratch,run):
+    mixed=scratch/'mixed.wav'
+    starts,overlaps,total=mix_paths(items,paths,mixed)
+    for i,row in enumerate(timeline):
+        row.update(start=starts[i]/SAMPLE_RATE,end=(starts[i]+row['renderedFrames'])/SAMPLE_RATE,
+                   overlapSeconds=overlaps[i]/SAMPLE_RATE)
+    run(['-i',mixed,'-c:a','libmp3lame','-b:a','128k','-y',work/'DJ-1-first-minutes.mp3'])
+    seams=[];seam_timeline=[];clock=0
+    for i in range(len(paths)-1):
+        boundary=starts[i]+timeline[i]['renderedFrames']
+        lo=max(0,boundary-6*SAMPLE_RATE);hi=min(total,boundary+6*SAMPLE_RATE)
+        output=scratch/f'mix-seam{i}.wav'
+        run(['-ss',lo/SAMPLE_RATE,'-i',mixed,'-t',(hi-lo)/SAMPLE_RATE,
+             '-c:a','pcm_s16le','-y',output])
+        frames=rendered_frames(output);seams.append(output)
+        seam_timeline.append({'position':i+1,'fromTrackId':items[i]['trackId'],
+            'toTrackId':items[i+1]['trackId'],'start':clock/SAMPLE_RATE,
+            'overlapStart':(clock+boundary-lo-overlaps[i])/SAMPLE_RATE,
+            'boundary':(clock+boundary-lo)/SAMPLE_RATE,'end':(clock+frames)/SAMPLE_RATE,
+            'overlapSeconds':overlaps[i]/SAMPLE_RATE,'renderedFrames':frames,'sampleRate':SAMPLE_RATE})
+        clock+=frames
+        if i<3:
+            marker=round(1200*(boundary-lo)/frames)
+            entry_marker=round(1200*(boundary-lo-overlaps[i])/frames)
+            filters=f'[0:a]asplit=2[a][b];[a]showwavespic=s=1200x180:colors=0xcfff62,format=rgb24[w];[b]showspectrumpic=s=1200x300:legend=0:scale=log:fscale=log,format=rgb24[s];[w][s]vstack=inputs=2,drawbox=x={marker}:y=0:w=2:h=480:color=red:t=fill,drawbox=x={entry_marker}:y=0:w=2:h=480:color=yellow:t=fill[v]'
+            run(['-i',output,'-filter_complex_threads','1','-filter_complex',filters,
+                 '-map','[v]','-frames:v','1','-y',work/f'seam-{i+1}.png'])
+    concat=scratch/'blend-seams.txt'
+    concat.write_text(''.join("file '"+str(p)+"'\n" for p in seams))
+    run(['-f','concat','-safe','0','-i',concat,'-c:a','libmp3lame','-b:a','128k','-y',work/'DJ-1-transitions.mp3'])
+    return seam_timeline,total
+
+
 def render(settings, work, decoder, count=6):
     from .disk import Disk
     plan=json.loads((work/'plan.json').read_text());items=plan['tracks'][:count]
     if not 2<=len(items)<=10 or shutil.disk_usage(work).free<512*1024**2:
         raise RuntimeError('FIXED_PREVIEW_BUDGET')
-    if any(r['rate']!=1 or r['transitionSeconds']!=0 for r in items):
+    if any(r['rate']!=1 for r in items):
         raise RuntimeError('FIXED_PREVIEW_UNSUPPORTED_TRANSITION')
+    blended=any(r['transitionSeconds']>0 for r in items[:-1])
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
     disk=Disk(settings);timeline=[];clock_frames=0
     def run(args):
@@ -92,11 +191,11 @@ def render(settings, work, decoder, count=6):
             song=dict(song)
             source=scratch/('source'+Path(song['remote_path']).suffix)
             output=scratch/f'{i:02}.wav'
-            arguments,completion=clip_arguments(item,song,source,output)
+            arguments,completion=clip_arguments(item,song,source,output,apply_envelopes=not blended)
             disk.download(song['remote_path'],source,expected_md5=song['md5'])
             run(arguments);source.unlink()
             frames=rendered_frames(output)
-            if completion and item['fadeOut']>0:
+            if not blended and completion and item['fadeOut']>0:
                 ramped=scratch/f'{i:02}-ending.wav'
                 run(ending_fade_arguments(output,ramped,frames,item['fadeOut']))
                 if rendered_frames(ramped)!=frames:raise RuntimeError('FIXED_PREVIEW_END_FADE_LENGTH')
@@ -104,6 +203,13 @@ def render(settings, work, decoder, count=6):
             paths.append(output)
             timeline.append(timeline_row(item,song,i+1,clock_frames,frames,completion))
             clock_frames+=frames
+        if blended:
+            seam_timeline,clock_frames=render_blended_outputs(items,paths,timeline,work,scratch,run)
+            db.close();atomic_json(work/'preview-timeline.json',{
+                'revision':plan['revision'],'tracks':timeline,'seams':seam_timeline,
+                'envelope':'incoming-sine-times-intro-outgoing-cosine-capped-by-tail-v1'})
+            print('FIXED_PREVIEW_READY',len(items),round(clock_frames/SAMPLE_RATE,1),'seconds',flush=True)
+            return
         concat=scratch/'concat.txt';concat.write_text(''.join("file '"+str(p)+"'\n" for p in paths))
         run(['-f','concat','-safe','0','-i',concat,'-c:a','libmp3lame','-b:a','128k','-y',work/'DJ-1-first-minutes.mp3'])
         # Only actual seams: 6s before and after each boundary. Every cut inside

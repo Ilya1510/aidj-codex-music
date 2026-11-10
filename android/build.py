@@ -34,7 +34,9 @@ def run(args,task_env=None):
 
 
 def main():
-    if shutil.disk_usage(ROOT).free<2*1024**3:raise RuntimeError('LOW_DISK')
+    # This is a small Java/WebView shell (no SDK/model downloads here).
+    # Keep ample scratch space without requiring 2GiB for a sub-megabyte APK.
+    if shutil.disk_usage(ROOT).free<512*1024**2:raise RuntimeError('LOW_DISK')
     OUTPUT.mkdir(exist_ok=True)
     for name in ['generated','classes','dex','assets']:
         path=OUTPUT/name

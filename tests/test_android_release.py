@@ -55,6 +55,19 @@ def test_android_shell_allows_every_local_frontend_module_import():
             assert (root/'miniapp'/module).is_file()
 
 
+def test_blended_fixed_set_requires_native39_but_clean_cuts_remain_compatible(monkeypatch):
+    from aidj.webapp import client_catalog
+    import copy
+    data={'tracks':[], 'playlists':[], 'djSets':[
+        {'id':'clean','tracks':[{'transitionSeconds':0}]},
+        {'id':'blend','tracks':[{'transitionSeconds':3}]}]}
+    monkeypatch.setattr('aidj.webapp.catalog',lambda db:copy.deepcopy(data))
+    for version in ('37','38','garbage'):
+        assert [s['id'] for s in client_catalog(None,version)['djSets']]==['clean']
+    for version in (None,'39','40'):
+        assert [s['id'] for s in client_catalog(None,version)['djSets']]==['clean','blend']
+
+
 def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_path,monkeypatch):
     from aidj.web_auth import create_session
     import copy
