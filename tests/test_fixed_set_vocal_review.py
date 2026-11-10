@@ -304,3 +304,57 @@ def test_search_finds_short_stereo_quiet_window_that_cannot_fit_old_long_fade():
     candidates=review._search_candidates(old,song,evidence,cached,(),())
     assert any(c['exit']['fade']==.3 for c in candidates)
     assert not any(c['exit']['fade']>=.8 for c in candidates)
+
+
+def strict_timing(frames=3616183,metadata=226.0636734693):
+    return {'decodedDuration':frames/16000,'metadataDuration':metadata,'sourceMD5':'1'*32,
+        'manualEnd':False,'sourceTimingMethod':'full-verified-decode-strict-v2',
+        'decoderMethod':'full-verified-decode-strict-v2','decoderErrorPolicy':'xerror',
+        'completeSource':True,'decoderExitCode':0,'sampleRate':16000,'channels':2,
+        'pcmBytes':frames*8,'pcmFrames':frames}
+
+
+def test_only_strict_full_error_fatal_decode_can_promote_two_mp3_frame_metadata_delta():
+    metadata=226.0636734693
+    song={'md5':'1'*32,'duration':metadata,'lo':0.,'hi':metadata,'lufs':-16.,'peak':-2.}
+    timing=strict_timing();item={'md5':'1'*32,'eofEvidence':timing}
+    measured=review.source_timing(song,item);proof=measured['sourceProof']
+    assert proof['decodedDuration']==226.0114375 and proof['metadataToleranceSeconds']==.25
+    assert proof['pcmBytes']==28929464 and proof['pcmFrames']==3616183
+    vocal=vectors(222.,4.0114375,voice=.0002,mix=.001);vocal['md5']='1'*32
+    p=point(proof['decodedDuration']-.7,1.5)
+    words=[[224.,226.,True]]
+    checked=review.check_endpoint(vocal,p,words,review.gain_db(song),.1,source_proof=proof)
+    assert checked['accepted'] and checked['criterion']=='physical-EOF-quiet'
+    item['exit']={**p,'sourceProof':proof,'vocalCheck':checked}
+    assert review.replay_source(item,song)[1]==proof
+    # An old observation cannot become strict by changing just its method name.
+    legacy={key:timing[key] for key in ('decodedDuration','metadataDuration','manualEnd','sourceMD5')}
+    for method in ('verified-original-rms-16000-v1','full-verified-decode','verified-original-pcm-16000-stereo-v1','full-verified-decode-strict-v2'):
+        old={'md5':'1'*32,'eofEvidence':{**legacy,'decoderMethod':method,'sourceTimingMethod':method}}
+        assert 'sourceProof' not in review.source_timing(song,old)
+
+
+@pytest.mark.parametrize('patch',[{'decoderErrorPolicy':'ignore'},{'completeSource':False},
+    {'decoderExitCode':1},{'sourceMD5':'2'*32},{'sampleRate':44100},{'channels':1},
+    {'pcmBytes':28929465},{'pcmFrames':3616184},{'decodedDuration':226.01},
+    {'pcmBytes':16000*1800*8,'pcmFrames':16000*1800,'decodedDuration':1800.},
+    {'metadataDuration':226.2625}])
+def test_strict_timing_provenance_and_sample_counts_are_all_required(patch):
+    timing={**strict_timing(),**patch};meta=timing['metadataDuration']
+    song={'md5':'1'*32,'duration':meta,'lo':0.,'hi':meta}
+    item={'md5':'1'*32,'eofEvidence':timing}
+    assert 'sourceProof' not in review.source_timing(song,item)
+
+
+def test_strict_timing_still_rejects_manual_crop_hash_change_and_stale_replay():
+    timing=strict_timing();meta=timing['metadataDuration']
+    song={'md5':'1'*32,'duration':meta,'lo':0.,'hi':meta,'lufs':-16.,'peak':-2.}
+    item={'md5':'1'*32,'eofEvidence':timing};proof=review.source_timing(song,item)['sourceProof']
+    item['exit']={'sourceProof':proof,'vocalCheck':{'criterion':'physical-EOF-quiet',
+        'sourceProof':proof,'playbackGainDb':review.gain_db(song)}}
+    for changed in ({**song,'hi':225.9},{**song,'md5':'2'*32}):
+        assert 'sourceProof' not in review.source_timing(changed,item)
+        with pytest.raises(ValueError):review.replay_source(item,changed)
+    altered=copy.deepcopy(item);altered['eofEvidence']['pcmFrames']+=1
+    with pytest.raises(ValueError):review.replay_source(altered,song)

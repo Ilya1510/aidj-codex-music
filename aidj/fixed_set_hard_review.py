@@ -34,22 +34,27 @@ MAX_TRACK_SECONDS = 180
 
 
 def measure_source_timing(source, song, decoder, folder):
-    """Actual EOF from one full MD5-verified source, not a metadata assumption."""
+    """Strict complete decode of a source already MD5-verified by the caller."""
     pcm = Path(folder)/'hard-source-timing.f32'; maximum = 16000*1800*8
     try:
         try:
-            child = subprocess.run([decoder,'-nostdin','-v','error','-threads','1',
+            child = subprocess.run([decoder,'-nostdin','-v','error','-xerror','-threads','1',
                 '-filter_threads','1','-i',str(source),'-vn','-sn','-dn','-ac','2',
                 '-ar','16000','-f','f32le','-fs',str(maximum+8),'-y',str(pcm)],
                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)
         except subprocess.TimeoutExpired:
             raise RuntimeError('HARD_REVIEW_TIMING_TIMEOUT') from None
-        if child.returncode or not pcm.exists() or not 0<pcm.stat().st_size<maximum or pcm.stat().st_size%8:
-            raise RuntimeError('HARD_REVIEW_TIMING_DECODE')
-        return {'decodedDuration':pcm.stat().st_size/8/16000,
+        if child.returncode or not pcm.exists():raise RuntimeError('HARD_REVIEW_TIMING_DECODE')
+        size=pcm.stat().st_size
+        if not 0<size<maximum or size%8:raise RuntimeError('HARD_REVIEW_TIMING_DECODE')
+        frames=size//8
+        return {'decodedDuration':frames/16000,
             'metadataDuration':song.get('metadataDuration',song['duration']),
             'sourceMD5':song['md5'],'manualEnd':bool(song.get('manualEnd')),
-            'sourceTimingMethod':'full-verified-decode'}
+            'sourceTimingMethod':'full-verified-decode-strict-v2',
+            'decoderMethod':'full-verified-decode-strict-v2',
+            'decoderErrorPolicy':'xerror','completeSource':True,'decoderExitCode':0,
+            'sampleRate':16000,'channels':2,'pcmBytes':size,'pcmFrames':frames}
     finally:
         pcm.unlink(missing_ok=True)
 

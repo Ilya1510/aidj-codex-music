@@ -39,7 +39,8 @@ PARAMETERS = {'quietP95Dbfs': -43., 'absoluteMaxDbfs': -37.,
               'loudMinimumFadeSeconds':2., 'EOFVocalMaxDbfs':-43., 'EOFVocalP95Dbfs':-48.,
               'EOFMixMaxDbfs':-35., 'EOFMixP95Dbfs':-40., 'EOFProofMinSeconds':1.5,
               'EOFDistanceMinSeconds':.45, 'EOFDistanceMaxSeconds':2.5,
-              'EOFMetadataToleranceSeconds':.05, 'probeMetadataCapToleranceSeconds':.25}
+              'EOFMetadataToleranceSeconds':.05, 'strictFullDecodeMetadataToleranceSeconds':.25,
+              'probeMetadataCapToleranceSeconds':.25}
 METHODS = {'vocal-checked-instrumental-fade', 'vocal-isolated-fade'}
 
 
@@ -88,9 +89,31 @@ def _vectors(evidence, *, allow_warnings=False):
     return offset, hop, duration, values
 
 
+STRICT_TIMING_METHOD='full-verified-decode-strict-v2'
+STRICT_TIMING_FIELDS=('sourceTimingMethod','decoderErrorPolicy','completeSource','decoderExitCode',
+                      'sourceMD5','sampleRate','channels','pcmBytes','pcmFrames')
+
+
+def strict_decode_valid(record,digest):
+    """Only an actual error-fatal full decode can use the250ms metadata window."""
+    if not isinstance(digest,str) or not re.fullmatch('[a-f0-9]{32}',digest):return False
+    method=record.get('decoderMethod',record.get('sourceTimingMethod'))
+    if method!=STRICT_TIMING_METHOD or record.get('sourceTimingMethod')!=STRICT_TIMING_METHOD:return False
+    if record.get('decoderErrorPolicy')!='xerror' or record.get('completeSource') is not True:return False
+    if type(record.get('decoderExitCode')) is not int or record['decoderExitCode']!=0:return False
+    if record.get('sourceMD5')!=digest:return False
+    if type(record.get('sampleRate')) is not int or record['sampleRate']!=16000:return False
+    if type(record.get('channels')) is not int or record['channels']!=2:return False
+    size=record.get('pcmBytes');frames=record.get('pcmFrames')
+    if type(size) is not int or not 0<size<16000*1800*8 or size%8:return False
+    if type(frames) is not int or frames!=size//8:return False
+    duration=record.get('decodedDuration')
+    return finite(duration) and abs(duration-frames/16000)<=1e-9
+
+
 def source_timing(song,checkpoint):
-    """Cap ordinary probes to a source-pinned decode; strict EOF still needs50ms agreement."""
-    result=dict(song);meta=song.get('metadataDuration',song['duration'])
+    """Legacy EOF needs50ms agreement; new fatal-error complete PCM proof allows250ms."""
+    result=dict(song);result.pop('sourceProof',None);meta=song.get('metadataDuration',song['duration'])
     result['metadataDuration']=meta
     original_hi=song.get('originalAllowedEnd',song['hi']);result['originalAllowedEnd']=original_hi
     result['manualEnd']=bool(song.get('manualEnd',False) or original_hi<meta-.001)
@@ -98,25 +121,35 @@ def source_timing(song,checkpoint):
     digest=song.get('md5');pinned=checkpoint.get('md5')==digest and isinstance(digest,str) and re.fullmatch('[a-f0-9]{32}',digest)
     decoded=eof.get('decodedDuration');declared=eof.get('metadataDuration')
     timing=eof.get('decoderMethod',eof.get('sourceTimingMethod','verified-original-rms-16000-v1'))
-    timing_valid=timing in ('verified-original-rms-16000-v1','full-verified-decode','verified-original-pcm-16000-stereo-v1') and eof.get('sourceMD5',digest)==digest
+    strict=timing==STRICT_TIMING_METHOD and strict_decode_valid(eof,digest)
+    legacy=timing in ('verified-original-rms-16000-v1','full-verified-decode','verified-original-pcm-16000-stereo-v1') and eof.get('sourceMD5',digest)==digest
+    timing_valid=legacy or strict
     if pinned and timing_valid and finite(decoded) and finite(declared) and abs(declared-meta)<=.001 and 0<decoded<=1800 and abs(decoded-meta)<=.25:
         result['decodedDuration']=decoded
         result['duration']=min(meta,decoded);result['hi']=min(original_hi,result['duration'])
-        if not eof.get('manualEnd') and not result['manualEnd'] and abs(decoded-meta)<=.05:
+        eof_tolerance=.25 if strict else .05
+        if not eof.get('manualEnd') and not result['manualEnd'] and abs(decoded-meta)<=eof_tolerance:
             result['sourceProof']={'sourcePinned':True,'md5':digest,'decodedDuration':decoded,
                 'metadataDuration':meta,'allowedStart':song['lo'],'allowedEnd':original_hi,
                 'manualEnd':False,'decoderMethod':timing}
+            if strict:
+                result['sourceProof'].update({key:eof[key] for key in STRICT_TIMING_FIELDS})
+                result['sourceProof']['metadataToleranceSeconds']=.25
     return result
 
 
 def _valid_eof_source(proof,evidence,point):
     if not isinstance(proof,dict) or proof.get('sourcePinned') is not True or proof.get('manualEnd') is not False:return False
-    if proof.get('decoderMethod') not in ('verified-original-rms-16000-v1','full-verified-decode','verified-original-pcm-16000-stereo-v1'):return False
+    method=proof.get('decoderMethod')
+    if method not in ('verified-original-rms-16000-v1','full-verified-decode','verified-original-pcm-16000-stereo-v1',STRICT_TIMING_METHOD):return False
     md5=proof.get('md5')
     if not isinstance(md5,str) or not re.fullmatch('[a-f0-9]{32}',md5) or evidence.get('md5')!=md5:return False
     if any(not finite(proof.get(k)) for k in ('decodedDuration','metadataDuration','allowedStart','allowedEnd')):return False
     eof,meta=proof['decodedDuration'],proof['metadataDuration']
-    return (0<eof<=1800 and abs(eof-meta)<=.05 and 0<=proof['allowedStart']<eof and
+    strict=method==STRICT_TIMING_METHOD
+    if strict and not strict_decode_valid(proof,md5):return False
+    tolerance=.25 if strict else .05
+    return (0<eof<=1800 and abs(eof-meta)<=tolerance and 0<=proof['allowedStart']<eof and
         proof['allowedEnd']>=meta-.001 and proof['allowedEnd']<=meta+.001 and
         eof-2.5<=point['time']<=eof-.45 and point['fadeStart']-.2>=proof['allowedStart'])
 

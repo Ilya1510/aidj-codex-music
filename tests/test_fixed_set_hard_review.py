@@ -160,8 +160,13 @@ def test_full_timing_decode_is_real_eof_not_a_metadata_limited_excerpt(tmp_path,
     monkeypatch.setattr(hard.subprocess,'run',fake_run)
     timing=hard.measure_source_timing(tmp_path/'source.mp3',song,'ffmpeg',tmp_path)
     assert timing['decodedDuration']==1 and timing['metadataDuration']==180
-    assert timing['sourceMD5']==song['md5'] and timing['sourceTimingMethod']=='full-verified-decode'
-    assert '-t' not in seen[0] and '-fs' in seen[0]
+    assert timing['sourceMD5']==song['md5'] and timing['sourceTimingMethod']=='full-verified-decode-strict-v2'
+    assert all(flag not in seen[0] for flag in ('-t','-ss','-to','-shortest'))
+    assert '-xerror' in seen[0] and '-fs' in seen[0]
+    assert timing['decoderMethod']=='full-verified-decode-strict-v2'
+    assert timing['decoderErrorPolicy']=='xerror' and timing['completeSource'] is True
+    assert timing['decoderExitCode']==0 and timing['sampleRate']==16000 and timing['channels']==2
+    assert timing['pcmBytes']==16000*8 and timing['pcmFrames']==16000
     assert not (tmp_path/'hard-source-timing.f32').exists()
 
 
@@ -260,3 +265,20 @@ def test_hints_choose_contexts_but_cannot_make_a_vocal_fragment_ready():
     assert result['hardReviewAttempts'][0]['contextReason']['source']=='curated-context-hint'
     assert result['hardReviewAttempts'][0]['contextReason']['actualNewUsefulSeconds']==19.5
     assert not result['hardReviewAttempts'][0]['contextReason']['treatedAsProof']
+
+
+@pytest.mark.parametrize('size,returncode',[(0,0),(9,0),(16000*1800*8,0),(16000*1800*8+8,0),(16000*8,1)])
+def test_strict_full_timing_rejects_cutoff_invalid_pcm_or_decoder_error(tmp_path,monkeypatch,size,returncode):
+    _,song,_,_=fixture();seen=[]
+    def fake_run(command,**kwargs):
+        seen.append((command,kwargs))
+        with open(command[-1],'wb') as stream:stream.truncate(size)
+        return SimpleNamespace(returncode=returncode)
+    monkeypatch.setattr(hard.subprocess,'run',fake_run)
+    with pytest.raises(RuntimeError,match='HARD_REVIEW_TIMING_DECODE'):
+        hard.measure_source_timing(tmp_path/'source.mp3',song,'ffmpeg',tmp_path)
+    command,kwargs=seen[0]
+    assert kwargs['timeout']==120 and '-xerror' in command
+    assert all(flag not in command for flag in ('-t','-ss','-to','-shortest'))
+    assert command[command.index('-fs')+1]==str(16000*1800*8+8)
+    assert not (tmp_path/'hard-source-timing.f32').exists()
