@@ -4,9 +4,11 @@ Run only after mandatory ENTRY review. Confirmed outgoing cuts, closing/source
 proofs and frozen order remain untouched. No silence or confidence relaxation.
 """
 import argparse
+import array
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -25,6 +27,7 @@ from .fixed_set_hard_review import all_existing, pair, references
 from .fixed_set_repair import selection_error as exit_error
 from .fixed_set_resolve import read_json, restore_evidence
 from .fixed_set_vocal_review import CachedProbe, _vectors, finite
+from .vocal_probe import MODEL_SHA256, SAMPLE_RATE
 
 VERSION=2
 ASR_CACHE_VERSION=1  # Context ranking/lineage changes do not alter recognition.
@@ -54,16 +57,19 @@ def model_manifest(folder):
     return {'directory':str(directory),'revision':revision,'files':digests,'fingerprint':identity}
 
 
-def asr_key(song,begin,end,model):
-    return hashlib.sha256(json.dumps([ASR_CACHE_VERSION,song['md5'],begin,end,model['fingerprint'],
-        ASR_PARAMETERS],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+def asr_key(song,begin,end,model,asr_input=None):
+    values=[ASR_CACHE_VERSION,song['md5'],begin,end,model['fingerprint'],ASR_PARAMETERS]
+    if asr_input is not None:values.append(asr_input)
+    return hashlib.sha256(json.dumps(values,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
-def validate_asr(value,song,begin,end,model):
+def validate_asr(value,song,begin,end,model,asr_input=None):
+    if asr_input is not None:validate_stem(asr_input,song,begin,end)
     if (not isinstance(value,dict) or value.get('version')!=ASR_CACHE_VERSION or
             value.get('sourceMD5')!=song['md5'] or value.get('start')!=begin or
             value.get('requestedEnd')!=end or value.get('modelFingerprint')!=model['fingerprint'] or
-            value.get('parameters')!=ASR_PARAMETERS or value.get('cacheKey')!=asr_key(song,begin,end,model)):
+            value.get('parameters')!=ASR_PARAMETERS or value.get('asrInput')!=asr_input or
+            value.get('cacheKey')!=asr_key(song,begin,end,model,asr_input)):
         raise RuntimeError('ENTRY_RESOLVE_ASR_IDENTITY')
     actual=value.get('end');words=value.get('words')
     if not finite(actual) or abs(actual-end)>.05 or actual<=begin:
@@ -78,6 +84,60 @@ def validate_asr(value,song,begin,end,model):
     return value
 
 
+def stem_index_key(song,begin,end):
+    return operation_hash(['vocal-stem-v1',song['md5'],begin,end,MODEL_SHA256])
+
+
+def stronger_channel(energies):
+    if (not isinstance(energies,list) or len(energies)!=2 or
+            any(not finite(v) or v<0 for v in energies)):
+        raise RuntimeError('ENTRY_RESOLVE_STEM_ENERGY')
+    return 0 if energies[0]>=energies[1] else 1
+
+
+def pcm_channel_energies(path):
+    """Energy per actual stereo channel, never the cancelling L+R average."""
+    totals=[0.,0.];frames=0
+    with Path(path).open('rb') as stream:
+        while block:=stream.read(64*1024):
+            if len(block)%8:raise RuntimeError('ENTRY_RESOLVE_STEM_SIZE')
+            values=array.array('f');values.frombytes(block)
+            if sys.byteorder!='little':values.byteswap()
+            if any(not math.isfinite(v) for v in values):raise RuntimeError('ENTRY_RESOLVE_STEM_ENERGY')
+            for channel in (0,1):totals[channel]+=math.fsum(v*v for v in values[channel::2])
+            frames+=len(values)//2
+    if not frames:raise RuntimeError('ENTRY_RESOLVE_STEM_SIZE')
+    return [value/frames for value in totals]
+
+
+def validate_stem(value,song,begin,end):
+    if (not isinstance(value,dict) or value.get('kind')!='vocals' or value.get('version')!=1 or
+            value.get('sourceMD5')!=song['md5'] or value.get('requestedStart')!=begin or
+            value.get('requestedEnd')!=end or value.get('uvrModelSha256')!=MODEL_SHA256 or
+            value.get('sampleRate')!=SAMPLE_RATE or value.get('channels')!=2 or
+            value.get('normalizationGainDb')!=0 or value.get('channelPolicy')!='higher-stereo-energy'):
+        raise RuntimeError('ENTRY_RESOLVE_STEM_IDENTITY')
+    count=value.get('pcmFrames');size=value.get('pcmBytes');offset=value.get('sourceOffsetSeconds')
+    if (type(count) is not int or not 0<count<=20*SAMPLE_RATE or type(size) is not int or size!=count*8 or
+            not finite(offset) or abs(offset-begin)>1/SAMPLE_RATE+1e-7 or
+            abs(offset+count/SAMPLE_RATE-end)>.05 or
+            not isinstance(value.get('pcmSHA256'),str) or not re.fullmatch('[a-f0-9]{64}',value['pcmSHA256']) or
+            type(value.get('selectedChannel')) is not int or
+            value.get('selectedChannel')!=stronger_channel(value.get('channelMeanSquares'))):
+        raise RuntimeError('ENTRY_RESOLVE_STEM_PCM')
+    return value
+
+
+def validate_stem_file(path,value,song,begin,end):
+    validate_stem(value,song,begin,end);path=Path(path)
+    if path.stat().st_size!=value['pcmBytes']:raise RuntimeError('ENTRY_RESOLVE_STEM_SIZE')
+    with path.open('rb') as stream:
+        if hashlib.file_digest(stream,'sha256').hexdigest()!=value['pcmSHA256']:
+            raise RuntimeError('ENTRY_RESOLVE_STEM_HASH')
+    if pcm_channel_energies(path)!=value['channelMeanSquares']:raise RuntimeError('ENTRY_RESOLVE_STEM_ENERGY')
+    return path
+
+
 def apply_asr(evidence,observation):
     """Same >=3-confident replacement rule as LocalObserver; empty never erases."""
     result=copy.deepcopy(evidence);fresh=copy.deepcopy(observation['words'])
@@ -90,6 +150,8 @@ def apply_asr(evidence,observation):
     result.setdefault('repairProbes',[]).append({'start':begin,'end':end,'words':len(fresh),
         'confident':observation['confident'],'entryResolver':VERSION,
         'asrEvidenceKey':observation['cacheKey'],'asrModelFingerprint':observation['modelFingerprint']})
+    if observation.get('asrInput') is not None:
+        result['repairProbes'][-1].update(asrSource='vocals',asrInputSHA256=observation['asrInput']['pcmSHA256'])
     return result
 
 
@@ -160,7 +222,7 @@ def _lineage_error(item,song,*,evidence_folder,model_fingerprint):
         if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):return 'entry-resolve-ASR-key'
         try:
             observation=validate_asr(read_json(Path(evidence_folder)/(key+'.json')),song,
-                op['start'],op['requestedEnd'],{'fingerprint':model_fingerprint})
+                op['start'],op['requestedEnd'],{'fingerprint':model_fingerprint},op.get('asrInput'))
         except (OSError,ValueError,KeyError,RuntimeError):return 'entry-resolve-ASR-cache'
         if (observation['cacheKey']!=key or observation['end']!=op.get('actualEnd') or
                 observation['confident']!=op.get('confidentWords')):return 'entry-resolve-ASR-observation'
@@ -246,6 +308,7 @@ def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify
                 'start':observation['start'],'requestedEnd':observation.get('requestedEnd',end),
                 'actualEnd':observation['end'],'confidentWords':observation['confident'],
                 'replacementPolicy':'replace-observed-interior-1s' if observation['confident']>=3 else 'append-preserve-all-prior'}
+            if observation.get('asrInput') is not None:operation['asrInput']=copy.deepcopy(observation['asrInput'])
             operations.append({**operation,'operationHash':operation_hash(operation)})
             working.update(observedWords=copy.deepcopy(evidence['words']),
                 observedCoverage=copy.deepcopy(evidence['coverage']),repairProbes=copy.deepcopy(evidence['repairProbes']))
@@ -312,16 +375,18 @@ def child_process(command,*,timeout=180):
 
 
 class ChildObserver:
-    def __init__(self,source,song,work,decoder,uvr_model,asr_model,ensure_source,temporary):
+    def __init__(self,source,song,work,decoder,uvr_model,asr_model,ensure_source,temporary,asr_source='mix'):
         self.source=source;self.song=song;self.work=work;self.decoder=decoder
         self.uvr_model=uvr_model;self.asr_model=asr_model;self.ensure_source=ensure_source
         self.temporary=Path(temporary)
+        if asr_source not in ('mix','vocals'):raise RuntimeError('ENTRY_RESOLVE_ASR_SOURCE')
+        self.asr_source=asr_source
 
-    def invoke(self,kind,begin,end):
+    def invoke(self,kind,begin,end,**extra):
         self.ensure_source()
         request={'kind':kind,'source':str(self.source),'song':self.song,'work':str(self.work),
             'decoder':str(self.decoder),'uvrModel':str(self.uvr_model),'asrModel':self.asr_model,
-            'start':begin,'end':end,'response':str(self.temporary/'response.json')}
+            'start':begin,'end':end,'response':str(self.temporary/'response.json'),**extra}
         target=self.temporary/'request.json';atomic_json(target,request)
         Path(request['response']).unlink(missing_ok=True)
         child_process([sys.executable,'-m','aidj.fixed_set_entry_resolve','--child',str(target)])
@@ -331,9 +396,29 @@ class ChildObserver:
 
     def asr(self,begin,end):
         folder=self.work/'entry-asr-evidence';folder.mkdir(exist_ok=True)
+        if self.asr_source=='vocals':return self.vocal_asr(begin,end,folder)
         target=folder/(asr_key(self.song,begin,end,self.asr_model)+'.json')
         if not target.exists():self.invoke('asr',begin,end)
         return validate_asr(read_json(target),self.song,begin,end,self.asr_model)
+
+    def vocal_asr(self,begin,end,folder):
+        inputs=folder/'stem-inputs';inputs.mkdir(exist_ok=True)
+        index=inputs/(stem_index_key(self.song,begin,end)+'.json')
+        if index.exists():
+            metadata=validate_stem(read_json(index),self.song,begin,end)
+            target=folder/(asr_key(self.song,begin,end,self.asr_model,metadata)+'.json')
+            if target.exists():return validate_asr(read_json(target),self.song,begin,end,self.asr_model,metadata)
+        pcm=self.temporary/'entry-vocal-stem.f32'
+        try:
+            # This UVR process has completely exited before ASR is spawned.
+            response=self.invoke('stem',begin,end,stemPath=str(pcm))
+            metadata=validate_stem(response.get('asrInput'),self.song,begin,end)
+            self.invoke('asr',begin,end,asrInput=metadata,stemPath=str(pcm))
+            target=folder/(asr_key(self.song,begin,end,self.asr_model,metadata)+'.json')
+            result=validate_asr(read_json(target),self.song,begin,end,self.asr_model,metadata)
+            atomic_json(index,metadata)
+            return result
+        finally:pcm.unlink(missing_ok=True)
 
     def vocal(self,begin,end):
         adapter=CachedProbe(self.source,self.song,self.work/'vocal-evidence',self.decoder,self.uvr_model)
@@ -355,6 +440,54 @@ def asr_decode_command(decoder,source,begin,end,pcm):
         '-ar','16000','-f','f32le','-fs',str(16000*20*4+4),'-y',str(pcm)]
 
 
+def stem_asr_decode_command(decoder,source,metadata,pcm):
+    return [str(decoder),'-nostdin','-v','error','-xerror','-threads','1','-filter_threads','1',
+        '-f','f32le','-ar',str(SAMPLE_RATE),'-ac','2','-i',str(source),
+        '-af','pan=mono|c0=c'+str(metadata['selectedChannel']),'-ar','16000',
+        '-t',str(metadata['pcmFrames']/SAMPLE_RATE),'-f','f32le',
+        '-fs',str(16000*20*4+4),'-y',str(pcm)]
+
+
+def extract_stem(req):
+    """One pinned UVR inference, one temporary PCM and reusable numeric cache."""
+    import numpy as np
+    from .vocal_probe import _load_model, _separate, _evidence
+    from .fixed_set_vocal_review import VERSION as CV
+    song=req['song'];begin=req['start'];end=req['end'];folder=Path(req['work'])/'vocal-evidence'
+    a=round(begin*SAMPLE_RATE)/SAMPLE_RATE;b=min(song['duration'],round(end*SAMPLE_RATE)/SAMPLE_RATE)
+    with tempfile.TemporaryDirectory(prefix='stem-excerpt-',dir=Path(req['response']).parent) as directory:
+        pcm=Path(directory)/'mixture.f32'
+        command=[req['decoder'],'-nostdin','-v','error','-xerror','-threads','1','-filter_threads','1',
+            '-ss',str(a),'-i',req['source'],'-t',str(b-a),'-vn','-sn','-dn','-ac','2',
+            '-ar',str(SAMPLE_RATE),'-f','f32le','-fs',str(SAMPLE_RATE*20*8+8),'-y',str(pcm)]
+        process=subprocess.run(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
+        if process.returncode or not pcm.exists() or not 0<pcm.stat().st_size<=SAMPLE_RATE*20*8 or pcm.stat().st_size%8:
+            raise RuntimeError('ENTRY_RESOLVE_STEM_DECODE')
+        wave=np.fromfile(pcm,dtype='<f4').reshape(-1,2).T
+        if not np.isfinite(wave).all() or abs(a+wave.shape[1]/SAMPLE_RATE-b)>.05:
+            raise RuntimeError('ENTRY_RESOLVE_STEM_DURATION')
+        vocals=_separate(wave,_load_model(Path(req['uvrModel'])))
+        if vocals.shape!=wave.shape or vocals.dtype!=np.float32 or not np.isfinite(vocals).all():
+            raise RuntimeError('ENTRY_RESOLVE_STEM_OUTPUT')
+        target=Path(req['stemPath']);vocals.T.astype('<f4',copy=False).tofile(target)
+        with target.open('rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
+        energies=pcm_channel_energies(target)
+        metadata={'kind':'vocals','version':1,'sourceMD5':song['md5'],'requestedStart':begin,
+            'requestedEnd':end,'uvrModelSha256':MODEL_SHA256,'sourceOffsetSeconds':a,
+            'sampleRate':SAMPLE_RATE,'channels':2,'pcmBytes':target.stat().st_size,
+            'pcmFrames':vocals.shape[1],'pcmSHA256':digest,'channelPolicy':'higher-stereo-energy',
+            'channelMeanSquares':energies,'selectedChannel':stronger_channel(energies),'normalizationGainDb':0}
+        validate_stem(metadata,song,begin,end)
+        key=hashlib.sha256(json.dumps([CV,song['md5'],a,b,MODEL_SHA256],separators=(',',':')).encode()).hexdigest()
+        adapter=CachedProbe(Path(req['source']),song,folder,req['decoder'],Path(req['uvrModel']))
+        if not all_existing(adapter,[{'cacheKey':key}]):
+            numeric=_evidence(wave,vocals,SAMPLE_RATE,wave.shape[1]/SAMPLE_RATE/2)
+            numeric.update(sourceOffsetSeconds=a,md5=song['md5'],cacheKey=key,requestedEndSeconds=b,vocalReviewVersion=CV)
+            if _vectors(numeric,allow_warnings=True) is None:raise RuntimeError('ENTRY_RESOLVE_STEM_EVIDENCE')
+            atomic_json(folder/(key+'.json'),numeric)
+    atomic_json(Path(req['response']),{'kind':'stem','asrInput':metadata,'vocalEvidenceKey':key})
+
+
 def child(request):
     req=read_json(Path(request));song=req['song'];begin=req['start'];end=req['end']
     if not finite(begin) or not finite(end) or not 0<=begin<end<=song['duration']+.0001 or end-begin>20.0001:
@@ -363,6 +496,7 @@ def child(request):
     if not 0<source.stat().st_size<=40*1024**2:raise RuntimeError('ENTRY_RESOLVE_SOURCE_SIZE')
     with source.open('rb') as stream:
         if hashlib.file_digest(stream,'md5').hexdigest()!=song['md5']:raise RuntimeError('ENTRY_RESOLVE_SOURCE_CHANGED')
+    if req['kind']=='stem':return extract_stem(req)
     if req['kind']=='vocal':
         value=CachedProbe(source,song,Path(req['work'])/'vocal-evidence',req['decoder'],Path(req['uvrModel']))(begin,end)
         atomic_json(Path(req['response']),{'kind':'vocal','cacheKey':value['cacheKey']});return
@@ -375,11 +509,17 @@ def child(request):
     from .dj_worker import numeric_words
     with tempfile.TemporaryDirectory(prefix='asr-excerpt-',dir=Path(req['response']).parent) as directory:
         pcm=Path(directory)/'excerpt.f32'
-        process=subprocess.run(asr_decode_command(req['decoder'],source,begin,end,pcm),
+        asr_input=req.get('asrInput')
+        if asr_input is not None:
+            stem=validate_stem_file(req['stemPath'],asr_input,song,begin,end)
+            command=stem_asr_decode_command(req['decoder'],stem,asr_input,pcm)
+        else:command=asr_decode_command(req['decoder'],source,begin,end,pcm)
+        process=subprocess.run(command,
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=60)
         if process.returncode or not pcm.exists() or not 0<pcm.stat().st_size<=16000*20*4 or pcm.stat().st_size%4:
             raise RuntimeError('ENTRY_RESOLVE_ASR_DECODE')
-        actual_end=begin+pcm.stat().st_size/64000
+        offset=asr_input['sourceOffsetSeconds'] if asr_input else begin
+        actual_end=offset+pcm.stat().st_size/64000
         if abs(actual_end-end)>.05:raise RuntimeError('ENTRY_RESOLVE_ASR_DURATION')
         wave=np.fromfile(pcm,dtype='<f4')
         asr=WhisperModel(model['directory'],device='cpu',compute_type='int8',
@@ -388,17 +528,18 @@ def child(request):
                                  condition_on_previous_text=False,vad_filter=False)
         words=[]
         for part in segments:
-            words.extend(list(word) for word in numeric_words(part,begin))
+            words.extend(list(word) for word in numeric_words(part,offset))
             if len(words)>4000:raise RuntimeError('ENTRY_RESOLVE_ASR_WORDS')
     value={'version':ASR_CACHE_VERSION,'sourceMD5':song['md5'],'start':begin,'end':actual_end,
         'requestedEnd':end,'modelFingerprint':model['fingerprint'],'parameters':ASR_PARAMETERS,
-        'cacheKey':asr_key(song,begin,end,model),'words':words,'confident':sum(w[2] for w in words)}
-    validate_asr(value,song,begin,end,model)
+        'cacheKey':asr_key(song,begin,end,model,asr_input),'words':words,'confident':sum(w[2] for w in words)}
+    if asr_input is not None:value['asrInput']=asr_input
+    validate_asr(value,song,begin,end,model,asr_input)
     atomic_json(Path(req['work'])/'entry-asr-evidence'/(value['cacheKey']+'.json'),value)
     atomic_json(Path(req['response']),{'kind':'asr','cacheKey':value['cacheKey']})
 
 
-def run(settings,work,decoder,model,limit=None,retry=False):
+def run(settings,work,decoder,model,limit=None,retry=False,asr_source='mix'):
     from .disk import Disk
     if limit is not None and limit<0:raise RuntimeError('ENTRY_RESOLVE_LIMIT')
     decoder=shutil.which(str(decoder)) or str(decoder)
@@ -412,7 +553,7 @@ def run(settings,work,decoder,model,limit=None,retry=False):
         for old in plan['tracks']:
             path=work/'tracks'/(old['trackId']+'.json');item=read_json(path)
             if not item.get('entryReviewOnly'):continue
-            if item.get('entryResolveVersion')==VERSION and not retry:continue
+            if (item.get('entryResolveVersion')==VERSION and item.get('entryResolveAsrSource','mix')==asr_source and not retry):continue
             if limit is not None and count>=limit:break
             asset=db.execute('''SELECT a.*,r.start AS lo,r.end AS hi,l.integrated_lufs AS lufs,
                 l.true_peak_dbtp AS peak,l.method AS loudnessMethod,l.status AS loudnessStatus
@@ -439,7 +580,7 @@ def run(settings,work,decoder,model,limit=None,retry=False):
                         if source.stat().st_size!=song['bytes']:raise RuntimeError('ENTRY_RESOLVE_SOURCE_SIZE')
                         downloaded=True
                     safe_song={k:v for k,v in song.items() if k!='remote_path'}
-                    observer=ChildObserver(source,safe_song,work,decoder,model,asr_model,ensure,directory)
+                    observer=ChildObserver(source,safe_song,work,decoder,model,asr_model,ensure,directory,asr_source)
                     result=refine(item,safe_song,evidence,observer,existing=values,
                         owner=owner.get(old['trackId'],[]),rejected=bad.get(old['trackId'],[]),
                         verify_entry=lambda row,current:entry_error(row,current,owner=owner.get(old['trackId'],[]),
@@ -454,6 +595,7 @@ def run(settings,work,decoder,model,limit=None,retry=False):
                 code=str(exc) if str(exc).startswith(('ENTRY_RESOLVE_','VOCAL_REVIEW_')) else 'ENTRY_RESOLVE_RUNTIME'
                 if code in ('ENTRY_RESOLVE_CHILD_RESOURCE','ENTRY_RESOLVE_DISK'):raise
                 result={**item,'status':'needs-review','entryReviewOnly':True,'entryResolveVersion':VERSION,'entryResolveError':code}
+            result['entryResolveAsrSource']=asr_source
             atomic_json(path,result);count+=1
             print('ENTRY_RESOLVED',item.get('position'),result.get('entryReviewStatus'),old['trackId'],
                   result.get('entryProof',{}).get('method','none'),flush=True)
@@ -463,10 +605,11 @@ def run(settings,work,decoder,model,limit=None,retry=False):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--child',type=Path)
     parser.add_argument('--work',type=Path);parser.add_argument('--ffmpeg');parser.add_argument('--model',type=Path)
-    parser.add_argument('--limit',type=int);parser.add_argument('--retry',action='store_true');args=parser.parse_args()
+    parser.add_argument('--limit',type=int);parser.add_argument('--retry',action='store_true')
+    parser.add_argument('--asr-source',choices=('mix','vocals'),default='mix');args=parser.parse_args()
     if args.child:return child(args.child)
     if args.work is None or args.ffmpeg is None or args.model is None:parser.error('--work --ffmpeg --model required')
-    run(Settings(),args.work,args.ffmpeg,args.model,args.limit,args.retry)
+    run(Settings(),args.work,args.ffmpeg,args.model,args.limit,args.retry,args.asr_source)
 
 
 if __name__=='__main__':

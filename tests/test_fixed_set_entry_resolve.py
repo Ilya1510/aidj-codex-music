@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 import signal
+import struct
 import subprocess
 
 import pytest
@@ -315,3 +316,96 @@ def test_numeric_snapshot_is_bounded_and_malformed_lineage_returns_an_error():
     with pytest.raises(RuntimeError,match='SNAPSHOT_LIMIT'):
         resolve.numeric_state({'words':[['x'*(1024**2)]]},MD5)
     assert resolve.lineage_error({},song,evidence_folder=Path('/absent'),model_fingerprint='b'*64)
+
+
+def stem_metadata(begin=90.,end=110.,*,digest='c'*64,energies=None):
+    energies=energies or [.0625,.25]
+    a=round(begin*resolve.SAMPLE_RATE)/resolve.SAMPLE_RATE
+    count=round((end-a)*resolve.SAMPLE_RATE)
+    return {'kind':'vocals','version':1,'sourceMD5':MD5,'requestedStart':begin,'requestedEnd':end,
+        'uvrModelSha256':MODEL_SHA256,'sourceOffsetSeconds':a,'sampleRate':resolve.SAMPLE_RATE,
+        'channels':2,'pcmFrames':count,'pcmBytes':count*8,'pcmSHA256':digest,
+        'channelPolicy':'higher-stereo-energy','channelMeanSquares':energies,
+        'selectedChannel':resolve.stronger_channel(energies),'normalizationGainDb':0}
+
+
+def test_stem_asr_keys_bind_actual_pcm_uvr_model_channel_and_source_kind():
+    _,song,_=fixture();model={'fingerprint':'f'*64};meta=stem_metadata()
+    mix=resolve.asr_key(song,90.,110.,model)
+    stem=resolve.asr_key(song,90.,110.,model,meta)
+    assert mix!=stem
+    assert resolve.asr_key(song,90.,110.,model,{**meta,'pcmSHA256':'d'*64})!=stem
+    for change in ({'sourceMD5':'2'*32},{'uvrModelSha256':'e'*64},{'selectedChannel':0},
+                   {'normalizationGainDb':6},{'channels':1},{'pcmBytes':0}):
+        with pytest.raises(RuntimeError,match='STEM'):
+            resolve.validate_stem({**meta,**change},song,90.,110.)
+
+
+def test_antiphase_stereo_has_real_energy_and_stronger_channel_is_used_without_averaging(tmp_path):
+    path=tmp_path/'stereo.f32';path.write_bytes(struct.pack('<ffff',1.,-1.,1.,-1.))
+    assert resolve.pcm_channel_energies(path)==[1.,1.]
+    assert resolve.stronger_channel(resolve.pcm_channel_energies(path))==0
+    path.write_bytes(struct.pack('<ffff',.25,-.5,.25,-.5))
+    assert resolve.pcm_channel_energies(path)==[.0625,.25]
+    meta=stem_metadata(energies=resolve.pcm_channel_energies(path))
+    command=resolve.stem_asr_decode_command('ffmpeg',path,meta,tmp_path/'asr.f32')
+    assert command[command.index('-af')+1]=='pan=mono|c0=c1'
+    assert '-xerror' in command and command[command.index('-t')+1]=='20.0'
+
+
+def test_actual_stem_file_is_hash_source_geometry_and_channel_energy_verified(tmp_path):
+    _,song,_=fixture();path=tmp_path/'stem.f32'
+    raw=struct.pack('<ff',.25,-.5)*4410;path.write_bytes(raw)
+    meta=stem_metadata(90.,90.1,digest=hashlib.sha256(raw).hexdigest())
+    assert resolve.validate_stem_file(path,meta,song,90.,90.1)==path
+    changed={**meta,'channelMeanSquares':[.0625,.26]}
+    with pytest.raises(RuntimeError,match='STEM_ENERGY'):resolve.validate_stem_file(path,changed,song,90.,90.1)
+    path.write_bytes(raw[:-8]+struct.pack('<ff',.25,-.25))
+    with pytest.raises(RuntimeError,match='STEM_HASH'):resolve.validate_stem_file(path,meta,song,90.,90.1)
+
+
+def test_stem_extractor_exits_before_asr_child_and_pcm_is_deleted_then_cached_without_native_rework(tmp_path,monkeypatch):
+    _,song,_=fixture();model={'fingerprint':'f'*64};calls=[];meta=stem_metadata()
+    observer=resolve.ChildObserver(tmp_path/'source.mp3',song,tmp_path,'ffmpeg','uvr',model,
+        lambda:None,tmp_path,asr_source='vocals')
+    def invoke(kind,a,b,**extra):
+        calls.append(kind)
+        if kind=='stem':
+            Path(extra['stemPath']).write_bytes(b'fake-native-output')
+            return {'kind':'stem','asrInput':meta}
+        assert calls==['stem','asr'] and Path(extra['stemPath']).exists()
+        value={**observation(a,b),'version':1,'sourceMD5':MD5,'requestedEnd':b,
+            'modelFingerprint':model['fingerprint'],'parameters':resolve.ASR_PARAMETERS,'asrInput':meta}
+        value['cacheKey']=resolve.asr_key(song,a,b,model,meta)
+        (tmp_path/'entry-asr-evidence'/(value['cacheKey']+'.json')).write_text(json.dumps(value))
+        return {'kind':'asr','cacheKey':value['cacheKey']}
+    monkeypatch.setattr(observer,'invoke',invoke)
+    result=observer.asr(90.,110.)
+    assert result['asrInput']==meta and calls==['stem','asr']
+    assert not (tmp_path/'entry-vocal-stem.f32').exists()
+    assert observer.asr(90.,110.)==result and calls==['stem','asr']
+
+
+def test_temporary_stem_is_removed_even_when_asr_process_fails(tmp_path,monkeypatch):
+    _,song,_=fixture();observer=resolve.ChildObserver(tmp_path/'source',song,tmp_path,'ffmpeg','uvr',
+        {'fingerprint':'f'*64},lambda:None,tmp_path,asr_source='vocals')
+    def invoke(kind,a,b,**extra):
+        if kind=='stem':
+            Path(extra['stemPath']).write_bytes(b'stem');return {'kind':'stem','asrInput':stem_metadata()}
+        raise RuntimeError('ENTRY_RESOLVE_CHILD_FAILED')
+    monkeypatch.setattr(observer,'invoke',invoke)
+    with pytest.raises(RuntimeError,match='CHILD_FAILED'):observer.asr(90.,110.)
+    assert not (tmp_path/'entry-vocal-stem.f32').exists()
+
+
+def test_vocal_source_asr_lineage_replays_same_nonempty_rule_and_stem_identity(tmp_path):
+    item,song,evidence=fixture();v=vector();(tmp_path/(v['cacheKey']+'.json')).write_text(json.dumps(v))
+    class VocalObserver(Observer):
+        def asr(self,a,b):
+            value=super().asr(a,b);meta=stem_metadata(a,b);value['asrInput']=meta
+            value['cacheKey']=resolve.asr_key(song,a,b,{'fingerprint':value['modelFingerprint']},meta)
+            (tmp_path/(value['cacheKey']+'.json')).write_text(json.dumps(value));return value
+    result=resolve.refine(item,song,evidence,VocalObserver(tmp_path),existing=[v],verify_entry=verifier(tmp_path))
+    assert result['status']=='ready' and result['entryResolveOperations'][0]['asrInput']['kind']=='vocals'
+    assert result['repairProbes'][-1]['asrSource']=='vocals'
+    assert resolve.lineage_error(result,song,evidence_folder=tmp_path,model_fingerprint='b'*64) is None
