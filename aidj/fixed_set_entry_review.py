@@ -397,7 +397,7 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
         if changed or fade_changed:
             row['start'] = t
             result['entry'] = {**result.get('entry',{}),'time':t,'kind':selected['method'],
-                               'originalTime':original}
+                               'fade':row.get('fadeIn',0),'originalTime':original}
             # The measured outgoing audio remains, but its row fingerprint is
             # stale. The final stereo verifier must explicitly renew it.
             result.pop('stereoEvidence',None); result.pop('stereoError',None)

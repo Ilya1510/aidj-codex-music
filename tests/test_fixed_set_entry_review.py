@@ -339,3 +339,16 @@ def test_selected_entry_proof_raw_reference_has_priority_and_is_not_duplicated()
     refs=review.entry_cached_references({'entryProof':selected,'entryVocalEvidence':[other],
         'vocalEvidence':[selected]},[other,selected,{'cacheKey':'b'*64}])
     assert [r['cacheKey'] for r in refs]==['f'*64,'a'*64,'b'*64]
+
+def test_entry_metadata_uses_actual_capped_onset_fade_and_preserves_other_fields():
+    item,song=fixtures();item['entry'].update(fade=.1,penalty=1.1)
+    # The prior word permits90ms breath at40.0 but blocks moving20ms earlier.
+    # Actual next voice at40.10 therefore caps the incoming fade at70ms.
+    words=[[39.,39.91,True],[40.105,40.7,True]]
+    result=review.review_checkpoint(item,song,words,lambda *a:pytest.fail('cached'),
+        coverage=COVERAGE,existing_evidence=[onset_vectors(at=40.1)])
+    assert result['entryProof']['method']==review.ONSET_METHOD
+    assert result['row']['start']==40. and result['row']['fadeIn']==pytest.approx(.07)
+    assert result['entry']['fade']==result['row']['fadeIn']==result['entryProof']['fadeInSeconds']
+    assert result['entry']['penalty']==1.1 and result['entry']['originalTime']==40.
+    assert item['entry']['fade']==.1
