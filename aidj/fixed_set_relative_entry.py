@@ -40,6 +40,13 @@ PARAMETERS = {
     'negativeOwnerRadiusSeconds': .35, 'absoluteVocalOrMixCeilingApplied': False,
     'VADCapApplied': False, 'MAXChannelVariantUsed': False,
 }
+VERSION_V2 = 2
+PARAMETERS_V2 = {**PARAMETERS, 'bodyStartSeconds': -.1}
+
+
+def _policy(version):
+    if type(version) is not int:return None
+    return {VERSION:PARAMETERS,VERSION_V2:PARAMETERS_V2}.get(version)
 
 
 def centered_rms_bounds(point, duration):
@@ -112,8 +119,20 @@ def _rms_region(stats,a,b):
 
 
 def check_entry(vocal,rms,point,song,words,coverage,*,rejected=(),fade_in=.05):
+    """Default unchanged 200ms combined-only recipe."""
+    return _check_entry(vocal,rms,point,song,words,coverage,rejected=rejected,fade_in=fade_in,version=VERSION)
+
+
+def check_entry_v2(vocal,rms,point,song,words,coverage,*,rejected=(),fade_in=.05):
+    """Explicit150ms combined-only recipe; every other guard stays unchanged."""
+    return _check_entry(vocal,rms,point,song,words,coverage,rejected=rejected,fade_in=fade_in,version=VERSION_V2)
+
+
+def _check_entry(vocal,rms,point,song,words,coverage,*,rejected,fade_in,version):
     """Exact combined-only recipe; owner annotations never exempt a word veto."""
     reject=lambda reason:{'accepted':False,'method':METHOD,'reason':reason}
+    parameters=_policy(version)
+    if parameters is None:return reject('unknown-relative-policy-version')
     if (not _source_valid(song) or not finite(point) or not song['lo']<=point<song['hi'] or
             not finite(fade_in) or fade_in<.005):return reject('invalid-source-point-or-fade')
     if not isinstance(rejected,(list,tuple)) or any(not finite(t) for t in rejected):return reject('invalid-owner-rejections')
@@ -145,13 +164,13 @@ def check_entry(vocal,rms,point,song,words,coverage,*,rejected=(),fade_in=.05):
     if fade<.005:return reject('fade-cannot-finish-before-word-or-rise')
     stats=validate_rms(rms,song,point)
     if stats is None:return reject('invalid-original-stereo-rms')
-    spans=[_rms_region(stats,point+a,point+b) for a,b in ((-.15,.05),(-1.,-.25),(.35,1.))]
+    spans=[_rms_region(stats,point+a,point+b) for a,b in ((parameters['bodyStartSeconds'],.05),(-1.,-.25),(.35,1.))]
     if any(x is None for x in spans):return reject('incomplete-original-stereo-frames')
     body,left,right=[stats['combinedStereoRms'][a:b] for a,b in spans]
     db=lambda v:20*math.log10(max(1e-10,v))
     maximum=db(max(body));left75=db(quantile(left,.75));right75=db(quantile(right,.75));depth=min(left75,right75)-maximum
     if depth<3.-1e-7:return reject('relative-stereo-valley-below3dB')
-    return {'accepted':True,'reason':'accepted','method':METHOD,'version':VERSION,'parameters':dict(PARAMETERS),
+    return {'accepted':True,'reason':'accepted','method':METHOD,'version':version,'parameters':dict(parameters),
         'sourceMD5':song['md5'],'sourceStart':point,'sourceSignature':source_signature(song),
         'observationsHash':digest([words,coverage]),'negativeOwnerInputHash':digest(list(rejected)),
         'cacheKey':vocal['cacheKey'],'rmsCacheKey':rms['cacheKey'],
@@ -164,7 +183,7 @@ def check_entry(vocal,rms,point,song,words,coverage,*,rejected=(),fade_in=.05):
         'nextObservedWord':next_word,'nextObservedWordsAtFirstStart':same,
         'nextObservedWordConfident':all(w[2] for w in same),'nextObservedWordDelaySeconds':next_delay,
         'fadeInCapSeconds':cap,'fadeInSeconds':fade,'asrCoverageStart':point-.3,'asrCoverageEnd':point+.35,
-        'stereoBodyStart':point-.15,'stereoBodyEnd':point+.05,
+        'stereoBodyStart':point+parameters['bodyStartSeconds'],'stereoBodyEnd':point+.05,
         'stereoLeftStart':point-1.,'stereoLeftEnd':point-.25,'stereoRightStart':point+.35,'stereoRightEnd':point+1.,
         'stereoBodyFrames':list(spans[0]),'stereoLeftFrames':list(spans[1]),'stereoRightFrames':list(spans[2]),
         'stereoBodyMaxDbfs':maximum,'stereoLeftP75Dbfs':left75,'stereoRightP75Dbfs':right75,'stereoValleyDb':depth,
@@ -189,7 +208,8 @@ def selection_error(item,song,*,owner=(),evidence_folder,rejected=None):
         if (item.get('entryReviewVersion')!=ENTRY_VERSION or proof.get('method')!=METHOD or
                 not proof.get('accepted') or item.get('entryReviewInputHash')!=fingerprint(item,song,owner)):
             return 'relative-entry-input-changed'
-        if type(proof.get('version')) is not int or proof['version']!=VERSION or proof.get('parameters')!=PARAMETERS:
+        parameters=_policy(proof.get('version'))
+        if parameters is None or proof.get('parameters')!=parameters:
             return 'relative-entry-policy-version-or-parameters'
         if item.get('trackId')!=song['id'] or item.get('md5')!=song['md5'] or row.get('md5')!=song['md5'] or row.get('trackId')!=song['id']:
             return 'relative-entry-source-mismatch'
@@ -204,8 +224,8 @@ def selection_error(item,song,*,owner=(),evidence_folder,rejected=None):
         if not (0<vocal_path.stat().st_size<=2*1024*1024 and 0<rms_path.stat().st_size<=1024*1024):
             return 'relative-entry-evidence-size'
         vocal=read_json(vocal_path);rms=read_json(rms_path)
-        check=check_entry(vocal,rms,row.get('start'),song,item.get('observedWords',[]),
-            item.get('observedCoverage',[]),rejected=rejected,fade_in=row.get('fadeIn'))
+        check=_check_entry(vocal,rms,row.get('start'),song,item.get('observedWords',[]),
+            item.get('observedCoverage',[]),rejected=rejected,fade_in=row.get('fadeIn'),version=proof['version'])
         if not check['accepted']:return 'relative-entry-'+check['reason']
         if proof!=check:return 'relative-entry-proof-mismatch'
         span=row['end']-row['start']
