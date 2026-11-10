@@ -12,10 +12,10 @@ class Deck extends EventTarget{
   removeAttribute(){this.src='';}
 }
 const turn=()=>new Promise(resolve=>setImmediate(resolve));
-function setup(resolve=async()=>({src:'qa'})){
+function setup(resolve=async()=>({src:'qa'}),options={}){
  const audio=new Deck();audio.paused=false;audio.currentTime=5;
  const state={enabled:true,audio,track:source,entry:left,nextTrack:second,next:right};
- const decks=[],promotions=[];const blend=new FixedBlend({snapshot:()=>state,resolve,create:()=>{const deck=new Deck();decks.push(deck);return deck;},promote:(...args)=>promotions.push(args),revoke:()=>{}});
+ const decks=[],promotions=[];const blend=new FixedBlend({snapshot:()=>state,resolve,create:()=>{const deck=new Deck();decks.push(deck);return deck;},promote:(...args)=>promotions.push(args),revoke:()=>{},...options});
  return {audio,state,decks,promotions,blend};
 }
 test('first second is quiet; outgoing keeps authored tail; promotion envelope is continuous',()=>{
@@ -65,4 +65,26 @@ test('late play promise belongs to promoted main deck and cannot silence it',asy
  audio.currentTime=7;blend.tick();audio.currentTime=10;deck.currentTime=4;
  assert.equal(blend.promote(),true);assert.equal(promotions.length,1);
  deck.volume=.7;finish();await turn();assert.equal(deck.paused,false);assert.equal(deck.volume,.7);
+});
+test('near-deadline timer starts the prepared deck without waiting for another50ms UI poll',async()=>{
+ const timers=[];const cancelled=[];
+ const {audio,blend,decks}=setup(undefined,{schedule:(fn,delay)=>{timers.push({fn,delay});return timers.length;},unschedule:id=>cancelled.push(id)});
+ blend.tick();await turn();const deck=decks[0];deck.dispatchEvent(new Event('loadedmetadata'));deck.dispatchEvent(new Event('seeked'));
+ audio.playbackRate=1.03;audio.currentTime=6.88;blend.tick();
+ assert.equal(deck.plays,0);assert.equal(timers.length,1);assert.equal(timers[0].delay,32);
+ audio.currentTime=6.912;timers[0].fn();await turn();
+ assert.equal(deck.plays,1);assert.equal(deck.currentTime,1);assert.equal(deck.preservesPitch,true);
+ assert.ok(blend.state.mixing);blend.cancel();
+});
+test('queued start timer cannot override pause or start from a stale source; stalled clocks do not busy retry',async()=>{
+ const timers=[],cancelled=[];
+ const {audio,state,blend,decks}=setup(undefined,{schedule:(fn,delay)=>{timers.push({fn,delay});return timers.length;},unschedule:id=>cancelled.push(id)});
+ blend.tick();await turn();const deck=decks[0];deck.dispatchEvent(new Event('loadedmetadata'));deck.dispatchEvent(new Event('seeked'));
+ audio.currentTime=6.97;blend.tick();assert.equal(timers.length,1);
+ timers[0].fn();assert.equal(timers.length,1);assert.equal(deck.plays,0);
+ blend.tick();assert.equal(timers.length,2);audio.pause();blend.pause();assert.ok(cancelled.includes(2));
+ audio.currentTime=7.01;timers[1].fn();await turn();assert.equal(deck.plays,0);assert.equal(deck.volume,0);
+ audio.paused=false;audio.currentTime=6.97;blend.tick();assert.equal(timers.length,3);
+ state.nextTrack={...second,md5:'changed'};audio.currentTime=7.02;timers[2].fn();await turn();
+ assert.equal(deck.plays,0);blend.cancel();
 });

@@ -8,12 +8,15 @@ from aidj.webapp import byte_range
 
 
 def main():
-    tracks=[{'id':str(i+1)*24,'md5':str(i+1)*32,'title':'Blend '+str(i),'artist':'QA','duration':12.,'bytes':100,'format':'wav'} for i in range(3)]
-    frozen={'id':'dj1','name':'DJ 1','revision':'blend1','playlistId':1,'tracks':[{'trackId':t['id'],'md5':t['md5'],'start':1.,'end':9.,'fadeIn':3.,'fadeOut':.3,'transitionSeconds':3. if i<2 else 0.,'transitionKind':'crossfade' if i<2 else 'clean-cut','rate':1.} for i,t in enumerate(tracks)]}
+    rhythm=os.environ.get('AIDJ_QA_RHYTHM')=='1'
+    total,cut,overlap=(18.,13.,5.) if rhythm else (12.,9.,3.)
+    rates=[.97,1.03,1.] if rhythm else [1.,1.,1.]
+    tracks=[{'id':str(i+1)*24,'md5':str(i+1)*32,'title':'Blend '+str(i),'artist':'QA','duration':total,'bytes':100,'format':'wav'} for i in range(3)]
+    frozen={'id':'dj1','name':'DJ 1','revision':'blend1','playlistId':1,'tracks':[{'trackId':t['id'],'md5':t['md5'],'start':1.,'end':cut,'fadeIn':overlap,'fadeOut':.3,'transitionSeconds':overlap if i<2 else 0.,'transitionKind':'crossfade' if i<2 else 'clean-cut','rate':rates[i]} for i,t in enumerate(tracks)]}
     catalog={'access':{'role':'admin','userId':1},'tracks':tracks,'playlists':[{'id':1,'name':'Volleyball','trackIds':[t['id'] for t in tracks],'revision':'qa'}],'djSets':[frozen]}
     wav=io.BytesIO()
     with wave.open(wav,'wb') as f:
-        f.setnchannels(1);f.setsampwidth(2);f.setframerate(8000);f.writeframes(b'\0\0'*96000)
+        f.setnchannels(1);f.setsampwidth(2);f.setframerate(8000);f.writeframes(b'\0\0'*int(total*8000))
     def api(route):
         path=route.request.url.split('/api/',1)[1]
         if path.startswith('audio/'):
@@ -31,8 +34,8 @@ def main():
             page.goto(os.environ.get('AIDJ_QA_ORIGIN','http://127.0.0.1:18787'),wait_until='networkidle')
             page.locator('.playlist-card').click();page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
             page.wait_for_function('()=>!document.querySelector("audio").paused&&document.querySelector("audio").currentTime>=1')
-            page.evaluate('document.querySelector("audio").currentTime=5.6')
-            page.wait_for_function('()=>window.__decks.some(a=>!a.paused&&a.currentTime>1.15)&&document.querySelector("audio").currentTime<8.5')
+            page.evaluate(f'document.querySelector("audio").currentTime={cut-(overlap+.4)*rates[0]}')
+            page.wait_for_function(f'()=>window.__decks.some(a=>!a.paused&&a.currentTime>1.15)&&document.querySelector("audio").currentTime<{cut-.5}')
             playing=page.evaluate('''()=>{const a=document.querySelector('audio'),b=window.__decks.find(b=>b!==a&&!b.paused);return {left:a.currentTime,right:b.currentTime,leftVolume:a.volume,rightVolume:b.volume};}''')
             assert playing['rightVolume']<.4 and playing['leftVolume']>.3,playing
             paused=page.evaluate('''()=>{document.querySelector('#mini-play').click();return {main:document.querySelector('audio').paused,secondary:window.__decks.filter(a=>a!==document.querySelector('audio')).every(a=>a.paused&&a.volume===0)};}''')
@@ -43,22 +46,24 @@ def main():
             page.wait_for_function('()=>window.__decks.some(a=>a!==document.querySelector("audio")&&!a.paused)')
             page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Blend 1"')
             current=page.evaluate('''()=>({time:document.querySelector('audio').currentTime,volume:document.querySelector('audio').volume,playing:!document.querySelector('audio').paused})''')
-            assert current['time']>3.7 and current['volume']>.6 and current['playing'],current
+            assert current['time']>1+overlap*rates[1]-.35 and current['volume']>.6 and current['playing'],current
+            if rhythm:
+                assert page.evaluate('Math.abs(document.querySelector("audio").playbackRate-1.03)<.00001&&document.querySelector("audio").preservesPitch')
             page.wait_for_timeout(250);assert page.locator('#mini-title').inner_text()=='Blend 1'
             page.locator('#mini-play').click();assert page.evaluate('document.querySelector("audio").paused&&window.__decks.every(a=>a.paused)')
             # Repeat with a factual stored-file ending: Chromium emits pause
             # before ended. That event must not stop the already mixed deck.
-            for cue in frozen['tracks']:cue['end']=12.
+            for cue in frozen['tracks']:cue['end']=total
             page.evaluate("window.dispatchEvent(new Event('online'))")
             page.wait_for_timeout(150)
             page.locator('.bottom-nav [data-view="home"]').click();page.locator('.playlist-card').click()
             page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
             page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Blend 0"&&!document.querySelector("audio").paused')
-            page.evaluate('document.querySelector("audio").currentTime=8.6')
+            page.evaluate(f'document.querySelector("audio").currentTime={total-(overlap+.4)*rates[0]}')
             page.wait_for_function('()=>window.__decks.some(a=>a!==document.querySelector("audio")&&!a.paused&&a.currentTime>1.15)')
             page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Blend 1"')
             eof=page.evaluate('''()=>({time:document.querySelector('audio').currentTime,playing:!document.querySelector('audio').paused})''')
-            assert eof['time']>3.7 and eof['playing'],eof
+            assert eof['time']>1+overlap*rates[1]-.35 and eof['playing'],eof
             page.locator('#mini-play').click()
             assert page.evaluate('document.querySelector("audio").paused&&window.__decks.every(a=>a.paused)')
             # An explicit pause wins over a decoder-ended event already queued
@@ -72,7 +77,7 @@ def main():
             assert page.locator('#mini-title').inner_text()==title
             assert page.evaluate('document.querySelector("audio").paused&&window.__decks.every(a=>a.paused)')
             assert not errors,errors
-            print('FIXED_BLEND_PASSED',playing,current,flush=True)
+            print('FIXED_BLEND_PASSED',{'rhythm':rhythm,'seconds':overlap,'rates':rates},playing,current,flush=True)
         finally:ctx.close();browser.close()
 
 

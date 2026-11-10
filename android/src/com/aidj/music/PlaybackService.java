@@ -35,7 +35,7 @@ public final class PlaybackService extends Service {
     private final Handler handler=new Handler(Looper.getMainLooper());
     private BroadcastReceiver noisy;
     private final Runnable librarySync=new Runnable(){public void run(){NativeInbox.request(PlaybackService.this);handler.postDelayed(this,20000);}};
-    private final Runnable rangeTick=new Runnable(){public void run(){if(ready&&!rangeSeeking){tick();}handler.postDelayed(this,50);}};
+    private final Runnable rangeTick=new Runnable(){public void run(){if(ready&&!rangeSeeking){tick();}handler.postDelayed(this,nextTickDelay());}};
 
     @Override public void onCreate(){
         super.onCreate();instance=this;
@@ -274,6 +274,19 @@ public final class PlaybackService extends Service {
         advance(1,true);
     }
     private void incomingPrepared(){incomingReady=true;if(waitingNext&&wantPlay){promote();play();}}
+    private long nextTickDelay(){
+        // A generic50ms polling interval can miss an authored beat-aligned
+        // entrance by almost one tick. Approach that deadline using the actual
+        // source clock; no seek, playback intent, or extra player is created.
+        if(!ready||rangeSeeking||!wantPlay||waitingNext||!isPlaying()||DjPlan.fixed(source(entry()),entry())==null)return 50;
+        if(mixing)return 10;
+        if(!incomingReady)return 50;
+        long window=DjPlan.matchedOverlap(source(entry()),entry(),source(nextEntry()),nextEntry(),speed,incomingSpeed);
+        if(window<=0)return 50;
+        long end=DjPlan.endsAtSourceEnd(source(entry()),entry())?duration():PlaybackRange.end(current(),duration());
+        double until=(end-position())/(double)speed-window;
+        return until>0&&until<50?Math.max(5,(long)Math.ceil(until)):50;
+    }
     private void tick(){
         if(!wantPlay){applyVolume();return;}
         if(waitingNext){if(incomingReady&&wantPlay){promote();play();}return;}

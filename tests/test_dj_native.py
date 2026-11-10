@@ -75,6 +75,7 @@ import org.json.*;import android.media.MediaPlayer;import java.lang.reflect.*;
 public class DjServiceProbe {
  static void check(boolean v,String label){if(!v)throw new AssertionError(label);}
  static void tick(PlaybackService s)throws Exception{Method m=PlaybackService.class.getDeclaredMethod("tick");m.setAccessible(true);m.invoke(s);}
+ static long delay(PlaybackService s)throws Exception{Method m=PlaybackService.class.getDeclaredMethod("nextTickDelay");m.setAccessible(true);return (Long)m.invoke(s);}
  static JSONObject queue(){JSONObject q=new JSONObject().put("uiRevision",1).put("currentId","e1").put("repeat","off").put("djEnabled",true),tracks=new JSONObject();JSONArray es=new JSONArray();for(int i=1;i<=3;i++){
  String id=String.join("",java.util.Collections.nCopies(24,""+i));tracks.put(id,new JSONObject().put("id",id).put("md5",String.join("",java.util.Collections.nCopies(32,""+i))).put("duration",240).put("title","song "+i));
  es.put(new JSONObject().put("id","e"+i).put("trackId",id).put("dj",new JSONObject().put("start",20).put("end",130).put("bpm",128).put("fade",1.8).put("rate",1)));}return q.put("entries",es).put("tracks",tracks);}
@@ -170,6 +171,17 @@ public class DjServiceProbe {
  check(Math.abs(DjPlan.fixedEnvelope(rateSource,rateEntry,41500,240000,(float)fixedRate)-.5)<.00001,"fixed intro is measured against source samples at either playback rate");
  check(Math.abs(DjPlan.fixedEnvelope(rateSource,rateEntry,99800,240000,(float)fixedRate)-.5)<.00001,"fixed tail never exceeds the reviewed source-time fade budget");
  check(DjPlan.matchedOverlap(rateSource,rateEntry,rateSource,rateEntry,(float)fixedRate,(float)fixedRate)==5000,"five-second overlap is wall time and independent of tempo rate");
+ }
+ // The range loop approaches a fixed beat-aligned entrance using the actual
+ // source clock instead of adding the next generic50ms polling interval.
+ for(double fixedRate:new double[]{.97,1.03}){
+ s=new PlaybackService();s.onCreate();MediaPlayer.all.clear();q=queue().put("fixedSet",new JSONObject().put("id","dj1"));
+ for(int j=0;j<q.getJSONArray("entries").length();j++)q.getJSONArray("entries").getJSONObject(j).put("fixed",new JSONObject().put("start",40).put("end",100).put("fadeIn",5).put("fadeOut",.4).put("transitionSeconds",5).put("transitionKind","crossfade").put("rate",fixedRate));
+ s.setQueue(q);s.play();a=MediaPlayer.all.get(0);a.firePrepared();tick(s);b=MediaPlayer.all.get(1);b.firePrepared();
+ long target=Math.round(100000-5000*(double)(float)fixedRate);a.pos=(int)target-20;tick(s);
+ check(!b.playing&&delay(s)>=19&&delay(s)<=22,"rate-aware deadline closes the last20source milliseconds without starting early");
+ a.pos=(int)target+1;tick(s);check(b.playing&&b.pos==40000&&delay(s)==10,"fixed mix starts at the planned source clock and uses a finer envelope interval without seeking next");
+ s.pause();check(delay(s)==50&&!a.playing&&!b.playing&&a.gain==0&&b.gain==0,"precise scheduling preserves silent pause and returns idle polling to50ms");s.onDestroy();
  }
  // Slow incoming attacks survive real two-deck handoff. A short or delayed
  // overlap must not bypass the authored fade or restart it on promotion.

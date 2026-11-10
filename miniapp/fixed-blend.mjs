@@ -11,8 +11,8 @@ export function fixedBlendGains(left,leftEntry,leftTime,leftDuration,right,right
     incoming:fixedGain(right,rightEntry,rightTime,rightDuration)*Math.sin(p*Math.PI/2)};
 }
 export class FixedBlend {
-  constructor({snapshot,resolve,create=()=>new Audio(),promote,volume=(track,gain)=>gain,revoke=url=>URL.revokeObjectURL(url)}){
-    Object.assign(this,{snapshot,resolve,create,onPromote:promote,volume,revoke});this.serial=0;this.state=null;
+  constructor({snapshot,resolve,create=()=>new Audio(),promote,volume=(track,gain)=>gain,revoke=url=>URL.revokeObjectURL(url),schedule=(fn,delay)=>setTimeout(fn,delay),unschedule=handle=>clearTimeout(handle)}){
+    Object.assign(this,{snapshot,resolve,create,onPromote:promote,volume,revoke,schedule,unschedule});this.serial=0;this.state=null;
   }
   context(){
     const s=this.snapshot();if(!s?.enabled||!s.entry||!s.next)return null;
@@ -22,9 +22,22 @@ export class FixedBlend {
   }
   cancel(){
     this.serial++;const state=this.state;this.state=null;
-    if(state){state.deck.volume=0;state.deck.pause();state.deck.removeAttribute('src');state.deck.load();if(state.url)this.revoke(state.url);}
+    if(state){this.clearStartTimer(state);state.deck.volume=0;state.deck.pause();state.deck.removeAttribute('src');state.deck.load();if(state.url)this.revoke(state.url);}
   }
-  pause(){const s=this.state;if(s){s.deck.volume=0;s.deck.pause();}}
+  clearStartTimer(state){if(state.timer!=null){this.unschedule(state.timer);state.timer=null;}}
+  pause(){const s=this.state;if(s){this.clearStartTimer(s);s.deck.volume=0;s.deck.pause();}}
+  scheduleStart(context,state,remaining){
+    if(state.timer!=null)return;
+    const delay=(remaining/context.audio.playbackRate-context.cue.transitionSeconds)*1000;
+    if(!(delay>0&&delay<=100))return;
+    // This one-shot avoids the regular50ms UI poll's start quantization. A
+    // stalled source clock gets no busy retry: the next regular tick reassesses.
+    state.timer=this.schedule(()=>{
+      state.timer=null;
+      if(this.state===state&&this.context()?.key===state.key)this.tick(true);
+    },Math.ceil(delay)+2);
+    state.timer?.unref?.();
+  }
   async prepare(context){
     const serial=++this.serial,deck=this.create();deck.volume=0;deck.preload='auto';deck.preservesPitch=true;
     const state={key:context.key,deck,url:null,ready:false,mixing:false,starting:false,serial};this.state=state;
@@ -47,7 +60,7 @@ export class FixedBlend {
       if(this.state!==state||this.context()?.key!==state.key||this.snapshot().audio.paused){state.deck.volume=0;state.deck.pause();}
     }).catch(()=>{state.starting=false;if(this.state===state){this.failed=state.key;this.cancel();}});
   }
-  tick(){
+  tick(fromTimer=false){
     const context=this.context();
     if(!context){if(this.state)this.cancel();return;}
     if(this.state&&this.state.key!==context.key)this.cancel();
@@ -59,8 +72,10 @@ export class FixedBlend {
     const end=endsAtSourceEnd(context.track,context.entry)&&Number.isFinite(audio.duration)?audio.duration:context.cue.end;
     const remaining=end-audio.currentTime;
     if(!state.mixing&&remaining>0&&remaining<=context.cue.transitionSeconds*audio.playbackRate){
+      this.clearStartTimer(state);
       state.mixing=true;state.start=audio.currentTime;state.span=Math.max(.001,remaining);
     }
+    if(!state.mixing&&!fromTimer)this.scheduleStart(context,state,remaining);
     if(state.mixing){this.start(state);this.apply();}
   }
   apply(){
@@ -78,7 +93,7 @@ export class FixedBlend {
   promote(){
     const context=this.context(),state=this.state;
     if(!context||!state||state.key!==context.key||!state.ready||!state.mixing||state.deck.paused)return false;
-    state.promoted=true;this.state=null;this.serial++;
+    this.clearStartTimer(state);state.promoted=true;this.state=null;this.serial++;
     this.onPromote(state.deck,state.url,context.next);
     return true;
   }

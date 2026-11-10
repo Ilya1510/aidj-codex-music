@@ -68,6 +68,20 @@ def test_blended_fixed_set_requires_native39_but_clean_cuts_remain_compatible(mo
         assert [s['id'] for s in client_catalog(None,version)['djSets']]==['clean','blend']
 
 
+def test_rhythm_rates_and_long_attacks_require_native40(monkeypatch):
+    from aidj.webapp import client_catalog
+    import copy
+    data={'tracks':[], 'playlists':[], 'djSets':[
+        {'id':'old','tracks':[{'rate':1.,'fadeIn':3.,'transitionSeconds':3.}]},
+        {'id':'tempo','tracks':[{'rate':1.01,'fadeIn':3.,'transitionSeconds':3.}]},
+        {'id':'long','tracks':[{'rate':1.,'fadeIn':5.,'transitionSeconds':5.}]},
+        {'id':'quiet','tracks':[{'rate':1.,'fadeIn':5.,'transitionSeconds':0.}]}]}
+    monkeypatch.setattr('aidj.webapp.catalog',lambda db:copy.deepcopy(data))
+    assert [s['id'] for s in client_catalog(None,'39')['djSets']]==['old']
+    for version in (None,'40','41'):
+        assert len(client_catalog(None,version)['djSets'])==4
+
+
 def test_catalog_only_sends_the_cue_schema_supported_by_the_native_player(tmp_path,monkeypatch):
     from aidj.web_auth import create_session
     import copy

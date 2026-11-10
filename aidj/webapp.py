@@ -52,11 +52,12 @@ def client_catalog(db,version,principal=None):
     if version and (not re.fullmatch(r'[0-9]{1,6}',version) or int(version)<27):
         value['playlists']=[p for p in value['playlists'] if not p.get('combined')]
         value['combinedSupported']=False
-    # Old embedded shells accept fixed cues but ignore the incoming envelope.
-    # Serve a blended set only to players that preserve both deck envelopes.
-    if version and (not re.fullmatch(r'[0-9]{1,6}', version) or int(version)<39) and 'djSets' in value:
+    # Old embedded shells accept cues but use different fade/rate semantics.
+    if version and 'djSets' in value:
+        from .fixed_sets import required_native_version
+        native_version = int(version) if re.fullmatch(r'[0-9]{1,6}', version) else 0
         value['djSets'] = [s for s in value['djSets']
-                           if not any(r.get('transitionSeconds', 0)>0 for r in s.get('tracks', []))]
+                           if required_native_version(s) == 37 or native_version >= required_native_version(s)]
     modern=bool(re.fullmatch(r'[0-9]{1,6}',version or '')) and int(version)>=20
     hidden=('djV3','djV2','dj') if modern else ('djV4',)
     for track in value['tracks']:

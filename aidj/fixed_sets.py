@@ -5,6 +5,14 @@ import math
 import re
 
 
+def required_native_version(value):
+    rows = value.get('tracks', [])
+    if any(r.get('rate', 1) != 1 or r.get('fadeIn', 0) > 4 or
+           r.get('transitionSeconds', 0) > 4 for r in rows):
+        return 40
+    return 39 if any(r.get('transitionSeconds', 0) > 0 for r in rows) else 37
+
+
 def validate(value, assets, ranges=None):
     ranges = ranges or {}
     if not isinstance(value, dict) or value.get('id') != 'dj1':
