@@ -282,3 +282,105 @@ def test_strict_full_timing_rejects_cutoff_invalid_pcm_or_decoder_error(tmp_path
     assert all(flag not in command for flag in ('-t','-ss','-to','-shortest'))
     assert command[command.index('-fs')+1]==str(16000*1800*8+8)
     assert not (tmp_path/'hard-source-timing.f32').exists()
+
+
+def onset_entry_fixture():
+    old,song,item,evidence=fixture(160.45)
+    evidence['words']=[[0.,99.8,True],[100.14,158.5,True],[161.5,180.,True]]
+    exit_={'time':160.45,'fade':.8,'fadeStart':159.65,'regionStart':159.5,'regionEnd':161.5,
+           'maxRms':.0001,'relativeMax':.001,'method':'strict-quiet',
+           'coverageComplete':True,'absoluteSilence':True,'wordPadding':.3}
+    item.update(row={**old,'start':100.27,'fadeIn':.7},exit=exit_,entryReviewOnly=True,
+                observedWords=copy.deepcopy(evidence['words']))
+    # A short measured breath is followed by real voice at100.10 and the
+    # confident next word at100.14. Symmetric ASR padding rejects this entry,
+    # while the separate onset tier can finish its fade before both attacks.
+    voices=[.000001 if 99.82-1e-7<=90+i*.01<100.1-1e-7 else .1 for i in range(2000)]
+    return old,song,item,evidence,vector(90,20,voice=voices,mix=.3)
+
+
+def test_wide_entry_rescue_accepts_measured_word_onset_with_its_short_fade():
+    old,song,item,evidence,cached=onset_entry_fixture()
+    result=hard.review(old,song,item,evidence,forbidden,existing=[cached],entry_only=True)
+    assert result['status']=='ready' and not result['entryReviewOnly']
+    assert result['entry']['kind']==hard.ONSET_METHOD
+    assert result['row']['start']==pytest.approx(99.98)
+    proof=result['hardEntryCandidate']
+    assert result['row']['fadeIn']==proof['fadeInSeconds']<=.08
+    assert proof['risingVoiceDelaySeconds']>=.12-1e-7
+    assert result['row']['fadeIn']<=proof['risingVoiceDelaySeconds']-.03+1e-7
+    assert result['row']['fadeIn']<=proof['nextWordDelaySeconds']-.03+1e-7
+    assert result['exit']==item['exit']
+    assert result['row']['end']==item['row']['end'] and result['row']['fadeOut']==.8
+    assert result['hardReviewBudget']['newContexts']==0
+
+
+def test_wide_onset_search_never_uses_quiet_dip_inside_a_retained_unknown_word():
+    _,song,_,evidence,cached=onset_entry_fixture()
+    evidence['words'].append([99.7,100.18,False])
+    assert hard.scanned_entries(song,evidence,[cached])==[]
+
+
+def test_wide_onset_search_still_honours_owner_veto_coverage_and_source_identity():
+    _,song,_,evidence,cached=onset_entry_fixture()
+    assert hard.scanned_entries(song,evidence,[cached],rejected=[100])==[]
+    assert hard.scanned_entries(song,{**evidence,'coverage':[[0,100.3]]},[cached])==[]
+    assert hard.scanned_entries(song,evidence,[{**cached,'md5':'2'*32}])==[]
+
+
+def test_onset_pair_replays_current_gain_fade_words_and_source_instead_of_trusting_candidate(monkeypatch):
+    old,song,_,evidence,cached=onset_entry_fixture()
+    good=hard.scanned_entries(song,evidence,[cached])[0]
+    endpoint={'point':{'time':160.45,'fade':.8},'score':0}
+    monkeypatch.setattr(hard,'scanned_entries',lambda *a,**kw:[good])
+    assert hard.pair(old,song,evidence,[endpoint],[cached],certified_only=True) is not None
+    for change in ({'fade':.3},{'time':good['time']+.01},
+                   {'vector':{**cached,'md5':'2'*32}},
+                   {'check':{**good['check'],'playbackGainDb':-99}}):
+        bad={**good,**change}
+        monkeypatch.setattr(hard,'scanned_entries',lambda *a,**kw:[bad])
+        assert hard.pair(old,song,evidence,[endpoint],[cached],certified_only=True) is None
+    monkeypatch.setattr(hard,'scanned_entries',lambda *a,**kw:[good])
+    assert hard.pair(old,{**song,'lufs':-25},evidence,[endpoint],[cached],certified_only=True) is None
+    changed={**evidence,'words':[*evidence['words'],[99.7,100.18,False]]}
+    assert hard.pair(old,song,changed,[endpoint],[cached],certified_only=True) is None
+
+
+@pytest.mark.parametrize('end',[144.5,200.5])
+def test_onset_pair_does_not_escape_the_45_to_100_second_segment_budget(end):
+    old,song,_,evidence,cached=onset_entry_fixture()
+    endpoint={'point':{'time':end,'fade':.8},'score':0}
+    assert hard.pair(old,song,evidence,[endpoint],[cached],certified_only=True) is None
+
+
+def test_entry_rescue_invalidates_old_verdicts_and_mandatory_v3_gate_renews_from_raw_cache(tmp_path):
+    from aidj import fixed_set_entry_review as entry_review
+    old,song,item,evidence,cached=onset_entry_fixture()
+    item.update(entryProof={'accepted':True,'method':'stale'},entryReviewVersion=2,
+                entryReviewStatus='needs-review',entryReviewInputHash='stale',entryReviewError='old',
+                stereoEvidence={'rowStart':100.27},stereoVersion=1,stereoError='old',
+                hardEntryCandidate={'accepted':True,'cacheKey':'f'*64})
+    item['exit']['stereoVerified']=True
+    result=hard.review(old,song,item,evidence,forbidden,existing=[cached],entry_only=True)
+    for key in ('entryProof','entryReviewVersion','entryReviewInputHash','entryReviewError',
+                'stereoEvidence','stereoVersion','stereoError'):
+        assert key not in result
+    assert result['entryReviewStatus']=='pending' and result['entryShiftNeedsStereoRecheck']
+    assert 'stereoVerified' not in result['exit']
+    assert result['hardEntryCandidate']['cacheKey']==cached['cacheKey']
+    assert entry_review.selection_error(result,song,evidence_folder=tmp_path) is not None
+    renewed=entry_review.review_checkpoint(result,song,evidence['words'],forbidden,
+        coverage=evidence['coverage'],existing_evidence=[cached])
+    (tmp_path/(cached['cacheKey']+'.json')).write_text(json.dumps(cached))
+    assert renewed['entryReviewVersion']==3
+    assert entry_review.selection_error(renewed,song,evidence_folder=tmp_path) is None
+    assert renewed['row']['end']==item['row']['end'] and renewed['row']['fadeOut']==.8
+
+
+def test_entry_only_rescue_never_clips_confirmed_stored_end_to_decoded_padding():
+    old,song,item,evidence,cached=onset_entry_fixture()
+    song.update(duration=160.43,hi=160.43,metadataDuration=160.45,originalAllowedEnd=160.45)
+    result=hard.review(old,song,item,evidence,forbidden,existing=[cached],entry_only=True)
+    assert result['status']=='ready'
+    assert result['row']['end']==160.45 and result['row']['fadeOut']==item['row']['fadeOut']
+    assert result['exit']==item['exit']

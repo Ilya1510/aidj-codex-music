@@ -48,6 +48,9 @@ def selection_error(item):
     """Revalidate checkpoint evidence before it can enter a public set."""
     if item.get('status')!='ready':return 'unresolved'
     row=item.get('row',{});point=item.get('exit',{});method=point.get('method')
+    if method in ('stored-file-ending','stored-owner-clip-ending'):
+        from .fixed_set_closing import saved_selection_error
+        return saved_selection_error(item)
     required=('time','fade','fadeStart','regionStart','regionEnd','maxRms','relativeMax')
     if any(type(point.get(k)) not in (int,float) or not math.isfinite(point[k]) for k in required):return 'invalid-proof'
     if abs(row.get('end',-1)-point['time'])>.001 or abs(row.get('fadeOut',-1)-point['fade'])>.001:return 'different-cut'
@@ -307,7 +310,7 @@ def assemble(settings,work):
     assert [r['trackId'] for r in tracks]==[r['trackId'] for r in baseline['tracks']]
     plan={**baseline,'tracks':tracks,'revision':signature(tracks)}
     db=sqlite3.connect(f'file:{settings.state / "bot.sqlite"}?mode=ro',uri=True);db.row_factory=sqlite3.Row
-    assets={r['id']:dict(r) for r in db.execute('SELECT id,md5,duration FROM web_assets')}
+    assets={r['id']:dict(r) for r in db.execute('SELECT id,md5,bytes,duration FROM web_assets')}
     ranges={r['track_id']:(r['start'],r['end']) for r in db.execute('SELECT * FROM playback_ranges')}
     from .fixed_set_stereo_verify import PHYSICAL,stereo_error
     from .fixed_set_resolve import restore_evidence
@@ -326,6 +329,10 @@ def assemble(settings,work):
                       'lo':lo,'hi':hi,'manualStart':raw_lo is not None}
         entry_error=entry_selection_error(item,entry_source,owner=owner_entries.get(aid,[]),evidence_folder=work/'vocal-evidence')
         if entry_error:raise RuntimeError('REPAIR_'+entry_error)
+        if item['exit']['method'] in ('stored-file-ending','stored-owner-clip-ending'):
+            from .fixed_set_closing import selection_error as closing_error,clip_lineage
+            error=closing_error(item,entry_source,clip_lineage=clip_lineage(db,aid))
+            if error:raise RuntimeError('REPAIR_'+error)
         if item['exit']['method'] in PHYSICAL:
             source={**asset,'lo':lo,'hi':hi,'manualEnd':hi<asset['duration']-.001}
             raw=db.execute('SELECT payload FROM dj_evidence WHERE md5=?',(asset['md5'],)).fetchone()

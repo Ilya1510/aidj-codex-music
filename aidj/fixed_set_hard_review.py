@@ -22,18 +22,18 @@ from dataclasses import replace
 from .config import Settings, atomic_json
 from .fixed_set_repair import covered, entries_for, selection_error as exit_error, word_clear
 from .fixed_set_resolve import read_json, restore_evidence
-from .fixed_set_entry_review import check_entry, exemption
+from .fixed_set_entry_review import check_entry, check_entry_onset, exemption, ONSET_METHOD
 from .fixed_set_vocal_review import (CachedProbe, MODEL_SHA256, SAMPLE_RATE, VERSION as CACHE_VERSION,
     _point, _vectors, check_endpoint, finite, gain_db, quantile, source_timing)
 from .vocal_probe import verify_model
 
-VERSION = 1
+VERSION = 2
 MAX_PROBES = 2
 MAX_CONTEXT_SECONDS = 20
 MAX_TRACK_SECONDS = 180
 
 
-def measure_source_timing(source, song, decoder, folder):
+def measure_source_timing(source, song, decoder, folder, *, observer=None):
     """Strict complete decode of a source already MD5-verified by the caller."""
     pcm = Path(folder)/'hard-source-timing.f32'; maximum = 16000*1800*8
     try:
@@ -48,13 +48,16 @@ def measure_source_timing(source, song, decoder, folder):
         size=pcm.stat().st_size
         if not 0<size<maximum or size%8:raise RuntimeError('HARD_REVIEW_TIMING_DECODE')
         frames=size//8
-        return {'decodedDuration':frames/16000,
+        timing = {'decodedDuration':frames/16000,
             'metadataDuration':song.get('metadataDuration',song['duration']),
             'sourceMD5':song['md5'],'manualEnd':bool(song.get('manualEnd')),
             'sourceTimingMethod':'full-verified-decode-strict-v2',
             'decoderMethod':'full-verified-decode-strict-v2',
             'decoderErrorPolicy':'xerror','completeSource':True,'decoderExitCode':0,
             'sampleRate':16000,'channels':2,'pcmBytes':size,'pcmFrames':frames}
+        if observer is not None:
+            observer(pcm, dict(timing))
+        return timing
     finally:
         pcm.unlink(missing_ok=True)
 
@@ -231,8 +234,11 @@ def scan_endpoints(old, song, evidence, values, rejected=(), source_proof=None):
 
 
 def scanned_entries(song, evidence, values, owner=(), rejected=()):
-    """Model-derived breaths plus actual ASR coverage, not an absent transcript."""
+    """Quiet breaths or measured preroll before a new word, with real coverage."""
     result = {}; gain = gain_db(song)
+    words = evidence.get('words', [])
+    confident_starts = [w[0] for w in words if isinstance(w, (list, tuple)) and len(w) >= 3
+                        and finite(w[0]) and w[2] is True]
     for vocal in values:
         prepared = _vectors(vocal)
         if prepared is None or vocal.get('md5') != song['md5']:
@@ -246,18 +252,45 @@ def scanned_entries(song, evidence, values, owner=(), rejected=()):
                 continue
             if any(abs(at-t) < .35 for t in rejected):
                 continue
-            if not covered(evidence.get('coverage', []), at-.3, at+.3) or not word_clear(evidence.get('words', []), at-.1, at+.1, .2):
+            if not covered(evidence.get('coverage', []), at-.3, at+.3):
                 continue
-            checked = check_entry(vocal, at, evidence.get('words', []), gain, song['md5'],
-                                  coverage=evidence.get('coverage', []))
+            clear = word_clear(words, at-.1, at+.1, .2)
+            # Keep source-vector validation bounded on dense lyrics. Only a
+            # nearby confident future word can support the asymmetric tier;
+            # this cheap filter is not its word/voice proof.
+            if not clear and not any(.1-1e-7 <= t-at <= .35+1e-7 for t in confident_starts):
+                continue
+            checked = (check_entry(vocal, at, words, gain, song['md5'],
+                                   coverage=evidence.get('coverage', [])) if clear else {'accepted': False})
+            if not checked['accepted']:
+                checked = check_entry_onset(vocal, at, evidence.get('words', []), gain, song['md5'],
+                    coverage=evidence.get('coverage', []), fade_in=.08)
+                if checked['accepted']:
+                    # As in the mandatory entry reviewer, prefer120ms preroll
+                    # when the same measured breath supports it. Recheck the
+                    # shifted point rather than moving an existing verdict.
+                    delay = min(checked['risingVoiceDelaySeconds'], checked['nextWordDelaySeconds'])
+                    refined = round(at-max(0., .12-delay), 4)
+                    if (refined != at and first <= refined <= last and
+                            not any(abs(refined-t) < .35 for t in rejected)):
+                        longer = check_entry_onset(vocal, refined, evidence.get('words', []), gain,
+                            song['md5'], coverage=evidence.get('coverage', []), fade_in=.08)
+                        if longer['accepted']:
+                            checked = longer
             if checked['accepted']:
-                last_selected = at
-                result.setdefault(at, {'time': at, 'kind': 'vocal-free-entry-breath',
-                    'penalty': .6, 'fade': .1, 'check': checked, 'vector': vocal})
+                selected_at = checked['sourceStart']
+                last_selected = selected_at
+                onset = checked['method'] == ONSET_METHOD
+                result.setdefault(selected_at, {'time': selected_at, 'kind': checked['method'],
+                    'penalty': .65 if onset else .6,
+                    'fade': checked['fadeInSeconds'] if onset else .1,
+                    'check': checked, 'vector': vocal})
     return list(result.values())
 
 
 def pair(old, song, evidence, endpoints, vectors, owner=(), rejected=(), *, certified_only=False):
+    if not endpoints:
+        return None
     entries = entries_for(old, song['lo'], song['hi'], evidence.get('words', []),
                           evidence.get('coverage', []), [], owner)
     def select(candidates):
@@ -268,10 +301,20 @@ def pair(old, song, evidence, endpoints, vectors, owner=(), rejected=(), *, cert
             exempt = exemption(at, song, owner)
             observed = covered(evidence.get('coverage', []), at-.3, at+.3)
             clear = word_clear(evidence.get('words', []), at-.1, at+.1, .2)
-            if not (exempt or observed and clear and (not certified_only or 'check' in entry)):continue
+            onset = entry.get('kind') == ONSET_METHOD
+            if onset:
+                # The asymmetric tier deliberately permits the following
+                # word, but never a stale source/gain/word/fade verdict.
+                checked = check_entry_onset(entry.get('vector', {}), at,
+                    evidence.get('words', []), gain_db(song), song['md5'],
+                    coverage=evidence.get('coverage', []), fade_in=entry.get('fade', .08))
+                if (not checked['accepted'] or checked != entry.get('check') or
+                        entry.get('fade') != checked['fadeInSeconds']):continue
+            if not (exempt or onset or observed and clear and (not certified_only or 'check' in entry)):continue
+            if not song['lo'] <= at < song['hi']:continue
             for endpoint in endpoints:
                 end = endpoint['point']['time']; span = end-at
-                if 45 <= span <= 100:
+                if 45 <= span <= 100 and entry.get('fade', .1)+endpoint['point']['fade'] < span:
                     score = endpoint['score']+entry['penalty']+abs(span-62)/45+abs(at-old['start'])/200
                     if best is None or score < best[0]:best = score,entry,endpoint
         return best
@@ -385,19 +428,30 @@ def review(old, song, checkpoint, evidence, probe_window, *, owner=(), rejected=
                 'normalizedMixMaxDbfs':check['normalizedMixMaxDbfs'],
                 'normalizedMixP95Dbfs':check['normalizedMixP95Dbfs'],
                 'naturalSilenceClaimed':False,'gainAtStart':.7,'gainAtEnd':0.}
-        row = {**(checkpoint['row'] if entry_only else old), 'start': max(song['lo'], round(entry['time'],4)),
-            'end': min(song['hi'], round(point['time'],4)), 'fadeIn': entry.get('fade',.1),
-            'fadeOut': round(point['fade'],4), 'transitionKind':'clean-cut',
-            'transitionSeconds':0,'rate':1}
+        if entry_only:
+            # In particular an original-EOF closing row stores metadata time,
+            # which can exceed decoded PCM time slightly. Its confirmed exit
+            # must not be silently clipped or rewritten by an entry rescue.
+            row = {**checkpoint['row'], 'start': round(entry['time'],4),
+                   'fadeIn': entry.get('fade',.1)}
+        else:
+            row = {**old, 'start': max(song['lo'], round(entry['time'],4)),
+                'end': min(song['hi'], round(point['time'],4)), 'fadeIn': entry.get('fade',.1),
+                'fadeOut': round(point['fade'],4), 'transitionKind':'clean-cut',
+                'transitionSeconds':0,'rate':1}
         result.update(status='ready',trackId=old['trackId'],md5=old['md5'],artist=song['artist'],
             title=song['title'],row=row,entry={k:v for k,v in entry.items() if k not in ('vector','check')},
             exit=outgoing,score=score,referenceRms=checkpoint.get('referenceRms',.1) if entry_only else check['referenceRms'],old=old)
         if entry_only:
             result['entryReviewOnly'] = False
+        for key in ('stereoEvidence','stereoVersion','stereoError','entryProof','entryReviewVersion',
+                    'entryReviewInputHash','entryReviewError','hardEntryCandidate'):
+            result.pop(key,None)
         if 'check' in entry:
             result['hardEntryCandidate'] = {**entry['check'],'cacheKey':entry['vector']['cacheKey']}
-        for key in ('stereoEvidence','stereoVersion','entryProof','entryReviewVersion','entryReviewInputHash'):
-            result.pop(key,None)
+        result['exit'].pop('stereoVerified',None)
+        result['entryReviewStatus'] = 'pending'
+        result['entryShiftNeedsStereoRecheck'] = True
         result['hardReviewStatus'] = 'ready'
     else:
         result.update(status='needs-review',hardReviewStatus='needs-review',
