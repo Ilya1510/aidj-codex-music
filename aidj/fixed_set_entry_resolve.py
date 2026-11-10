@@ -32,6 +32,11 @@ from .vocal_probe import MODEL_SHA256, SAMPLE_RATE
 VERSION=2
 ASR_CACHE_VERSION=1  # Context ranking/lineage changes do not alter recognition.
 MAX_CONTEXTS=2
+MAX_LINEAGE_CONTEXTS=4
+SUPPLEMENT_VERSION=1
+SUPPLEMENT_PARAMETERS={'maximumAddedContexts':2,'maximumTotalLineageContexts':4,
+    'maximumContextSeconds':20.,'maximumASRAudioSeconds':40.,
+    'maximumUVRAudioSeconds':40.,'asrSource':'mix','modelProcessesOverlap':False}
 CONTEXT_SECONDS=20
 ASR_PARAMETERS={'model':'base','computeType':'int8','beamSize':3,'temperature':0.,
                 'wordTimestamps':True,'conditionOnPreviousText':False,'vadFilter':False}
@@ -196,6 +201,58 @@ def operation_hash(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
 
+def supplement_plan(windows,song):
+    if not isinstance(windows,(list,tuple)) or not 1<=len(windows)<=MAX_CONTEXTS:
+        raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_WINDOWS')
+    result=[]
+    for row in windows:
+        if (not isinstance(row,(list,tuple)) or len(row)!=2 or
+                not all(finite(v) for v in row) or
+                not 0<=row[0]<row[1]<=song['duration']+.0001 or row[1]-row[0]>20.0001):
+            raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_WINDOWS')
+        window=[float(row[0]),float(row[1])]
+        if window in result:raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_DUPLICATE_WINDOW')
+        result.append(window)
+    return result
+
+
+def _supplement_error(item,song,model_fingerprint):
+    """Permit at most two extra observations ONLY as a pinned v2 prefix extension."""
+    operations=item['entryResolveOperations']
+    declared='entryResolveSupplementVersion' in item or 'entryResolveSupplement' in item
+    if not declared:
+        return None if len(operations)<=MAX_CONTEXTS else 'entry-resolve-lineage-missing'
+    value=item.get('entryResolveSupplement')
+    if item.get('entryResolveSupplementVersion')!=SUPPLEMENT_VERSION or not isinstance(value,dict):
+        return 'entry-resolve-supplement-version'
+    fields={'version','parameters','sourceMD5','modelFingerprint','parentInputHash',
+            'parentOperationsHash','parentOutputHash','baseOperationCount',
+            'addedOperationCount','requestedWindows','requestedWindowsHash'}
+    if (set(value)!=fields or value.get('version')!=SUPPLEMENT_VERSION or
+            value.get('parameters')!=SUPPLEMENT_PARAMETERS or value.get('sourceMD5')!=song['md5'] or
+            value.get('modelFingerprint')!=model_fingerprint or
+            value.get('parentInputHash')!=item.get('entryResolveInputHash') or
+            item.get('entryResolveAsrSource')!='mix'):
+        return 'entry-resolve-supplement-input'
+    base=value.get('baseOperationCount');added=value.get('addedOperationCount')
+    if (type(base)is not int or type(added)is not int or not 1<=base<=MAX_CONTEXTS or
+            not 1<=added<=MAX_CONTEXTS or len(operations)!=base+added or
+            len(operations)>MAX_LINEAGE_CONTEXTS):return 'entry-resolve-supplement-budget'
+    if (operation_hash(operations[:base])!=value.get('parentOperationsHash') or
+            value.get('parentOutputHash')!=operations[base-1].get('afterHash')):
+        return 'entry-resolve-supplement-parent'
+    try:plan=supplement_plan(value.get('requestedWindows'),song)
+    except RuntimeError:return 'entry-resolve-supplement-windows'
+    if (plan!=value.get('requestedWindows') or operation_hash(plan)!=value.get('requestedWindowsHash') or
+            added>len(plan)):return 'entry-resolve-supplement-windows'
+    if any(op.get('asrInput') is not None for op in operations):return 'entry-resolve-supplement-source'
+    previous=[[op.get('start'),op.get('requestedEnd')] for op in operations[:base]]
+    if any(window in previous for window in plan):return 'entry-resolve-supplement-duplicate-window'
+    if any([op.get('start'),op.get('requestedEnd')]!=plan[i]
+           for i,op in enumerate(operations[base:])):return 'entry-resolve-supplement-operation-window'
+    return None
+
+
 def lineage_error(item,song,*,evidence_folder,model_fingerprint):
     try:
         return _lineage_error(item,song,evidence_folder=evidence_folder,model_fingerprint=model_fingerprint)
@@ -208,8 +265,10 @@ def _lineage_error(item,song,*,evidence_folder,model_fingerprint):
     initial=item.get('entryResolveInput');operations=item.get('entryResolveOperations')
     if (item.get('entryResolveVersion')!=VERSION or not isinstance(initial,dict) or
             initial.get('sourceMD5')!=song['md5'] or item.get('md5')!=song['md5'] or
-            not isinstance(operations,list) or len(operations)>MAX_CONTEXTS):
+            not isinstance(operations,list) or any(not isinstance(op,dict) for op in operations)):
         return 'entry-resolve-lineage-missing'
+    supplemental_error=_supplement_error(item,song,model_fingerprint)
+    if supplemental_error:return supplemental_error
     if operation_hash(initial)!=item.get('entryResolveInputHash'):return 'entry-resolve-input-hash'
     state=copy.deepcopy(initial)
     for operation in operations:
@@ -270,13 +329,25 @@ def select_cached(item,song,evidence,values,owner,rejected):
         return None
 
 
-def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify_entry):
+def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify_entry,
+           supplement_windows=None):
     """Pure orchestration with injected child observer, bounded to two windows."""
     if not item.get('entryReviewOnly'):raise RuntimeError('ENTRY_RESOLVE_NOT_PENDING')
     if item.get('md5')!=song['md5'] or exit_error({**item,'status':'ready'}):
         raise RuntimeError('ENTRY_RESOLVE_PREVIOUS_EXIT_INVALID')
     original=copy.deepcopy(item);working=copy.deepcopy(item);evidence=copy.deepcopy(evidence)
-    initial=numeric_state(evidence,song['md5']);operations=[]
+    initial=numeric_state(evidence,song['md5']);operations=[];parent_operations=[];parent_attempts=[]
+    if supplement_windows is not None:
+        supplement_windows=supplement_plan(supplement_windows,song)
+        if (item.get('entryResolveVersion')!=VERSION or item.get('entryResolveAsrSource')!='mix' or
+                item.get('entryResolveSupplementVersion') is not None or
+                not isinstance(item.get('entryResolveOperations'),list) or
+                not 1<=len(item['entryResolveOperations'])<=MAX_CONTEXTS or
+                operation_hash(initial)!=item.get('entryResolveOutputHash')):
+            raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_PARENT')
+        initial=copy.deepcopy(item['entryResolveInput'])
+        parent_operations=copy.deepcopy(item['entryResolveOperations']);operations=copy.deepcopy(parent_operations)
+        parent_attempts=copy.deepcopy(item.get('entryResolveAttempts',[]))
     outgoing=copy.deepcopy(item['exit']);source_ending=copy.deepcopy(item.get('sourceEnding'))
     fixed_end=item['row']['end'];fixed_fade=item['row']['fadeOut']
     values={v['cacheKey']:v for v in existing if v.get('md5')==song['md5'] and _vectors(v) is not None}
@@ -298,8 +369,11 @@ def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify
             return False
         selected=result;return True
     if not choose():
-        for begin,end in contexts(item,song):
+        for begin,end in contexts(item,song) if supplement_windows is None else supplement_windows:
             observation=observer.asr(begin,end)  # This child has EXITED before UVR.
+            if supplement_windows is not None and (observation.get('asrInput') is not None or
+                    observation.get('modelFingerprint')!=parent_operations[0]['modelFingerprint']):
+                raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_MODEL_INPUT')
             before=operation_hash(numeric_state(evidence,song['md5']))
             evidence=apply_asr(evidence,observation)
             operation={'version':VERSION,'beforeHash':before,
@@ -333,7 +407,7 @@ def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify
     result.update(observedWords=copy.deepcopy(evidence.get('words',[])),
         observedCoverage=copy.deepcopy(evidence.get('coverage',[])),repairProbes=copy.deepcopy(evidence.get('repairProbes',[])),
         entryVocalEvidence=references(original.get('entryVocalEvidence',[]),[_ref(v) for v in values.values()]),
-        entryResolveVersion=VERSION,entryResolveAttempts=attempts,
+        entryResolveVersion=VERSION,entryResolveAttempts=parent_attempts+attempts,
         entryResolveInput=initial,entryResolveInputHash=operation_hash(initial),
         entryResolveOperations=operations,
         entryResolveOutputHash=operation_hash(numeric_state(evidence,song['md5'])),
@@ -341,6 +415,15 @@ def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify
         entryResolveBudget={'contexts':len(attempts),'maximumContexts':MAX_CONTEXTS,
                             'maximumASRAudioSeconds':40,'maximumUVRAudioSeconds':40,
                             'modelProcessesOverlap':False})
+    if supplement_windows is not None and attempts:
+        declaration={'version':SUPPLEMENT_VERSION,'parameters':dict(SUPPLEMENT_PARAMETERS),
+            'sourceMD5':song['md5'],'modelFingerprint':parent_operations[0]['modelFingerprint'],
+            'parentInputHash':item['entryResolveInputHash'],
+            'parentOperationsHash':operation_hash(parent_operations),
+            'parentOutputHash':item['entryResolveOutputHash'],
+            'baseOperationCount':len(parent_operations),'addedOperationCount':len(attempts),
+            'requestedWindows':supplement_windows,'requestedWindowsHash':operation_hash(supplement_windows)}
+        result.update(entryResolveSupplementVersion=SUPPLEMENT_VERSION,entryResolveSupplement=declaration)
     if attempts:
         # Any ASR replacement changes lineage, even if the numeric point did
         # not move. Final stereo replay must renew the row/input fingerprint.
@@ -348,6 +431,28 @@ def refine(item,song,evidence,observer,*,existing=(),owner=(),rejected=(),verify
         result['entryShiftNeedsStereoRecheck']=True
     assert result['exit']==outgoing and result['row']['end']==fixed_end and result['row']['fadeOut']==fixed_fade
     assert result.get('sourceEnding')==source_ending
+    return result
+
+
+def refine_supplement(item,song,observer,windows,*,evidence_folder,model_fingerprint,
+                      existing=(),owner=(),rejected=(),verify_entry):
+    """Keep original input and every parent operation; add at most two base calls."""
+    plan=supplement_plan(windows,song)
+    if (item.get('entryResolveSupplementVersion') is not None or
+            item.get('entryResolveAsrSource')!='mix' or
+            lineage_error(item,song,evidence_folder=evidence_folder,model_fingerprint=model_fingerprint)):
+        raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_PARENT_LINEAGE')
+    old_windows=[[op['start'],op['requestedEnd']] for op in item['entryResolveOperations']]
+    if any(window in old_windows for window in plan):raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_DUPLICATE_WINDOW')
+    # restore_evidence concatenates equivalent coverage. The original ordered
+    # v2 state must stay byte-for-byte reproducible instead of being reset.
+    evidence=numeric_state({'words':item.get('observedWords',[]),
+        'coverage':item.get('observedCoverage',[]),'repairProbes':item.get('repairProbes',[])},song['md5'])
+    result=refine(item,song,evidence,observer,existing=existing,owner=owner,rejected=rejected,
+        verify_entry=verify_entry,supplement_windows=plan)
+    result['entryResolveAsrSource']='mix'
+    error=lineage_error(result,song,evidence_folder=evidence_folder,model_fingerprint=model_fingerprint)
+    if error:raise RuntimeError('ENTRY_RESOLVE_SUPPLEMENT_FINAL_LINEAGE')
     return result
 
 
