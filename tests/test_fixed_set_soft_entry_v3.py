@@ -121,5 +121,5 @@ def test_no_arbitrary_short_body_or_cap_parameter():
     data = fixture()
     for kwargs in [{'before_seconds':.01}, {'mix_cap':.1}, {'version':3.0}]:
         with pytest.raises(TypeError): check_v3(data, **kwargs)
-    for version in [True, 3.0, 'v3', 4, None]:
+    for version in [True, 3.0, 'v3', 5, None]:
         assert soft._policy(version) is None

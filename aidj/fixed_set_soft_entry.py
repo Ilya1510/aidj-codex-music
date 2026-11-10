@@ -1,15 +1,18 @@
 """Pure replay of a lower-confidence, jointly corroborated incoming boundary.
 
-UVR's less quiet 200 ms interval must agree with independently measured raw
-stereo MIX speech probabilities. Every known ASR span remains a veto, including
-low-confidence spans. This module neither runs models nor selects/publishes a
+UVR energy and retained ASR constrain each incoming interval. Every known ASR
+span remains a veto, including low-confidence spans. Versions 1 through 3 also
+require a low measured stereo MIX speech score; version 4 reports that score
+without imposing a cutoff. This module neither runs models nor selects/publishes a
 cut. Flat low model output is explicitly an approximate observation, never a
 claim that a word boundary or absence of singing has been proved.
 
 Version 1 remains the default with a .01 MIX cap. Explicit version 2 uses .05
 with every other condition unchanged. Explicit version 3 shortens only the
 UVR/MIX body before the point from .15 to .1 seconds; the earlier rise context
-remains -.15 to -.02 seconds. Its small owner-label calibration is
+remains -.15 to -.02 seconds. Explicit V4 retains every V3 source, UVR,
+word, rise, fade and canonical MIX validation; the measured MIX speech score is
+a reported diagnostic without a decision cutoff. Its small owner-label calibration is
 descriptive evidence, not a guarantee about future boundaries or singing.
 """
 import hashlib
@@ -47,10 +50,13 @@ VERSION_V2 = 2
 PARAMETERS_V2 = {**PARAMETERS, 'mixSpeechMax': .05}
 VERSION_V3 = 3
 PARAMETERS_V3 = {**PARAMETERS_V2, 'beforeSeconds': .1}
+VERSION_V4 = 4
+PARAMETERS_V4 = {**PARAMETERS_V3, 'mixSpeechMax': None,
+    'mixSpeechDecisionRole': 'diagnostic-only'}
 
 
 def _policy(version):
-    """Only three named contracts exist; no caller-supplied runtime threshold."""
+    """Only four named contracts exist; no caller-supplied runtime threshold."""
     if type(version) is not int:
         return None
     if version == VERSION:
@@ -59,6 +65,8 @@ def _policy(version):
         return PARAMETERS_V2
     if version == VERSION_V3:
         return PARAMETERS_V3
+    if version == VERSION_V4:
+        return PARAMETERS_V4
     return None
 
 
@@ -162,6 +170,12 @@ def check_entry_v3(vocal, mix, point, song, words, coverage, *, rejected=(), fad
         rejected=rejected, fade_in=fade_in, version=VERSION_V3)
 
 
+def check_entry_v4(vocal, mix, point, song, words, coverage, *, rejected=(), fade_in=.05):
+    """Explicit V4: V3 guards, measured canonical MIX score is diagnostic only."""
+    return _check_entry(vocal, mix, point, song, words, coverage,
+        rejected=rejected, fade_in=fade_in, version=VERSION_V4)
+
+
 def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in, version):
     """Reconstruct both raw proofs; do not infer text, erase words or run audio."""
     reject = lambda reason: {'accepted': False, 'method': METHOD, 'reason': reason}
@@ -248,9 +262,9 @@ def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in,
         return reject('incomplete-real-mix-frames')
     left = max(speech['leftSpeechProbability'][i] for i in indexes)
     right = max(speech['rightSpeechProbability'][i] for i in indexes)
-    if max(left, right) > parameters['mixSpeechMax']:
+    if version != VERSION_V4 and max(left, right) > parameters['mixSpeechMax']:
         return reject('raw-mix-speech-at-entry')
-    return {'accepted': True, 'method': METHOD, 'reason': 'accepted', 'version': version,
+    proof = {'accepted': True, 'method': METHOD, 'reason': 'accepted', 'version': version,
         'parameters': dict(parameters), 'sourceMD5': song['md5'], 'sourceStart': point,
         'sourceSignature': source_signature(song), 'observationsHash': digest([words, coverage]),
         'negativeOwnerInputHash': digest(list(rejected)), 'proofStart': a, 'proofEnd': b,
@@ -288,6 +302,10 @@ def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in,
         'verifiedWordBoundary': False, 'naturalSilenceClaimed': False,
         'voiceAbsenceProven': False, 'speechModelCanMissSinging': True,
         'speechContextDependenceKnown': True}
+    if version == VERSION_V4:
+        proof.update(mixSpeechThresholdApplied=False, speechProbabilityDiagnosticOnly=True,
+            confidenceKind='approximate-low-UVR-voice-between-observed-words-with-measured-MIX-diagnostic')
+    return proof
 
 
 def selection_error(item, song, *, owner=(), evidence_folder, rejected=None):
