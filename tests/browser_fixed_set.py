@@ -78,22 +78,37 @@ def main():
                     page.locator('.bottom-nav [data-view="home"]').click();page.locator('.playlist-card').click();page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
                     page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused')
                     page.locator('#mini-play').click()
-                    page.evaluate('''()=>{const a=document.querySelector('audio');window.__fileEndEvents=[];a.addEventListener('ended',()=>window.__fileEndEvents.push({time:a.currentTime,ended:a.ended}));a.currentTime=7.96;a.playbackRate=.1;a.dispatchEvent(new Event('timeupdate'));}''')
+                    page.evaluate('''()=>{const a=document.querySelector('audio');window.__fileEndEvents=[];window.__fileEndTimeline=[];
+                      const record=type=>{const v={type,wall:performance.now(),time:a.currentTime,ended:a.ended,paused:a.paused,rate:a.playbackRate,volume:a.volume,title:document.querySelector('#mini-title').textContent,source:a.getAttribute('src')};window.__fileEndTimeline.push(v);return v;};
+                      for(const type of ['play','playing','pause','ended','timeupdate','seeking','seeked','ratechange','loadstart','loadedmetadata'])a.addEventListener(type,()=>{const v=record(type);if(type==='ended')window.__fileEndEvents.push(v);});
+                      const play=a.play.bind(a);a.play=function(){record('play-call');return play();};
+                      a.currentTime=7.96;a.playbackRate=.1;a.dispatchEvent(new Event('timeupdate'));
+                    }''')
                     page.wait_for_timeout(100)
                     assert page.locator('#mini-title').inner_text()=='Fixed song 2'
                     assert page.evaluate('document.querySelector("audio").paused&&document.querySelector("audio").currentTime>7.95')
-                    page.locator('#mini-play').click()
-                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused&&document.querySelector("audio").currentTime>=7.97')
-                    assert page.evaluate('document.querySelector("audio").volume')>.69
+                    # Capture the synchronous play() call instead of polling a
+                    # fleeting final40ms of actual decoder playback.
+                    resumed=page.evaluate('''()=>{document.querySelector('#mini-play').click();return window.__fileEndTimeline.filter(v=>v.type==='play-call').at(-1);}''')
+                    assert resumed and resumed['title']=='Fixed song 2' and resumed['time']>=7.95 and resumed['volume']>.69,resumed
                     page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 0"')
                     ended=page.evaluate('window.__fileEndEvents');assert len(ended)==1 and ended[0]['ended'] and ended[0]['time']>=7.999
+                    events=page.evaluate('window.__fileEndTimeline')
+                    end_index=next(i for i,v in enumerate(events) if v['type']=='ended')
+                    next_play=next(i for i,v in enumerate(events) if v['type']=='play-call' and v['title']=='Fixed song 0')
+                    assert end_index<next_play,events
+                    print('SOURCE_END_CHECKPOINT',{'resumeTime':resumed['time'],'resumeRate':resumed['rate'],
+                        'resumeGain':resumed['volume'],'actualEnd':ended[0]['time'],
+                        'millisecondsToEnded':round(ended[0]['wall']-resumed['wall'],2),
+                        'endedBeforeNextPlay':end_index<next_play},flush=True)
                     page.evaluate('document.querySelector("audio").dispatchEvent(new Event("ended"))')
                     page.wait_for_timeout(100)
                     assert page.locator('#mini-title').inner_text()=='Fixed song 0'
                     page.locator('#mini-play').click()
                 assert not errors,errors
             except Exception:
-                print('FIXED_SET_FAILED',native,errors,page.locator('main').inner_text()[:1400],flush=True);raise
+                print('FIXED_SET_FAILED',native,errors,page.locator('main').inner_text()[:1400],flush=True)
+                print('SOURCE_END_TIMELINE',page.evaluate('window.__fileEndTimeline||[]'),flush=True);raise
             finally:ctx.close();browser.close()
     print('FIXED_SET_PASSED native_frozen_transport web_real_bounds pause restore explicit_order queue_labels late_range_md5_invalidation')
 
