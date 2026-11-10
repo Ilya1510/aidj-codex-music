@@ -322,7 +322,9 @@ def assemble(settings,work):
         aid=item['trackId'];asset=assets.get(aid)
         if not asset:raise RuntimeError('REPAIR_SOURCE_MISSING')
         raw_lo,raw_hi=ranges.get(aid,(None,None))
-        lo=0 if raw_lo is None else raw_lo
+        # Review runners fingerprint the uncropped lower bound as0.0. Keep its
+        # JSON representation stable when the final plan reloads current data.
+        lo=0. if raw_lo is None else raw_lo
         hi=asset['duration'] if raw_hi is None else raw_hi
         level=db.execute('SELECT integrated_lufs AS lufs,true_peak_dbtp AS peak,method AS loudnessMethod,status AS loudnessStatus FROM audio_loudness WHERE md5=?',(asset['md5'],)).fetchone()
         entry_source={**asset,**(dict(level) if level else {'lufs':None,'peak':None}),

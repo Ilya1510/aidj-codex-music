@@ -118,3 +118,44 @@ def test_vocal_evidence_must_cover_whole_fade_and_reject_word_energy():
     for patch in [{'normalizedVocalMaxDbfs':-20},{'proofEnd':72},{'modelSha256':'0'*64}]:
         changed=copy.deepcopy(item);changed['exit']['vocalCheck'].update(patch)
         assert selection_error(changed)
+
+
+def test_assembly_preserves_the_reviewed_float_zero_for_an_uncropped_source(tmp_path,monkeypatch):
+    import json
+    import sqlite3
+    from aidj import fixed_set_entry_review as entry
+    from aidj import fixed_set_repair as repair
+    from aidj import fixed_set_stereo_verify as stereo
+    from aidj.fixed_sets import signature
+
+    state=tmp_path/'state';state.mkdir();work=tmp_path/'work';(work/'tracks').mkdir(parents=True)
+    owner=state/'research/dj1-curation';owner.mkdir(parents=True)
+    (owner/'owner-entries.json').write_text('{}')
+    aid='a'*24;md5='1'*32
+    row={'trackId':aid,'md5':md5,'start':0.,'end':99.975,'fadeIn':.08,
+         'fadeOut':.15,'rate':1,'transitionSeconds':0,'transitionKind':'clean-cut'}
+    point={'time':99.975,'fade':.15,'fadeStart':99.825,'regionStart':99.7,'regionEnd':100.,
+           'maxRms':.00001,'relativeMax':.0001,'method':'short-digital-EOF',
+           'actualEOF':True,'sourceDuration':100.,'metadataDuration':100.,'unmeasuredTail':0.}
+    item={'status':'ready','trackId':aid,'md5':md5,'row':row,'exit':point}
+    song={'id':aid,'md5':md5,'bytes':1000,'duration':100.,'lo':0.,'hi':100.,
+          'manualStart':False,'lufs':-16.,'peak':-2.,
+          'loudnessMethod':'ebu-r128-v1','loudnessStatus':'complete'}
+    def forbidden(*args):raise AssertionError('source-start review needs no inference')
+    item=entry.review_checkpoint(item,song,[],forbidden)
+    (work/'tracks'/(aid+'.json')).write_text(json.dumps(item))
+    (work/'baseline.json').write_text(json.dumps({'id':'dj1','playlistId':1,
+        'revision':signature([row]),'tracks':[row]}))
+    db=sqlite3.connect(state/'bot.sqlite')
+    db.executescript('''CREATE TABLE web_assets(id TEXT,md5 TEXT,bytes INTEGER,duration REAL);
+        CREATE TABLE playback_ranges(track_id TEXT,start REAL,end REAL);
+        CREATE TABLE audio_loudness(md5 TEXT,integrated_lufs REAL,true_peak_dbtp REAL,method TEXT,status TEXT);
+        CREATE TABLE dj_evidence(md5 TEXT,payload TEXT);''')
+    db.execute('INSERT INTO web_assets VALUES (?,?,?,?)',(aid,md5,1000,100.))
+    db.execute('INSERT INTO audio_loudness VALUES (?,?,?,?,?)',(md5,-16.,-2.,'ebu-r128-v1','complete'))
+    db.execute('INSERT INTO dj_evidence VALUES (?,?)',(md5,'{}'));db.commit();db.close()
+    # Stereo waveform validation has its own fixtures. Keep the actual entry
+    # fingerprint/gate and final plan assembly active for this regression.
+    monkeypatch.setattr(stereo,'stereo_error',lambda *args:None)
+    repair.assemble(SimpleNamespace(state=state),work)
+    assert json.loads((work/'plan.json').read_text())['tracks']==[row]
