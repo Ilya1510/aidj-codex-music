@@ -22,7 +22,8 @@ from dataclasses import replace
 from .config import Settings, atomic_json
 from .fixed_set_repair import covered, entries_for, selection_error as exit_error, word_clear
 from .fixed_set_resolve import read_json, restore_evidence
-from .fixed_set_entry_review import check_entry, check_entry_onset, _check_entry, _check_entry_onset, exemption, ONSET_METHOD
+from .fixed_set_entry_review import (check_entry, check_entry_onset, check_entry_preroll,
+    _check_entry, _check_entry_onset, _check_entry_preroll, exemption, ONSET_METHOD, PREROLL_METHOD)
 from .fixed_set_vocal_review import (CachedProbe, MODEL_SHA256, SAMPLE_RATE, VERSION as CACHE_VERSION,
     _point, _vectors, check_endpoint, finite, gain_db, quantile, source_timing)
 from .vocal_probe import verify_model
@@ -258,7 +259,9 @@ def scanned_entries(song, evidence, values, owner=(), rejected=()):
             # Keep source-vector validation bounded on dense lyrics. Only a
             # nearby confident future word can support the asymmetric tier;
             # this cheap filter is not its word/voice proof.
-            if not clear and not any(.1-1e-7 <= t-at <= .35+1e-7 for t in confident_starts):
+            can_onset=any(.1-1e-7 <= t-at <= .35+1e-7 for t in confident_starts)
+            preroll_clear=not any(w[0]<at+.08-1e-7 and w[1]>at-.08+1e-7 for w in words)
+            if not clear and not can_onset and not preroll_clear:
                 continue
             checked = (_check_entry(vocal, at, words, gain, song['md5'], prepared,
                                    coverage=evidence.get('coverage', [])) if clear else {'accepted': False})
@@ -277,13 +280,17 @@ def scanned_entries(song, evidence, values, owner=(), rejected=()):
                             song['md5'], prepared, coverage=evidence.get('coverage', []), fade_in=.08)
                         if longer['accepted']:
                             checked = longer
+            if not checked['accepted'] and preroll_clear:
+                checked = _check_entry_preroll(vocal,at,words,gain,song['md5'],prepared,
+                    coverage=evidence.get('coverage',[]),fade_in=.08)
             if checked['accepted']:
                 selected_at = checked['sourceStart']
                 last_selected = selected_at
                 onset = checked['method'] == ONSET_METHOD
+                preroll = checked['method'] == PREROLL_METHOD
                 result.setdefault(selected_at, {'time': selected_at, 'kind': checked['method'],
-                    'penalty': .65 if onset else .6,
-                    'fade': checked['fadeInSeconds'] if onset else .1,
+                    'penalty': .67 if preroll else .65 if onset else .6,
+                    'fade': checked['fadeInSeconds'] if onset or preroll else .1,
                     'check': checked, 'vector': vocal})
     return list(result.values())
 
@@ -301,16 +308,17 @@ def pair(old, song, evidence, endpoints, vectors, owner=(), rejected=(), *, cert
             exempt = exemption(at, song, owner)
             observed = covered(evidence.get('coverage', []), at-.3, at+.3)
             clear = word_clear(evidence.get('words', []), at-.1, at+.1, .2)
-            onset = entry.get('kind') == ONSET_METHOD
-            if onset:
+            ramped = entry.get('kind') in (ONSET_METHOD,PREROLL_METHOD)
+            if ramped:
                 # The asymmetric tier deliberately permits the following
                 # word, but never a stale source/gain/word/fade verdict.
-                checked = check_entry_onset(entry.get('vector', {}), at,
+                validator=check_entry_onset if entry.get('kind')==ONSET_METHOD else check_entry_preroll
+                checked = validator(entry.get('vector', {}), at,
                     evidence.get('words', []), gain_db(song), song['md5'],
                     coverage=evidence.get('coverage', []), fade_in=entry.get('fade', .08))
                 if (not checked['accepted'] or checked != entry.get('check') or
                         entry.get('fade') != checked['fadeInSeconds']):continue
-            if not (exempt or onset or observed and clear and (not certified_only or 'check' in entry)):continue
+            if not (exempt or ramped or observed and clear and (not certified_only or 'check' in entry)):continue
             if not song['lo'] <= at < song['hi']:continue
             for endpoint in endpoints:
                 end = endpoint['point']['time']; span = end-at

@@ -40,6 +40,15 @@ ONSET_PARAMETERS = {'preStartSeconds':-.15,'preEndSeconds':-.02,
                     'minimumRiseDb':8.,'quietP95Dbfs':-43.,'absoluteMaxDbfs':-37.,
                     'suppressedP95Db':-30.,'maximumFadeInSeconds':.08,
                     'fadeBeforeOnsetSeconds':.03,'minimumFadeInSeconds':.005}
+PREROLL_METHOD = 'vocal-free-entry-with-measured-preroll'
+PREROLL_PARAMETERS = {'beforeSeconds':.15,'afterSeconds':.05,
+    'excerptGuardSeconds':.25,'quietP95Dbfs':-43.,'absoluteMaxDbfs':-37.,
+    'suppressedP95Db':-30.,'asrCrossingMarginSeconds':.08,
+    'asrCoverageBeforeSeconds':.3,'asrCoverageAfterSeconds':.35,
+    'preStartSeconds':-.15,'preEndSeconds':-.02,
+    'riseSearchStartSeconds':-.02,'riseSearchEndSeconds':.35,'riseAbovePreP95Db':8.,
+    'minimumAcousticPrerollSeconds':.1,'maximumFadeInSeconds':.08,
+    'fadeBeforeOnsetSeconds':.03,'minimumFadeInSeconds':.005}
 MAX_CACHED_EVIDENCE_BYTES=2*1024**2
 
 
@@ -246,6 +255,72 @@ def _check_entry_onset(vocal,point,words,playback_gain_db,source_md5,prepared,*,
             'naturalSilenceClaimed':False,'lowSpeechProbabilityUsed':False}
 
 
+def check_entry_preroll(vocal,point,words,playback_gain_db,source_md5,*,coverage=(),fade_in=.08):
+    """An acoustic breath with retained ASR guards and a measured safe ramp.
+
+    The legacy300ms word margin may reject a real breath before a following
+    phrase. This separate tier retains every word/confidence with an80ms veto,
+    leaves at least100ms before an observed vocal rise, and ends its short fade
+    before both that rise and the next ASR word. A later/no immediate word is
+    expected during instrumental music; it is never invented or erased here.
+    """
+    return _check_entry_preroll(vocal,point,words,playback_gain_db,source_md5,_vectors(vocal),
+        coverage=coverage,fade_in=fade_in)
+
+
+def _check_entry_preroll(vocal,point,words,playback_gain_db,source_md5,prepared,*,coverage=(),fade_in=.08):
+    reject=lambda reason:{'accepted':False,'reason':reason,'method':PREROLL_METHOD}
+    if not finite(fade_in) or fade_in<.005:return reject('invalid-entry-fade')
+    if not isinstance(words,(list,tuple)):return reject('invalid-entry-words')
+    for word in words:
+        if (not isinstance(word,(list,tuple)) or len(word)<3 or
+                not finite(word[0]) or not finite(word[1]) or word[0]>word[1] or
+                type(word[2]) is not bool):return reject('invalid-entry-words')
+    acoustic=_check_entry(vocal,point,words,playback_gain_db,source_md5,prepared,coverage=coverage)
+    if acoustic.get('criterion') is None:
+        return reject(acoustic['reason'] if 'criterion' not in acoustic else 'entry-vocal-not-quiet')
+    offset,hop,duration,values=prepared
+    # The rise search is longer than the quiet200ms window. Its entire context
+    # must exist, with the same250ms model-edge guard as every other proof.
+    if point-.3<offset+.25-1e-7 or point+.35>offset+duration-.25+1e-7:
+        return reject('incomplete-entry-context')
+    if not covered(coverage,point-.3,point+.35):return reject('entry-asr-unobserved')
+    if any(x<point+.08-1e-7 and y>point-.08+1e-7 for x,y,*_ in words):
+        return reject('entry-word-crosses-preroll-guard')
+    first=max(0,math.floor((point-.15-offset)/hop+1e-8))
+    last=min(len(values[1]),math.ceil((point-.02-offset)/hop-1e-8))
+    if first>=last:return reject('incomplete-entry-frames')
+    pre_p95=20*math.log10(max(1e-10,quantile(values[1][first:last],.95)))+playback_gain_db
+    threshold=pre_p95+8
+    first=max(0,math.floor((point-.02-offset)/hop+1e-8))
+    last=min(len(values[1]),math.ceil((point+.35-offset)/hop-1e-8))
+    if first>=last:return reject('incomplete-entry-frames')
+    rising=next((i for i in range(first,last) if
+        20*math.log10(max(1e-10,values[1][i]))+playback_gain_db>=threshold),None)
+    rising_time=None if rising is None else offset+rising*hop
+    delay=None if rising_time is None else rising_time-point
+    if delay is not None and delay<.1-1e-7:return reject('entry-new-voice-preroll')
+    upcoming=sorted((w for w in words if w[0]>=point-1e-7),key=lambda w:(w[0],w[1]))
+    next_start=upcoming[0][0] if upcoming else None
+    cap=min(.08,delay-.03 if delay is not None else .08,
+        next_start-point-.03 if next_start is not None else .08)
+    chosen=round(min(fade_in,cap),4)
+    if chosen>cap+1e-10:chosen=round(chosen-.0001,4)
+    if chosen<.005:return reject('entry-fade-in-cannot-finish-before-word')
+    return {**acoustic,'accepted':True,'reason':'accepted','method':PREROLL_METHOD,
+        'parameters':dict(PREROLL_PARAMETERS),'asrClear':True,
+        'legacy300msAsrClear':acoustic['asrClear'],'allConfidenceASRVeto':True,
+        'asrCoverageStart':point-.3,'asrCoverageEnd':point+.35,
+        'asrCoverageComplete':True,'preVocalP95Dbfs':pre_p95,
+        'risingThresholdDbfs':threshold,'risingVoiceFrame':rising,
+        'risingVoiceTime':rising_time,'risingVoiceDelaySeconds':delay,
+        'riseObservedWithin350ms':rising is not None,
+        'nextObservedWord':list(upcoming[0]) if upcoming else None,
+        'fadeInCapSeconds':cap,'fadeInSeconds':chosen,
+        'verifiedWordBoundary':False,'naturalSilenceClaimed':False,
+        'lowSpeechProbabilityUsed':False}
+
+
 def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(), rejected=(), existing_evidence=()):
     result = copy.deepcopy(item); row = result.get('row')
     if not row or item.get('md5') != song.get('md5'):
@@ -295,6 +370,11 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
                                 if longer['accepted']:onset=longer
                             checked=onset
                         elif t==original:attempts.append(onset)
+                        if not checked['accepted']:
+                            preroll=_check_entry_preroll(vector,t,words,gain_db(song),song['md5'],prepared[id(vector)],
+                                coverage=coverage,fade_in=row.get('fadeIn',.08))
+                            if preroll['accepted']:checked=preroll
+                            elif t==original:attempts.append(preroll)
                     if checked['accepted']:
                         selected,chosen_vector = checked,vector
                         return True
@@ -311,7 +391,7 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
     else:
         t = selected['sourceStart']; changed = abs(t-original) > .0001
         previous_fade=row.get('fadeIn',0)
-        if selected['method']==ONSET_METHOD:row['fadeIn']=selected['fadeInSeconds']
+        if selected['method'] in (ONSET_METHOD,PREROLL_METHOD):row['fadeIn']=selected['fadeInSeconds']
         fade_changed=abs(row.get('fadeIn',0)-previous_fade)>1e-7
         result.pop('entryReviewError',None)
         if changed or fade_changed:
@@ -359,9 +439,10 @@ def selection_error(item, song, *, owner=(), evidence_folder):
     if proof.get('method')=='corroborated-instrumental-entry':
         from .fixed_set_instrumental_entry import selection_error as instrumental_error
         return instrumental_error(item,song,owner=owner,evidence_folder=evidence_folder)
-    if proof.get('method') not in ('vocal-free-entry-breath',ONSET_METHOD):
+    if proof.get('method') not in ('vocal-free-entry-breath',ONSET_METHOD,PREROLL_METHOD):
         return 'entry-proof-method'
-    expected_parameters=ONSET_PARAMETERS if proof.get('method')==ONSET_METHOD else PARAMETERS
+    expected_parameters=(ONSET_PARAMETERS if proof.get('method')==ONSET_METHOD else
+        PREROLL_PARAMETERS if proof.get('method')==PREROLL_METHOD else PARAMETERS)
     if proof.get('parameters')!=expected_parameters:return 'entry-proof-method'
     key = proof.get('cacheKey')
     if not isinstance(key,str) or not re.fullmatch('[a-f0-9]{64}',key):return 'entry-proof-key'
@@ -369,8 +450,9 @@ def selection_error(item, song, *, owner=(), evidence_folder):
         raw = read_json(Path(evidence_folder)/(key+'.json'))
     except (OSError,ValueError,RuntimeError):return 'entry-proof-unavailable'
     if raw.get('cacheKey') != key:return 'entry-proof-key'
-    if proof['method']==ONSET_METHOD:
-        check=check_entry_onset(raw,row['start'],item.get('observedWords',[]),gain_db(song),song['md5'],
+    if proof['method'] in (ONSET_METHOD,PREROLL_METHOD):
+        validator=check_entry_onset if proof['method']==ONSET_METHOD else check_entry_preroll
+        check=validator(raw,row['start'],item.get('observedWords',[]),gain_db(song),song['md5'],
             coverage=item.get('observedCoverage',[]),fade_in=row.get('fadeIn'))
         if not check['accepted']:return 'entry-proof-'+check['reason']
         expected={**check,'cacheKey':key}
