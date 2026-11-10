@@ -7,7 +7,9 @@ cut. Flat low model output is explicitly an approximate observation, never a
 claim that a word boundary or absence of singing has been proved.
 
 Version 1 remains the default with a .01 MIX cap. Explicit version 2 uses .05
-with every other condition unchanged. Its small owner-label calibration is
+with every other condition unchanged. Explicit version 3 shortens only the
+UVR/MIX body before the point from .15 to .1 seconds; the earlier rise context
+remains -.15 to -.02 seconds. Its small owner-label calibration is
 descriptive evidence, not a guarantee about future boundaries or singing.
 """
 import hashlib
@@ -43,16 +45,20 @@ PARAMETERS = {
 }
 VERSION_V2 = 2
 PARAMETERS_V2 = {**PARAMETERS, 'mixSpeechMax': .05}
+VERSION_V3 = 3
+PARAMETERS_V3 = {**PARAMETERS_V2, 'beforeSeconds': .1}
 
 
 def _policy(version):
-    """Only two named contracts exist; no caller-supplied runtime threshold."""
+    """Only three named contracts exist; no caller-supplied runtime threshold."""
     if type(version) is not int:
         return None
     if version == VERSION:
         return PARAMETERS
     if version == VERSION_V2:
         return PARAMETERS_V2
+    if version == VERSION_V3:
+        return PARAMETERS_V3
     return None
 
 
@@ -150,6 +156,12 @@ def check_entry_v2(vocal, mix, point, song, words, coverage, *, rejected=(), fad
         rejected=rejected, fade_in=fade_in, version=VERSION_V2)
 
 
+def check_entry_v3(vocal, mix, point, song, words, coverage, *, rejected=(), fade_in=.05):
+    """Explicit version 3: 100 ms prebody, otherwise exact version 2 guards."""
+    return _check_entry(vocal, mix, point, song, words, coverage,
+        rejected=rejected, fade_in=fade_in, version=VERSION_V3)
+
+
 def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in, version):
     """Reconstruct both raw proofs; do not infer text, erase words or run audio."""
     reject = lambda reason: {'accepted': False, 'method': METHOD, 'reason': reason}
@@ -177,7 +189,7 @@ def _check_entry(vocal, mix, point, song, words, coverage, *, rejected, fade_in,
     if (point-.3 < max(song['lo'], offset+.25)-1e-7 or
             point+.35 > min(song['hi'], offset+duration-.25)+1e-7):
         return reject('incomplete-vocal-context')
-    a, b = point-.15, point+.05
+    a, b = point-parameters['beforeSeconds'], point+parameters['afterSeconds']
 
     def region(lo, hi):
         first = math.floor((lo-offset)/hop+1e-8)
