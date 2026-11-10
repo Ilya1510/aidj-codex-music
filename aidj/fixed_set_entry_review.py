@@ -439,6 +439,9 @@ def selection_error(item, song, *, owner=(), evidence_folder):
     if proof.get('method')=='corroborated-instrumental-entry':
         from .fixed_set_instrumental_entry import selection_error as instrumental_error
         return instrumental_error(item,song,owner=owner,evidence_folder=evidence_folder)
+    if proof.get('method')=='low-voice-corroborated-entry':
+        from .fixed_set_soft_entry import selection_error as soft_error
+        return soft_error(item,song,owner=owner,evidence_folder=evidence_folder)
     if proof.get('method') not in ('vocal-free-entry-breath',ONSET_METHOD,PREROLL_METHOD):
         return 'entry-proof-method'
     expected_parameters=(ONSET_PARAMETERS if proof.get('method')==ONSET_METHOD else
