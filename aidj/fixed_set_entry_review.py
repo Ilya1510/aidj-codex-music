@@ -55,12 +55,15 @@ def exemption(point, song, owner=()):
 
 
 def check_entry(vocal, point, words, playback_gain_db, source_md5, *, coverage=()):
+    return _check_entry(vocal,point,words,playback_gain_db,source_md5,_vectors(vocal),coverage=coverage)
+
+
+def _check_entry(vocal, point, words, playback_gain_db, source_md5, prepared, *, coverage=()):
     reject = lambda reason: {'accepted': False, 'reason': reason}
     if not finite(point) or not finite(playback_gain_db):
         return reject('invalid-entry-point')
     if not isinstance(source_md5,str) or not re.fullmatch('[a-f0-9]{32}',source_md5) or vocal.get('md5') != source_md5:
         return reject('entry-source-mismatch')
-    prepared = _vectors(vocal)
     if prepared is None:
         return reject('invalid-entry-vocal-evidence')
     offset, hop, duration, values = prepared
@@ -110,12 +113,16 @@ def check_entry_onset(vocal,point,words,playback_gain_db,source_md5,*,coverage=(
     This is not a phoneme/word detector: all-confidence ASR crossings veto it.
     Preroll also leaves time for the player's50ms volume tick before the attack.
     """
+    return _check_entry_onset(vocal,point,words,playback_gain_db,source_md5,_vectors(vocal),
+                              coverage=coverage,fade_in=fade_in)
+
+
+def _check_entry_onset(vocal,point,words,playback_gain_db,source_md5,prepared,*,coverage=(),fade_in=.08):
     reject=lambda reason:{'accepted':False,'reason':reason,'method':ONSET_METHOD}
     if not finite(point) or not finite(playback_gain_db) or not finite(fade_in) or fade_in<.005:
         return reject('invalid-entry-point')
     if not isinstance(source_md5,str) or not re.fullmatch('[a-f0-9]{32}',source_md5) or vocal.get('md5')!=source_md5:
         return reject('entry-source-mismatch')
-    prepared=_vectors(vocal)
     if prepared is None:return reject('invalid-entry-vocal-evidence')
     offset,hop,duration,values=prepared
     a,b=point-.3,point+.35
@@ -213,13 +220,16 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
         points.extend(round(original+i*.01,4) for i in sorted(range(-200,201),key=lambda n:(abs(n),n)) if i)
         def search(vectors):
             nonlocal selected,chosen_vector
+            # Validate each immutable numerical excerpt once per search. Final
+            # assembly still calls the public checks against freshly read data.
+            prepared={id(v):_vectors(v) for v in vectors}
             for t in points:
                 if not valid(t):continue
                 for vector in vectors:
-                    checked = check_entry(vector,t,words,gain_db(song),song['md5'],coverage=coverage)
+                    checked = _check_entry(vector,t,words,gain_db(song),song['md5'],prepared[id(vector)],coverage=coverage)
                     if t == original and checked['reason'] != 'incomplete-entry-context':attempts.append(checked)
                     if not checked['accepted']:
-                        onset=check_entry_onset(vector,t,words,gain_db(song),song['md5'],
+                        onset=_check_entry_onset(vector,t,words,gain_db(song),song['md5'],prepared[id(vector)],
                             coverage=coverage,fade_in=row.get('fadeIn',.08))
                         if onset['accepted']:
                             # When possible keep120ms of measured preroll, not
@@ -227,7 +237,7 @@ def review_checkpoint(item, song, words, probe_window, *, coverage=(), owner=(),
                             delay=min(onset['risingVoiceDelaySeconds'],onset['nextWordDelaySeconds'])
                             refined=round(t-max(0.,.12-delay),4)
                             if refined!=t and abs(refined-original)<=2 and valid(refined):
-                                longer=check_entry_onset(vector,refined,words,gain_db(song),song['md5'],
+                                longer=_check_entry_onset(vector,refined,words,gain_db(song),song['md5'],prepared[id(vector)],
                                     coverage=coverage,fade_in=row.get('fadeIn',.08))
                                 if longer['accepted']:onset=longer
                             checked=onset

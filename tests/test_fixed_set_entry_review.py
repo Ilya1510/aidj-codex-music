@@ -108,6 +108,19 @@ def test_search_never_escapes_allowed_range_duration_or_owner_negative_veto():
     assert result['status']=='needs-review'
 
 
+def test_candidate_search_validates_each_raw_excerpt_once_but_final_gate_revalidates(tmp_path,monkeypatch):
+    item,song=fixtures();v=vectors(voice=.3);calls=[];original=review._vectors
+    def counted(raw):calls.append(raw);return original(raw)
+    monkeypatch.setattr(review,'_vectors',counted)
+    result=review.review_checkpoint(item,song,[],lambda a,b:v,coverage=COVERAGE,existing_evidence=[v])
+    assert result['entryReviewStatus']=='needs-review'
+    assert len(calls)==3  # Initial cache validation, then cached/new searches.
+    good=vectors();result=review.review_checkpoint(item,song,[],lambda a,b:good,coverage=COVERAGE)
+    (tmp_path/('a'*64+'.json')).write_text(json.dumps(good));before=len(calls)
+    assert review.selection_error(result,song,evidence_folder=tmp_path) is None
+    assert len(calls)==before+1
+
+
 def test_final_gate_reloads_raw_vectors_and_rejects_stale_or_forged_verdict(tmp_path):
     item,song=fixtures();v=vectors()
     result=review.review_checkpoint(item,song,[],lambda a,b:v,coverage=COVERAGE)

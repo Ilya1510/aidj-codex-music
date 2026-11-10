@@ -22,7 +22,7 @@ from dataclasses import replace
 from .config import Settings, atomic_json
 from .fixed_set_repair import covered, entries_for, selection_error as exit_error, word_clear
 from .fixed_set_resolve import read_json, restore_evidence
-from .fixed_set_entry_review import check_entry, check_entry_onset, exemption, ONSET_METHOD
+from .fixed_set_entry_review import check_entry, check_entry_onset, _check_entry, _check_entry_onset, exemption, ONSET_METHOD
 from .fixed_set_vocal_review import (CachedProbe, MODEL_SHA256, SAMPLE_RATE, VERSION as CACHE_VERSION,
     _point, _vectors, check_endpoint, finite, gain_db, quantile, source_timing)
 from .vocal_probe import verify_model
@@ -260,10 +260,10 @@ def scanned_entries(song, evidence, values, owner=(), rejected=()):
             # this cheap filter is not its word/voice proof.
             if not clear and not any(.1-1e-7 <= t-at <= .35+1e-7 for t in confident_starts):
                 continue
-            checked = (check_entry(vocal, at, words, gain, song['md5'],
+            checked = (_check_entry(vocal, at, words, gain, song['md5'], prepared,
                                    coverage=evidence.get('coverage', [])) if clear else {'accepted': False})
             if not checked['accepted']:
-                checked = check_entry_onset(vocal, at, evidence.get('words', []), gain, song['md5'],
+                checked = _check_entry_onset(vocal, at, evidence.get('words', []), gain, song['md5'], prepared,
                     coverage=evidence.get('coverage', []), fade_in=.08)
                 if checked['accepted']:
                     # As in the mandatory entry reviewer, prefer120ms preroll
@@ -273,8 +273,8 @@ def scanned_entries(song, evidence, values, owner=(), rejected=()):
                     refined = round(at-max(0., .12-delay), 4)
                     if (refined != at and first <= refined <= last and
                             not any(abs(refined-t) < .35 for t in rejected)):
-                        longer = check_entry_onset(vocal, refined, evidence.get('words', []), gain,
-                            song['md5'], coverage=evidence.get('coverage', []), fade_in=.08)
+                        longer = _check_entry_onset(vocal, refined, evidence.get('words', []), gain,
+                            song['md5'], prepared, coverage=evidence.get('coverage', []), fade_in=.08)
                         if longer['accepted']:
                             checked = longer
             if checked['accepted']:
