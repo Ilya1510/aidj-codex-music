@@ -13,6 +13,13 @@ final class DjPlan {
         if(start<lower(t)-.001||end>upper(t)+.001||span<.2||a<0||a>limit||b<0||b>limit||overlap<0||overlap>limit||rate<.97||rate>1.03||!("clean-cut".equals(kind)||"crossfade".equals(kind))||"clean-cut".equals(kind)&&overlap!=0)return null;
         return c;
     }
+    static boolean endsAtSourceEnd(JSONObject source,JSONObject entry){
+        JSONObject c=fixed(source,entry);if(c==null||!"clean-cut".equals(c.optString("transitionKind"))||c.optDouble("transitionSeconds")!=0)return false;
+        if(!(source.opt("duration") instanceof Number))return false;
+        double duration=source.optDouble("duration");
+        // A hand-trimmed end remains an internal cut even if very close to EOF.
+        return Double.isFinite(duration)&&duration>0&&upper(source)>=duration&&Math.abs(c.optDouble("end")-duration)<=.001;
+    }
     static boolean timed(JSONObject track,JSONObject entry){
         if(track==null||!(track.opt("duration") instanceof Number)||entry==null||!entry.optBoolean("remix")||entry.optBoolean("djFull"))return false;
         JSONObject c=entry.optJSONObject("dj");if(c==null||!Boolean.TRUE.equals(c.opt("timedFallback"))||!"timed".equals(c.optString("quality"))||!Boolean.TRUE.equals(c.opt("needsReview"))||!Boolean.FALSE.equals(c.opt("entryVerified"))||!Boolean.FALSE.equals(c.opt("wordGuarded"))||c.optBoolean("acoustic"))return false;

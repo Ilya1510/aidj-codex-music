@@ -145,7 +145,8 @@ public final class PlaybackService extends Service {
         if(!ready)return;
         if(waitingNext){if(incomingReady){promote();play();}else{if(incoming==null){failedIncoming="";preload();}updateSession();}return;}
         if(rangeSeeking)return;
-        if(position()<PlaybackRange.start(current(),duration())-100||position()>=PlaybackRange.end(current(),duration())-15){seek(0);return;}
+        long restartAt=DjPlan.endsAtSourceEnd(source(entry()),entry())?duration():PlaybackRange.end(current(),duration())-15;
+        if(position()<PlaybackRange.start(current(),duration())-100||position()>=restartAt){seek(0);return;}
         if(audio.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){wantPlay=false;error="Не удалось получить аудиофокус.";updateSession();return;}
         try{applyVolume();player.start();if(mixing&&incomingReady)incoming.start();updateSession();}catch(Exception e){wantPlay=false;error="Не удалось включить песню.";updateSession();}
     }
@@ -267,6 +268,7 @@ public final class PlaybackService extends Service {
     private void tick(){
         if(!wantPlay){applyVolume();return;}
         if(waitingNext){if(incomingReady&&wantPlay){promote();play();}return;}
+        boolean sourceEnding=dj()&&DjPlan.endsAtSourceEnd(source(entry()),entry());
         if(dj()&&isPlaying()){
             long end=PlaybackRange.end(current(),duration());
             if(audition()&&entry().optBoolean("auditionIntro")&&position()>=PlaybackRange.start(current(),duration())+(long)(10000*speed)&&end-position()>15000*speed){
@@ -277,12 +279,14 @@ public final class PlaybackService extends Service {
             if(!mixing&&incomingReady&&remaining>30&&remaining<=window*speed){
                 try{mixStart=position();mixSpan=Math.max(1,remaining);mixFade=Math.min(mixSpan,DjPlan.safeFade(source(entry()),entry()));mixOutStart=lastGain<0?.70f:Math.max(0,lastGain/duckGain);incoming.setVolume(0,0);incoming.start();mixing=true;lastGain=-1;}catch(Exception ignored){failedIncoming=incomingSpec;cancelIncoming();}
             }
-            if(mixing&&remaining<=15){promote();return;}
-            if(!mixing&&remaining<=15&&nextEntry()!=null){
+            if(!sourceEnding&&mixing&&remaining<=15){promote();return;}
+            if(!sourceEnding&&!mixing&&remaining<=15&&nextEntry()!=null){
                 if(incomingReady){promote();if(wantPlay)play();}else waitForNext();return;
             }
         }
-        applyVolume();if(isPlaying()&&position()>=PlaybackRange.end(current(),duration())-15)advance(1,true);
+        // A stored-file ending completes through MediaPlayer.OnCompletion.
+        // Its final recorded samples must survive the50ms timer/15ms margin.
+        applyVolume();if(!sourceEnding&&isPlaying()&&position()>=PlaybackRange.end(current(),duration())-15)advance(1,true);
     }
     private void promote(){promote(false);}
     private void promote(boolean skipped){

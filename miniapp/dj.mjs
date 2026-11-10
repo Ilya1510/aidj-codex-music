@@ -64,6 +64,11 @@ export function fixedCue(track,entry){
   if(c.start<lo-.001||c.end>hi+.001||span<.2||c.fadeIn<0||c.fadeOut<0||c.fadeIn>Math.min(8,span/2)||c.fadeOut>Math.min(8,span/2)||c.transitionSeconds<0||c.transitionSeconds>Math.min(8,span/2)||c.rate<.97||c.rate>1.03||!['clean-cut','crossfade'].includes(c.transitionKind)||c.transitionKind==='clean-cut'&&c.transitionSeconds!==0)return null;
   return c;
 }
+export function endsAtSourceEnd(track,entry){
+  const cue=fixedCue(track,entry);
+  return !!(cue&&cue.transitionKind==='clean-cut'&&cue.transitionSeconds===0&&Number.isFinite(track.duration)&&track.duration>0&&
+    (!Number.isFinite(track.rangeEnd)||track.rangeEnd>=track.duration)&&Math.abs(cue.end-track.duration)<=.001);
+}
 export function fixedSetEntries(set,tracks){
   if(!set||typeof set.id!=='string'||!Array.isArray(set.tracks)||!set.tracks.length)throw new Error('Этот сет ещё не готов.');
   const entries=set.tracks.map((item,i)=>({id:'fixed-'+set.id+'-'+i+'-'+crypto.randomUUID(),trackId:item.trackId,ordinal:i,fixed:{...(item.md5?{sourceMd5:item.md5}:{}),start:item.start,end:item.end,fadeIn:item.fadeIn,fadeOut:item.fadeOut,transitionSeconds:item.transitionSeconds,transitionKind:item.transitionKind,rate:item.rate}}));

@@ -26,7 +26,7 @@ def main():
     with sync_playwright() as p:
         for native in (True,False):
             browser=launch(p);ctx=browser.new_context(viewport={'width':390,'height':844},service_workers='block');page=ctx.new_page();page.set_default_timeout(8000);errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
-            if native:ctx.add_init_script(BRIDGE.replace('version:()=>8','version:()=>37'))
+            if native:ctx.add_init_script(BRIDGE.replace('version:()=>8','version:()=>38'))
             page.route('**/api/**',api)
             try:
                 page.goto(os.environ.get('AIDJ_QA_ORIGIN','http://127.0.0.1:18787'),wait_until='networkidle');page.locator('.playlist-card').click();page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
@@ -67,6 +67,30 @@ def main():
                         assert page.evaluate('document.querySelector("audio").paused&&document.querySelector("audio").volume===0')
                         page.locator('#mini-play').click();page.wait_for_timeout(100)
                         assert page.evaluate('document.querySelector("audio").paused&&document.querySelector("audio").volume===0')
+                    # Metadata can be50ms shorter than the actual stored WAV.
+                    # A full-file ending waits for real ended, preserving those
+                    # final samples and resume-in-tail without rewinding.
+                    catalog.clear();catalog.update(copy.deepcopy(baseline))
+                    for track in catalog['tracks']:track['duration']=7.95
+                    for cue in catalog['djSets'][0]['tracks']:cue.update(end=7.95,fadeOut=0.)
+                    page.evaluate("window.dispatchEvent(new Event('online'))")
+                    page.wait_for_timeout(100)
+                    page.locator('.bottom-nav [data-view="home"]').click();page.locator('.playlist-card').click();page.get_by_role('button',name='Слушать DJ 1',exact=True).click()
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused')
+                    page.locator('#mini-play').click()
+                    page.evaluate('''()=>{const a=document.querySelector('audio');window.__fileEndEvents=[];a.addEventListener('ended',()=>window.__fileEndEvents.push({time:a.currentTime,ended:a.ended}));a.currentTime=7.96;a.playbackRate=.1;a.dispatchEvent(new Event('timeupdate'));}''')
+                    page.wait_for_timeout(100)
+                    assert page.locator('#mini-title').inner_text()=='Fixed song 2'
+                    assert page.evaluate('document.querySelector("audio").paused&&document.querySelector("audio").currentTime>7.95')
+                    page.locator('#mini-play').click()
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 2"&&!document.querySelector("audio").paused&&document.querySelector("audio").currentTime>=7.97')
+                    assert page.evaluate('document.querySelector("audio").volume')>.69
+                    page.wait_for_function('()=>document.querySelector("#mini-title").textContent==="Fixed song 0"')
+                    ended=page.evaluate('window.__fileEndEvents');assert len(ended)==1 and ended[0]['ended'] and ended[0]['time']>=7.999
+                    page.evaluate('document.querySelector("audio").dispatchEvent(new Event("ended"))')
+                    page.wait_for_timeout(100)
+                    assert page.locator('#mini-title').inner_text()=='Fixed song 0'
+                    page.locator('#mini-play').click()
                 assert not errors,errors
             except Exception:
                 print('FIXED_SET_FAILED',native,errors,page.locator('main').inner_text()[:1400],flush=True);raise

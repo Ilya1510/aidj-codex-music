@@ -1,4 +1,4 @@
-import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues as computeRemixCues,remixAnchors as computeRemixAnchors,remixAcousticAnchors as computeRemixAcousticAnchors,planRemix,packRemixEntries,timedCue,fixedCue,fixedSetEntries} from './dj.mjs';
+import {modeName,djCue,planDj,playbackTrack,djProgress,remixCues as computeRemixCues,remixAnchors as computeRemixAnchors,remixAcousticAnchors as computeRemixAcousticAnchors,planRemix,packRemixEntries,timedCue,fixedCue,fixedSetEntries,endsAtSourceEnd} from './dj.mjs';
 import {Queue} from './player.mjs';
 import {sortablePeople,sortableQueue} from './reorder.mjs';
 import {PlaylistChanges} from './playlist-changes.mjs';
@@ -78,7 +78,7 @@ let discoveryTimer=null,discoveryReading=false,discoveryRevision=0;
 let libraryRevision='',libraryRefreshing=false;
 let rangeOverrides={},rangeSyncing=false,rangeAdvancing=false;
 let playbackPreferences=normalisePlayback(null),playlistPlayback={},latestRelease=null,lastUpdateCheck=0;
-const clientVersion=native?.version?.()||37;
+const clientVersion=native?.version?.()||38;
 const djSupported=!native||clientVersion>=17;
 const preferencesFor=id=>normalisePlayback(id!=null?playlistPlayback[id]||(id===900000021?{...playbackPreferences,mode:'remix'}:playbackPreferences):playbackPreferences);
 const activePreferences=()=>queue.fixedSet?{...preferencesFor(queue.playlistId),mode:'fixed'}:preferencesFor(queue.playlistId);
@@ -187,7 +187,7 @@ async function updatePlayerRange(){
   if(!browserFixedReady())return;
   const track=queue.current&&tracks.get(queue.current.trackId);if(!track)return;
   if(native&&nativeReady){nativeRevision=Math.max(Date.now(),nativeRevision+1);await command('queue',{queue:nativeQueue()});}
-  else if(!native){const part=segment(track);if(audio.currentTime<part.start||audio.currentTime>=part.end)audio.currentTime=part.start;}
+  else if(!native){const part=segment(track),sourceEnding=queue.fixedSet&&endsAtSourceEnd(track,queue.current);if(audio.currentTime<part.start||(!sourceEnding&&audio.currentTime>=part.end))audio.currentTime=part.start;}
 }
 async function flushRanges(){
   if(rangeSyncing||!loggedIn||!canEdit())return;rangeSyncing=true;
@@ -533,7 +533,7 @@ async function loadCurrent(play,replaceQueue=false) {
   if(queue.fixedSet&&entry&&!fixedCue(original,entry)){browserFixedReady();audio.pause();throw new Error('Границы песни изменились. Обнови библиотеку и запусти DJ 1 заново.');}
   if(!track){audio.pause();audio.removeAttribute('src');audio.load();loadedEntry=null;renderMini();return;}
   if(native){nativeRevision=Math.max(Date.now(),nativeRevision+1);lastNativeQueue=JSON.stringify(playerSnapshot(true));await command(play?'play':'queue',{queue:nativeQueue(),replaceQueue});loadedEntry=queue.currentId;renderMini();if($('full-player').open)renderFull();return;}
-  if(loadedEntry===entry.id&&audio.src){const part=segment(track);if(audio.currentTime<part.start||audio.currentTime>=part.end)audio.currentTime=part.start;applyBrowserVolume();if(play)await audio.play();return;}
+  if(loadedEntry===entry.id&&audio.src){const part=segment(track),atSourceEnd=queue.fixedSet&&endsAtSourceEnd(original,entry);if(audio.currentTime<part.start||(atSourceEnd?audio.ended:audio.currentTime>=part.end))audio.currentTime=part.start;applyBrowserVolume();if(play)await audio.play();return;}
   if(entry.id!==restoreEntry)restoredTime=0;
   audio.pause();
   const content=await storage.blob(track.md5);
@@ -1130,7 +1130,8 @@ function checkWebRange(){
   if(!browserFixedReady())return;
   if(native||audio.paused||audio.seeking||audio.readyState<1||!queue.current||rangeAdvancing)return;
   const part=segment(playingTrack()||tracks.get(queue.current.trackId));
-  if(audio.currentTime>=part.end-.025){rangeAdvancing=true;next(true).catch(showError).finally(()=>rangeAdvancing=false);}
+  const sourceEnding=queue.fixedSet&&endsAtSourceEnd(tracks.get(queue.current.trackId),queue.current);
+  if(!sourceEnding&&audio.currentTime>=part.end-.025){rangeAdvancing=true;next(true).catch(showError).finally(()=>rangeAdvancing=false);}
   else if(audio.currentTime<part.start-.05)audio.currentTime=part.start;
 }
 audio.addEventListener('ended',()=>{if(!browserFixedReady()||rangeAdvancing||!native&&!audio.ended)return;rangeAdvancing=true;next(true).catch(showError).finally(()=>rangeAdvancing=false);});
@@ -1138,7 +1139,7 @@ audio.addEventListener('timeupdate',()=>{
   checkWebRange();
   progress();if(Date.now()-lastPersist>5000){lastPersist=Date.now();persist();}
 });
-audio.addEventListener('loadedmetadata',()=>{if(!browserFixedReady())return;if(restoredTime){audio.currentTime=Math.min(restoredTime,audio.duration||restoredTime);restoredTime=0;}if(!native&&queue.current){const part=segment(playingTrack()||tracks.get(queue.current.trackId));if(audio.currentTime<part.start||audio.currentTime>=part.end)audio.currentTime=part.start;}applyBrowserVolume();progress();});
+audio.addEventListener('loadedmetadata',()=>{if(!browserFixedReady())return;if(restoredTime){audio.currentTime=Math.min(restoredTime,audio.duration||restoredTime);restoredTime=0;}if(!native&&queue.current){const part=segment(playingTrack()||tracks.get(queue.current.trackId)),sourceEnding=queue.fixedSet&&endsAtSourceEnd(tracks.get(queue.current.trackId),queue.current);if(audio.currentTime<part.start||(!sourceEnding&&audio.currentTime>=part.end))audio.currentTime=part.start;}applyBrowserVolume();progress();});
 if(!native)setInterval(()=>{checkWebRange();if(!audio.paused)applyBrowserVolume();},50);
 audio.addEventListener('error',()=>{loadedEntry=null;toast(online?'Не удалось воспроизвести песню. Попробуй ещё раз.':'Нет сети. Выбери скачанную песню.');});
 window.addEventListener('online',()=>{online=true;serverUnavailable=false;connection();(async()=>{await flushVotes();await refresh(true);})().catch(showError);});window.addEventListener('offline',()=>{if(!native)online=false;connection();});
